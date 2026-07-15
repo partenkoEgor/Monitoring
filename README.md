@@ -7,6 +7,7 @@ Tampermonkey-скрипты с автообновлением.
 Открыть в браузере (с установленным Tampermonkey) и подтвердить установку:
 
 - [TH Management — Bulk Approve Tickets (225)](https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/scripts/th-bulk-approve.user.js)
+- [Auto-close SweetAlert2 success popups](https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/scripts/th-autoclose-swal.user.js)
 
 ## Обновление скриптов
 
