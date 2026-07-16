@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      1.8
+// @version      1.9
 // @description  Открывает каждый видимый тикет, выставляет статус "225 Approved by agent" и жмёт Apply. Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -127,9 +127,13 @@
       (info.hasCancel ? ' — есть кнопка отмены, НЕ закрываю автоматически.' : '')
     );
 
-    if (!info.hasCancel && info.confirmBtn) {
+    if (!info.hasCancel && info.confirmBtn && info.icon !== 'error') {
       // Единственный доступный путь — подтвердить/закрыть, это безопасно
-      // (сайт не предлагает выбора, значит нет риска подтвердить не то действие)
+      // (сайт не предлагает выбора, значит нет риска подтвердить не то действие).
+      // Иконку "error" не трогаем: это не запрос решения, а сообщение об
+      // ошибке (например, "Amount on receipt field must be filled in") —
+      // его нужно оставить на экране, чтобы пользователь успел прочитать,
+      // а не закрывать за него автоматически.
       info.confirmBtn.click();
     }
     // Если есть кнопка отмены — ничего не жмём, оставляем окно для ручного решения
