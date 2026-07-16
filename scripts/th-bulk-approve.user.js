@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      1.7
+// @version      1.8
 // @description  Открывает каждый видимый тикет, выставляет статус "225 Approved by agent" и жмёт Apply. Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -104,6 +104,10 @@
 
     if (info.isKnownSuccessDismiss) {
       info.confirmBtn.click();
+      console.log(
+        `[BulkApprove] Закрыл попап как безопасный (тикет ${currentTicketId || '—'}): ` +
+        `title "${info.title}", содержимое "${info.content}"`
+      );
       return;
     }
 

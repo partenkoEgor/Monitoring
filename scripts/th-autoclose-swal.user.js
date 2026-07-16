@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Auto-close SweetAlert2 success popups
 // @namespace    th-management-autoclose
-// @version      1.6
+// @version      1.7
 // @description  Закрывает только swal2-окна: иконка успеха + текст "OK!" в содержимом + кнопка "OK", без кнопки отмены
 // @match        https://th-managment.com/en/admin/backoffice/*
 // @match        https://managment.io/en/admin/backoffice/*
@@ -11,6 +11,12 @@
 // @updateURL    https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/scripts/th-autoclose-swal.user.js
 // @downloadURL  https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/scripts/th-autoclose-swal.user.js
 // ==/UserScript==
+
+// Изменения в 1.7:
+// - Лог автозакрытия теперь включает title попапа, а не только тело и кнопку.
+//   Это нужно для диагностики: если сайт когда-либо покажет реальный текст
+//   ошибки в title при том же наборе (иконка success + тело "OK!" + кнопка
+//   "OK" + без отмены), это будет видно в консоли, а не потеряется молча.
 
 (function () {
     'use strict';
@@ -32,6 +38,9 @@
         const cancelBtn = popup.querySelector('.swal2-cancel');
         const hasCancel = cancelBtn && cancelBtn.style.display !== 'none';
 
+        const titleEl = popup.querySelector('.swal2-title');
+        const titleText = titleEl ? titleEl.textContent.trim() : '';
+
         const contentEl = popup.querySelector('.swal2-html-container');
         const contentText = contentEl ? normalize(contentEl.textContent.trim()) : '';
         const hasOkContent = /^ok!?$/i.test(contentText);
@@ -42,7 +51,12 @@
 
         if (isSuccess && !hasCancel && hasOkContent && hasOkButton) {
             confirmBtn.click();
-            console.log('[AutoClose] Закрыл попап: содержимое "%s", кнопка "%s"', contentText, confirmText);
+            console.log(
+                '[AutoClose] Закрыл попап: title "%s", содержимое "%s", кнопка "%s"',
+                titleText,
+                contentText,
+                confirmText
+            );
         }
     });
 
