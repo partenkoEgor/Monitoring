@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      1.9
-// @description  Открывает каждый видимый тикет, выставляет статус "225 Approved by agent" и жмёт Apply. Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
+// @version      2.0
+// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)". Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -18,21 +18,50 @@
   // НАСТРОЙКИ — при необходимости поправь под реальную разметку
   // ------------------------------------------------------------------
   const CONFIG = {
-    // Текст, который должен встречаться в опции статуса (нечувствительно к регистру)
-    statusMatch: (text) => {
-      const t = text.trim().toLowerCase();
-      return t.includes('225') && t.includes('approved by agent');
-    },
     // Пауза между шагами (мс) — если Vue не успевает среагировать, увеличь
     stepDelay: 250,
     // Максимальное время ожидания появления/исчезновения элемента (мс)
     waitTimeout: 8000,
     // Пауза между обработкой тикетов
     betweenTicketsDelay: 2000,
-    // Обрабатывать тикет только если его External Status равен этому значению
-    // (без учёта регистра и лишних пробелов). Остальные тикеты пропускаются.
-    requiredExternalStatus: 'Approved (M)',
   };
+
+  // ------------------------------------------------------------------
+  // WORKFLOWS — каждый описывает свой вариант массовой обработки:
+  // какие тикеты брать (по External Status) и в какой статус их переводить.
+  // Кнопка на экране создаётся по одной на каждый workflow.
+  // ------------------------------------------------------------------
+  const WORKFLOWS = [
+    {
+      id: '225',
+      buttonLabel: 'Bulk Approve (225)',
+      buttonColor: '#2ABFCF',
+      // Обрабатывать тикет только если его External Status равен этому значению
+      // (без учёта регистра и лишних пробелов). Остальные тикеты пропускаются.
+      requiredExternalStatus: 'Approved (M)',
+      // Текст, который печатается в поле поиска статуса (как это делает человек)
+      searchTerm: '225',
+      // Текст, который должен встречаться в опции статуса (нечувствительно к регистру)
+      statusMatch: (text) => {
+        const t = text.trim().toLowerCase();
+        return t.includes('225') && t.includes('approved by agent');
+      },
+      // Только для текста в диалогах подтверждения/отчёта
+      targetStatusLabel: '225 Approved by agent',
+    },
+    {
+      id: '239',
+      buttonLabel: 'Bulk Response (239)',
+      buttonColor: '#8E6FCE',
+      requiredExternalStatus: 'The money has not been sent, cancel it (M)',
+      searchTerm: '239',
+      statusMatch: (text) => {
+        const t = text.trim().toLowerCase();
+        return t.includes('239') && t.includes('response to user');
+      },
+      targetStatusLabel: '239 Response to user (M)',
+    },
+  ];
 
   // Общее состояние выполнения (используется кнопкой СТОП)
   const state = {
@@ -313,40 +342,40 @@
   // ------------------------------------------------------------------
   // Основная логика: обработка одного тикета
   // ------------------------------------------------------------------
-  async function processTicket(row, index, total) {
+  async function processTicket(row, index, total, workflow) {
     const ticketId = getTicketIdFromRow(row);
     const transactionId = getTransactionIdFromRow(row);
     currentTicketId = ticketId; // чтобы пойманные попапы привязывались к этому тикету
     currentTransactionId = transactionId;
     try {
-      return await processTicketInner(row, ticketId, index, total);
+      return await processTicketInner(row, ticketId, index, total, workflow);
     } finally {
       currentTicketId = null;
       currentTransactionId = null;
     }
   }
 
-  async function processTicketInner(row, ticketId, index, total) {
+  async function processTicketInner(row, ticketId, index, total, workflow) {
     const externalStatus = getExternalStatusFromRow(row);
 
-    const normalizedRequired = CONFIG.requiredExternalStatus.trim().toLowerCase();
+    const normalizedRequired = workflow.requiredExternalStatus.trim().toLowerCase();
     const normalizedActual = externalStatus.trim().toLowerCase();
 
     if (normalizedActual !== normalizedRequired) {
       console.log(
-        `[BulkApprove] (${index + 1}/${total}) Тикет ${ticketId}: External Status = "${externalStatus}" ` +
-        `(нужно "${CONFIG.requiredExternalStatus}") — пропускаю.`
+        `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: External Status = "${externalStatus}" ` +
+        `(нужно "${workflow.requiredExternalStatus}") — пропускаю.`
       );
       return { ticketId, status: 'skipped', reason: 'wrong-external-status', externalStatus };
     }
 
-    console.log(`[BulkApprove] (${index + 1}/${total}) Тикет ${ticketId}: открываю Edit...`);
+    console.log(`[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: открываю Edit...`);
 
     checkStop();
 
     const editLink = getEditLinkFromRow(row);
     if (!editLink) {
-      console.warn(`[BulkApprove] Тикет ${ticketId}: не найдена кнопка Edit, пропускаю.`);
+      console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: не найдена кнопка Edit, пропускаю.`);
       return { ticketId, status: 'failed', reason: 'no-edit-link' };
     }
 
@@ -358,7 +387,7 @@
       modal = await waitFor(() => getOpenModal());
     } catch (e) {
       if (e instanceof StopSignal) throw e;
-      console.warn(`[BulkApprove] Тикет ${ticketId}: модалка не появилась.`);
+      console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: модалка не появилась.`);
       return { ticketId, status: 'failed', reason: 'modal-not-shown' };
     }
 
@@ -367,14 +396,14 @@
     // Находим поле Status
     const statusGroup = findFieldGroup(modal, 'Status');
     if (!statusGroup) {
-      console.warn(`[BulkApprove] Тикет ${ticketId}: не найдено поле Status.`);
+      console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: не найдено поле Status.`);
       return { ticketId, status: 'failed', reason: 'no-status-field' };
     }
 
     const multiselectTags = statusGroup.querySelector('.multiselect__tags');
     const multiselectInput = statusGroup.querySelector('.multiselect__input');
     if (!multiselectTags) {
-      console.warn(`[BulkApprove] Тикет ${ticketId}: не найден .multiselect__tags внутри Status.`);
+      console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: не найден .multiselect__tags внутри Status.`);
       return { ticketId, status: 'failed', reason: 'no-multiselect-tags' };
     }
 
@@ -391,20 +420,20 @@
     }
     await interruptibleSleep(CONFIG.stepDelay);
 
-    // Печатаем "225" в поле поиска — так же, как это делает человек.
+    // Печатаем searchTerm workflow'а в поле поиска — так же, как это делает человек.
     // Это надёжнее, чем искать нужный текст в нераскрытом полном списке.
     if (multiselectInput) {
       const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
         window.HTMLInputElement.prototype,
         'value'
       ).set;
-      nativeInputValueSetter.call(multiselectInput, '225');
+      nativeInputValueSetter.call(multiselectInput, workflow.searchTerm);
       multiselectInput.dispatchEvent(new Event('input', { bubbles: true }));
     }
 
     let optionsList;
     try {
-      // Сначала пробуем найти вариант в отфильтрованном (после ввода "225") списке
+      // Сначала пробуем найти вариант в отфильтрованном (после ввода searchTerm) списке
       optionsList = await waitFor(() => {
         const wrapper = statusGroup.querySelector('.multiselect__content-wrapper');
         if (!wrapper) return null;
@@ -412,12 +441,14 @@
         if (options.length === 0) {
           options = wrapper.querySelectorAll('[id^="null-"]');
         }
-        const matches = Array.from(options).filter((opt) => CONFIG.statusMatch(opt.textContent));
+        const matches = Array.from(options).filter((opt) => workflow.statusMatch(opt.textContent));
         return matches.length > 0 ? matches : null;
       }, 2500); // короче таймаут — если фильтрация не сработала, быстро уходим в fallback
     } catch (e) {
       if (e instanceof StopSignal) throw e;
-      console.log(`[BulkApprove] Тикет ${ticketId}: фильтрация по "225" не дала результата, ищу в полном списке...`);
+      console.log(
+        `[BulkApprove/${workflow.id}] Тикет ${ticketId}: фильтрация по "${workflow.searchTerm}" не дала результата, ищу в полном списке...`
+      );
       // Fallback: очищаем поиск и ищем по всему нераскрытому списку опций
       if (multiselectInput) {
         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
@@ -436,13 +467,13 @@
           if (options.length === 0) {
             options = wrapper.querySelectorAll('[id^="null-"]');
           }
-          const matches = Array.from(options).filter((opt) => CONFIG.statusMatch(opt.textContent));
+          const matches = Array.from(options).filter((opt) => workflow.statusMatch(opt.textContent));
           return matches.length > 0 ? matches : null;
         });
       } catch (e2) {
         if (e2 instanceof StopSignal) throw e2;
-        console.warn(`[BulkApprove] Тикет ${ticketId}: список опций статуса не раскрылся или вариант не найден.`);
-        console.log(`[BulkApprove] Debug — HTML поля Status:`, statusGroup.outerHTML);
+        console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: список опций статуса не раскрылся или вариант не найден.`);
+        console.log(`[BulkApprove/${workflow.id}] Debug — HTML поля Status:`, statusGroup.outerHTML);
         return { ticketId, status: 'failed', reason: 'dropdown-not-opened-or-no-match' };
       }
     }
@@ -459,7 +490,7 @@
     // Нажимаем Apply (первая кнопка в .filter.btn-block, класс btn-success)
     const applyBtn = modal.querySelector('.filter.btn-block .input-group:first-child .btn-success');
     if (!applyBtn) {
-      console.warn(`[BulkApprove] Тикет ${ticketId}: не найдена кнопка Apply.`);
+      console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: не найдена кнопка Apply.`);
       return { ticketId, status: 'failed', reason: 'no-apply-button' };
     }
 
@@ -474,20 +505,20 @@
       if (e instanceof StopSignal) throw e;
       const relatedPopups = capturedPopups.filter((p) => p.ticketId === ticketId);
       console.warn(
-        `[BulkApprove] Тикет ${ticketId}: модалка не закрылась после Apply — возможно, ошибка сохранения.` +
+        `[BulkApprove/${workflow.id}] Тикет ${ticketId}: модалка не закрылась после Apply — возможно, ошибка сохранения.` +
         (relatedPopups.length > 0 ? ' См. пойманные окна для этого тикета в отчёте.' : '')
       );
       return { ticketId, status: 'failed', reason: 'modal-not-closed' };
     }
 
-    console.log(`[BulkApprove] Тикет ${ticketId}: готово ✅`);
+    console.log(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: готово ✅`);
     return { ticketId, status: 'success' };
   }
 
   // ------------------------------------------------------------------
   // Запуск по кнопке
   // ------------------------------------------------------------------
-  async function runBulkApprove() {
+  async function runBulkApprove(workflow) {
     refreshColumnIndexMap();
 
     const rows = getTicketRows();
@@ -498,9 +529,9 @@
 
     const confirmed = confirm(
       `Найдено тикетов на экране: ${rows.length}.\n` +
-      `Будут обработаны только те, у кого External Status = "${CONFIG.requiredExternalStatus}"\n` +
+      `Будут обработаны только те, у кого External Status = "${workflow.requiredExternalStatus}"\n` +
       `(остальные — пропущены).\n` +
-      `У подходящих будет выставлен статус "225 Approved by agent" и нажат Apply.\n\n` +
+      `У подходящих будет выставлен статус "${workflow.targetStatusLabel}" и нажат Apply.\n\n` +
       `Продолжить?`
     );
     if (!confirmed) return;
@@ -525,22 +556,22 @@
       const currentRows = getTicketRows();
       const row = currentRows[i];
       if (!row) {
-        console.warn(`[BulkApprove] Строка №${i + 1} больше не существует, пропускаю.`);
+        console.warn(`[BulkApprove/${workflow.id}] Строка №${i + 1} больше не существует, пропускаю.`);
         continue;
       }
 
       let result;
       try {
-        result = await processTicket(row, i, rows.length);
+        result = await processTicket(row, i, rows.length, workflow);
         results.push(result);
       } catch (e) {
         if (e instanceof StopSignal) {
-          console.log('[BulkApprove] Получен сигнал СТОП — прерываю выполнение.');
+          console.log(`[BulkApprove/${workflow.id}] Получен сигнал СТОП — прерываю выполнение.`);
           tryCancelModal();
           stoppedEarly = true;
           break;
         }
-        console.error(`[BulkApprove] Необработанная ошибка на тикете №${i + 1}:`, e);
+        console.error(`[BulkApprove/${workflow.id}] Необработанная ошибка на тикете №${i + 1}:`, e);
         result = { ticketId: '(error)', status: 'failed', reason: 'exception' };
         results.push(result);
       }
@@ -568,13 +599,13 @@
     const failCount = results.filter((r) => r.status === 'failed').length;
     const popupCount = capturedPopups.length;
 
-    console.log('[BulkApprove] ИТОГ:', results);
+    console.log(`[BulkApprove/${workflow.id}] ИТОГ:`, results);
     // Быстрый доступ из консоли, например:
     // window.__bulkApproveLastResults.find(r => r.ticketId === '19406922')
     window.__bulkApproveLastResults = results;
 
     if (popupCount > 0) {
-      console.log('[BulkApprove] Пойманные всплывающие окна (не "OK!"), требуют ручной проверки:');
+      console.log(`[BulkApprove/${workflow.id}] Пойманные всплывающие окна (не "OK!"), требуют ручной проверки:`);
       console.table(
         capturedPopups.map((p) => ({
           Тикет: p.ticketId,
@@ -622,15 +653,20 @@
   }
 
   // ------------------------------------------------------------------
-  // Кнопки на экране
+  // Кнопки на экране — по одной кнопке запуска на каждый workflow
+  // из WORKFLOWS, плюс одна общая кнопка СТОП (одновременно может
+  // выполняться только один прогон, это гарантирует state.isRunning).
   // ------------------------------------------------------------------
-  let startBtn, stopBtn;
+  let startBtns = [];
+  let stopBtn;
 
   function updateButtonsUI() {
-    if (!startBtn || !stopBtn) return;
-    startBtn.disabled = state.isRunning;
-    startBtn.style.opacity = state.isRunning ? '0.5' : '1';
-    startBtn.style.cursor = state.isRunning ? 'default' : 'pointer';
+    if (startBtns.length === 0 || !stopBtn) return;
+    startBtns.forEach((btn) => {
+      btn.disabled = state.isRunning;
+      btn.style.opacity = state.isRunning ? '0.5' : '1';
+      btn.style.cursor = state.isRunning ? 'default' : 'pointer';
+    });
 
     stopBtn.disabled = !state.isRunning || state.stopRequested;
     stopBtn.style.display = state.isRunning ? 'inline-block' : 'none';
@@ -650,22 +686,26 @@
       gap: '10px',
     });
 
-    startBtn = document.createElement('button');
-    startBtn.id = 'bulk-approve-btn';
-    startBtn.textContent = 'Bulk Approve (225)';
-    Object.assign(startBtn.style, {
-      padding: '12px 18px',
-      background: '#2ABFCF',
-      color: '#fff',
-      border: 'none',
-      borderRadius: '8px',
-      fontSize: '14px',
-      fontWeight: '600',
-      cursor: 'pointer',
-      boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
-    });
-    startBtn.addEventListener('click', () => {
-      runBulkApprove().catch((e) => console.error('[BulkApprove] Fatal error:', e));
+    startBtns = WORKFLOWS.map((workflow, idx) => {
+      const btn = document.createElement('button');
+      btn.id = idx === 0 ? 'bulk-approve-btn' : `bulk-approve-btn-${workflow.id}`;
+      btn.textContent = workflow.buttonLabel;
+      Object.assign(btn.style, {
+        padding: '12px 18px',
+        background: workflow.buttonColor,
+        color: '#fff',
+        border: 'none',
+        borderRadius: '8px',
+        fontSize: '14px',
+        fontWeight: '600',
+        cursor: 'pointer',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+      });
+      btn.addEventListener('click', () => {
+        runBulkApprove(workflow).catch((e) => console.error(`[BulkApprove/${workflow.id}] Fatal error:`, e));
+      });
+      container.appendChild(btn);
+      return btn;
     });
 
     stopBtn = document.createElement('button');
@@ -685,7 +725,6 @@
     });
     stopBtn.addEventListener('click', requestStop);
 
-    container.appendChild(startBtn);
     container.appendChild(stopBtn);
     document.body.appendChild(container);
 
