@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      2.0
-// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)". Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
+// @version      2.1
+// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)" (тикеты с Amount = 0 пропускаются и выносятся в отдельный список для ручной проверки). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -60,6 +60,10 @@
         return t.includes('239') && t.includes('response to user');
       },
       targetStatusLabel: '239 Response to user (M)',
+      // У части тикетов 239 в колонке Amount стоит 0 — их нужно пропускать
+      // и вынести в отдельный список для ручной проверки, а не обрабатывать
+      // как обычно.
+      skipZeroAmount: true,
     },
   ];
 
@@ -311,6 +315,23 @@
     return cell ? cell.textContent.trim() : '';
   }
 
+  // Возвращает { raw, value } из колонки Amount, либо null, если колонка не
+  // нашлась по названию (резервного номера для неё нет — колонка нужна не
+  // всем workflow, поэтому лучше честно не знать сумму, чем читать не ту
+  // ячейку). value — число (0, если сумма 0), либо null, если распарсить
+  // не удалось (например, ячейка пустая или содержит не число).
+  function getAmountFromRow(row) {
+    const idx = getColumnIndex('amount');
+    if (!idx) return null;
+    const cell = row.querySelector(`td:nth-child(${idx})`);
+    if (!cell) return null;
+    const raw = cell.textContent.trim();
+    // Убираем валютные символы, пробелы и разделители тысяч, чтобы разобрать число
+    const cleaned = raw.replace(/[^\d.,-]/g, '').replace(/,/g, '');
+    const value = cleaned === '' ? null : Number(cleaned);
+    return { raw, value: Number.isNaN(value) ? null : value };
+  }
+
   function getEditLinkFromRow(row) {
     const idx = getColumnIndex('actions', 3);
     const cell = row.querySelector(`td:nth-child(${idx})`);
@@ -367,6 +388,16 @@
         `(нужно "${workflow.requiredExternalStatus}") — пропускаю.`
       );
       return { ticketId, status: 'skipped', reason: 'wrong-external-status', externalStatus };
+    }
+
+    if (workflow.skipZeroAmount) {
+      const amount = getAmountFromRow(row);
+      if (amount && amount.value === 0) {
+        console.log(
+          `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: Amount = 0 — пропускаю, нужна ручная проверка.`
+        );
+        return { ticketId, status: 'skipped', reason: 'zero-amount', externalStatus };
+      }
     }
 
     console.log(`[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: открываю Edit...`);
@@ -521,6 +552,13 @@
   async function runBulkApprove(workflow) {
     refreshColumnIndexMap();
 
+    if (workflow.skipZeroAmount && !(columnIndexMap && columnIndexMap['amount'])) {
+      console.warn(
+        `[BulkApprove/${workflow.id}] Не найдена колонка Amount по названию — проверка на сумму 0 ` +
+        `не будет работать в этом прогоне, тикеты с нулевой суммой обработаются как обычно.`
+      );
+    }
+
     const rows = getTicketRows();
     if (rows.length === 0) {
       alert('Не найдено ни одного тикета на странице.');
@@ -531,8 +569,11 @@
       `Найдено тикетов на экране: ${rows.length}.\n` +
       `Будут обработаны только те, у кого External Status = "${workflow.requiredExternalStatus}"\n` +
       `(остальные — пропущены).\n` +
-      `У подходящих будет выставлен статус "${workflow.targetStatusLabel}" и нажат Apply.\n\n` +
-      `Продолжить?`
+      `У подходящих будет выставлен статус "${workflow.targetStatusLabel}" и нажат Apply.` +
+      (workflow.skipZeroAmount
+        ? `\nТикеты с Amount = 0 тоже будут пропущены (отдельно отмечу в итоге для ручной проверки).`
+        : '') +
+      `\n\nПродолжить?`
     );
     if (!confirmed) return;
 
@@ -595,7 +636,8 @@
     updateButtonsUI();
 
     const successCount = results.filter((r) => r.status === 'success').length;
-    const skippedCount = results.filter((r) => r.status === 'skipped').length;
+    const wrongStatusSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'wrong-external-status');
+    const zeroAmountSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'zero-amount');
     const failCount = results.filter((r) => r.status === 'failed').length;
     const popupCount = capturedPopups.length;
 
@@ -627,19 +669,32 @@
           capturedPopups.map((p) => `${p.ticketId} - ${p.transactionId}`).join('\n')
         : '';
 
+    const zeroAmountListText =
+      zeroAmountSkips.length > 0
+        ? `\n\nПропущены из-за Amount = 0, требуют ручной проверки (${zeroAmountSkips.length}):\n` +
+          zeroAmountSkips.map((r) => r.ticketId).join('\n')
+        : '';
+
+    const skippedSummaryLine =
+      zeroAmountSkips.length > 0
+        ? `Пропущено (не тот External Status): ${wrongStatusSkips.length}\nПропущено (Amount = 0): ${zeroAmountSkips.length}`
+        : `Пропущено (не тот External Status): ${wrongStatusSkips.length}`;
+
     if (stoppedEarly) {
       alert(
         `Остановлено пользователем.\n` +
         `Обработано: ${results.length} из ${rows.length}\n` +
-        `Успешно: ${successCount}\nПропущено (не тот External Status): ${skippedCount}\nОшибок: ${failCount}` +
+        `Успешно: ${successCount}\n${skippedSummaryLine}\nОшибок: ${failCount}` +
         popupsListText +
+        zeroAmountListText +
         `\n\nПодробности — в консоли (F12).`
       );
     } else {
       alert(
         `Готово.\n` +
-        `Успешно: ${successCount}\nПропущено (не тот External Status): ${skippedCount}\nОшибок: ${failCount}` +
+        `Успешно: ${successCount}\n${skippedSummaryLine}\nОшибок: ${failCount}` +
         popupsListText +
+        zeroAmountListText +
         `\n\nПодробности — в консоли (F12).`
       );
     }
