@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      2.1
+// @version      2.2
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)" (тикеты с Amount = 0 пропускаются и выносятся в отдельный список для ручной проверки). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -360,6 +360,26 @@
     }
   }
 
+  // Вызывается при ЛЮБОЙ ошибке уже ПОСЛЕ того, как модалка Edit открылась.
+  // Критично закрыть её здесь: если оставить открытой, при клике Edit на
+  // следующей строке сайт может не открыть новую модалку, а переиспользовать
+  // старую — и скрипт применит статус/Apply к чужому, предыдущему тикету
+  // (именно так один раз к тикету оказалась привязана транзакция от другого
+  // тикета). Ждём подтверждения закрытия, а не просто кликаем и надеемся.
+  async function failTicket(ticketId, workflow, result) {
+    tryCancelModal();
+    try {
+      await waitForGone(() => getOpenModal(), 3000);
+    } catch (e) {
+      if (e instanceof StopSignal) throw e;
+      console.warn(
+        `[BulkApprove/${workflow.id}] Тикет ${ticketId}: не удалось закрыть модалку после ошибки (${result.reason}) — ` +
+        `она может остаться открытой и повлиять на обработку следующего тикета. Проверь вручную.`
+      );
+    }
+    return result;
+  }
+
   // ------------------------------------------------------------------
   // Основная логика: обработка одного тикета
   // ------------------------------------------------------------------
@@ -428,14 +448,14 @@
     const statusGroup = findFieldGroup(modal, 'Status');
     if (!statusGroup) {
       console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: не найдено поле Status.`);
-      return { ticketId, status: 'failed', reason: 'no-status-field' };
+      return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'no-status-field' });
     }
 
     const multiselectTags = statusGroup.querySelector('.multiselect__tags');
     const multiselectInput = statusGroup.querySelector('.multiselect__input');
     if (!multiselectTags) {
       console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: не найден .multiselect__tags внутри Status.`);
-      return { ticketId, status: 'failed', reason: 'no-multiselect-tags' };
+      return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'no-multiselect-tags' });
     }
 
     checkStop();
@@ -505,7 +525,7 @@
         if (e2 instanceof StopSignal) throw e2;
         console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: список опций статуса не раскрылся или вариант не найден.`);
         console.log(`[BulkApprove/${workflow.id}] Debug — HTML поля Status:`, statusGroup.outerHTML);
-        return { ticketId, status: 'failed', reason: 'dropdown-not-opened-or-no-match' };
+        return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'dropdown-not-opened-or-no-match' });
       }
     }
 
@@ -522,7 +542,7 @@
     const applyBtn = modal.querySelector('.filter.btn-block .input-group:first-child .btn-success');
     if (!applyBtn) {
       console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: не найдена кнопка Apply.`);
-      return { ticketId, status: 'failed', reason: 'no-apply-button' };
+      return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'no-apply-button' });
     }
 
     fireClick(applyBtn);
@@ -539,7 +559,7 @@
         `[BulkApprove/${workflow.id}] Тикет ${ticketId}: модалка не закрылась после Apply — возможно, ошибка сохранения.` +
         (relatedPopups.length > 0 ? ' См. пойманные окна для этого тикета в отчёте.' : '')
       );
-      return { ticketId, status: 'failed', reason: 'modal-not-closed' };
+      return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'modal-not-closed' });
     }
 
     console.log(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: готово ✅`);
