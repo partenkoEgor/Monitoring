@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      2.2
+// @version      2.3
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)" (тикеты с Amount = 0 пропускаются и выносятся в отдельный список для ручной проверки). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -72,6 +72,10 @@
     isRunning: false,
     stopRequested: false,
   };
+
+  // Причина автоматической остановки прогона (залипшая модалка и т.п.);
+  // показывается в финальном alert вместо "Остановлено пользователем"
+  let runAbortReason = null;
 
   // Спец. класс ошибки, которым прерываем цепочку await'ов при нажатии СТОП
   class StopSignal extends Error {}
@@ -374,7 +378,7 @@
       if (e instanceof StopSignal) throw e;
       console.warn(
         `[BulkApprove/${workflow.id}] Тикет ${ticketId}: не удалось закрыть модалку после ошибки (${result.reason}) — ` +
-        `она может остаться открытой и повлиять на обработку следующего тикета. Проверь вручную.`
+        `перед следующим тикетом попробую закрыть её ещё раз; если снова не выйдет, прогон остановится автоматически.`
       );
     }
     return result;
@@ -424,6 +428,32 @@
 
     checkStop();
 
+    // ЗАЩИТА ОТ ЗАЛИПШЕЙ МОДАЛКИ: если перед кликом Edit на экране всё ещё
+    // висит модалка от предыдущего тикета, клик Edit НЕ даст чистую форму —
+    // сайт переиспользует/смешивает состояние старой, и статус с Apply могут
+    // примениться не к тому тикету (реальный инцидент: транзакция одного
+    // тикета сохранилась в другой). Поэтому сначала пробуем закрыть остаток,
+    // а если не вышло — останавливаем ВЕСЬ прогон: продолжать небезопасно.
+    if (getOpenModal()) {
+      console.warn(
+        `[BulkApprove/${workflow.id}] Тикет ${ticketId}: перед открытием Edit висит модалка от предыдущего тикета — пробую закрыть...`
+      );
+      tryCancelModal();
+      try {
+        await waitForGone(() => getOpenModal(), 3000);
+        console.log(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: залипшая модалка закрыта, продолжаю.`);
+      } catch (e) {
+        if (e instanceof StopSignal) throw e;
+        runAbortReason =
+          `Тикет ${ticketId}: на экране висит незакрытая модалка от предыдущего тикета, и закрыть её не удалось. ` +
+          `Прогон остановлен, чтобы статус не применился не к тому тикету. ` +
+          `Закрой модалку вручную, проверь последние failed-тикеты и запусти прогон заново.`;
+        state.stopRequested = true;
+        console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
+        return { ticketId, status: 'failed', reason: 'stale-modal-before-edit' };
+      }
+    }
+
     const editLink = getEditLinkFromRow(row);
     if (!editLink) {
       console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: не найдена кнопка Edit, пропускаю.`);
@@ -444,10 +474,18 @@
 
     await interruptibleSleep(CONFIG.stepDelay);
 
-    // Находим поле Status
-    const statusGroup = findFieldGroup(modal, 'Status');
-    if (!statusGroup) {
-      console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: не найдено поле Status.`);
+    // Находим поле Status. Форма внутри модалки может рендериться с задержкой
+    // (особенно когда сайт тормозит), поэтому ЖДЁМ её появления, а не
+    // проверяем один раз: одиночная проверка давала ложный "no-status-field"
+    // на ещё пустой модалке — при этом кнопки Cancel в ней тоже ещё не было,
+    // закрыть её failTicket не мог, и с этой залипшей модалки начинался
+    // каскад, приводивший к записи транзакции в чужой тикет.
+    let statusGroup;
+    try {
+      statusGroup = await waitFor(() => findFieldGroup(modal, 'Status'));
+    } catch (e) {
+      if (e instanceof StopSignal) throw e;
+      console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: не найдено поле Status (форма не отрендерилась за ${CONFIG.waitTimeout} мс).`);
       return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'no-status-field' });
     }
 
@@ -598,6 +636,7 @@
     if (!confirmed) return;
 
     capturedPopups.length = 0; // отчёт по попапам — только за этот прогон
+    runAbortReason = null;
 
     state.isRunning = true;
     state.stopRequested = false;
@@ -702,7 +741,9 @@
 
     if (stoppedEarly) {
       alert(
-        `Остановлено пользователем.\n` +
+        (runAbortReason
+          ? `ПРОГОН ОСТАНОВЛЕН АВТОМАТИЧЕСКИ.\n${runAbortReason}\n\n`
+          : `Остановлено пользователем.\n`) +
         `Обработано: ${results.length} из ${rows.length}\n` +
         `Успешно: ${successCount}\n${skippedSummaryLine}\nОшибок: ${failCount}` +
         popupsListText +
