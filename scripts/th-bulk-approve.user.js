@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      2.3
+// @version      2.4
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)" (тикеты с Amount = 0 пропускаются и выносятся в отдельный список для ручной проверки). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -24,6 +24,14 @@
     waitTimeout: 8000,
     // Пауза между обработкой тикетов
     betweenTicketsDelay: 2000,
+    // Сколько ждать возвращения таблицы, если она вдруг стала пустой
+    // (перезагрузка страницы, ошибки сервера, повторное применение фильтров)
+    tableReloadTimeout: 15000,
+    // Сколько ждать, пока оператор закроет висящее окно сайта, прежде чем
+    // остановить прогон
+    blockingPopupTimeout: 5000,
+    // Столько ошибок подряд — и прогон останавливается сам
+    maxConsecutiveFailures: 3,
   };
 
   // ------------------------------------------------------------------
@@ -265,6 +273,35 @@
     return Array.from(document.querySelectorAll('.table-wrapper tbody tr[data-table-row]'));
   }
 
+  // Видимое окно SweetAlert2 (в том числе то, которое мы намеренно НЕ закрыли —
+  // например, сообщение об ошибке). getOpenModal() про swal2 ничего не знает:
+  // это разные сущности, поэтому нужна отдельная проверка.
+  function getOpenSwalPopup() {
+    const popup = document.querySelector('.swal2-popup');
+    if (!popup) return null;
+    const style = window.getComputedStyle(popup);
+    if (style.display === 'none' || style.visibility === 'hidden') return null;
+    return popup;
+  }
+
+  // Достаёт номер тикета из произвольного текста ("Change ticket no.19983972",
+  // содержимое ячейки Ticket ID и т.п.)
+  function extractTicketNumber(text) {
+    const match = String(text == null ? '' : text).match(/\d{4,}/);
+    return match ? match[0] : null;
+  }
+
+  // Номер тикета из заголовка открытой модалки ("Change ticket no.19983972").
+  // Берём именно div.title: у полей формы заголовки — это span.title.
+  function getModalTicketId(modal) {
+    const titleEls = modal.querySelectorAll('div.title');
+    for (const el of titleEls) {
+      const match = el.textContent.match(/(?:no\.?|№)\s*(\d{4,})/i);
+      if (match) return match[1];
+    }
+    return null;
+  }
+
   // ------------------------------------------------------------------
   // Поиск колонок по названию из шапки таблицы (на случай, если у
   // другого пользователя колонки перетащены в другом порядке)
@@ -340,6 +377,16 @@
     const idx = getColumnIndex('actions', 3);
     const cell = row.querySelector(`td:nth-child(${idx})`);
     return cell ? cell.querySelector('a') : null;
+  }
+
+  // Ищем строку по номеру тикета, а НЕ по позиции в таблице: таблица
+  // перерисовывается прямо во время прогона (частое применение фильтров,
+  // ответы сервера), строки сдвигаются — и обращение по индексу молча
+  // подсунуло бы другой тикет или навсегда пропустило один из них.
+  function findRowByTicketId(ticketId) {
+    const wanted = extractTicketNumber(ticketId);
+    if (!wanted) return null;
+    return getTicketRows().find((r) => extractTicketNumber(getTicketIdFromRow(r)) === wanted) || null;
   }
 
   // Находит .input-group внутри модалки, где <span class="title"> точно равен label
@@ -428,6 +475,33 @@
 
     checkStop();
 
+    // ЗАЩИТА ОТ ЧУЖОГО ОКНА: окна с ошибкой мы намеренно не закрываем, чтобы
+    // оператор успел прочитать текст. Но работать «сквозь» них нельзя: у
+    // SweetAlert2 модальная подложка, живой человек кликнуть бы не смог, а
+    // fireClick рассылает события напрямую и подложку обходит — то есть скрипт
+    // действовал бы в заблокированном интерфейсе. Даём время закрыть окно
+    // вручную, иначе останавливаем прогон.
+    if (getOpenSwalPopup()) {
+      console.warn(
+        `[BulkApprove/${workflow.id}] Тикет ${ticketId}: на экране открыто окно сайта — жду, пока оно закроется...`
+      );
+      try {
+        await waitForGone(() => getOpenSwalPopup(), CONFIG.blockingPopupTimeout);
+      } catch (e) {
+        if (e instanceof StopSignal) throw e;
+        const popup = getOpenSwalPopup();
+        const info = popup ? classifySwalPopup(popup) : null;
+        const popupText = info ? (info.content || info.title || info.icon) : '';
+        runAbortReason =
+          `Тикет ${ticketId}: на экране висит незакрытое окно сайта` +
+          (popupText ? ` («${popupText}»)` : '') +
+          `. Прогон остановлен — прочитай и закрой это окно, затем запусти заново.`;
+        state.stopRequested = true;
+        console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
+        return { ticketId, status: 'failed', reason: 'blocking-popup' };
+      }
+    }
+
     // ЗАЩИТА ОТ ЗАЛИПШЕЙ МОДАЛКИ: если перед кликом Edit на экране всё ещё
     // висит модалка от предыдущего тикета, клик Edit НЕ даст чистую форму —
     // сайт переиспользует/смешивает состояние старой, и статус с Apply могут
@@ -470,6 +544,50 @@
       if (e instanceof StopSignal) throw e;
       console.warn(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: модалка не появилась.`);
       return { ticketId, status: 'failed', reason: 'modal-not-shown' };
+    }
+
+    // ПРОВЕРКА ЛИЧНОСТИ ТИКЕТА — последний и главный рубеж.
+    // Заголовок модалки выглядит как "Change ticket no.19983972". Сверяем его
+    // с тикетом, который мы собирались открыть, ДО того как что-либо изменим.
+    // Между чтением строки и кликом Edit таблица могла перерисоваться (Vue
+    // переиспользует DOM-узлы), либо сайт мог показать старую модалку — тогда
+    // статус и Apply ушли бы в чужой тикет. Именно так чужая транзакция
+    // дважды попадала не в тот тикет.
+    let modalTicketId;
+    try {
+      modalTicketId = await waitFor(() => getModalTicketId(modal));
+    } catch (e) {
+      if (e instanceof StopSignal) throw e;
+      console.error(
+        `[BulkApprove/${workflow.id}] Тикет ${ticketId}: не удалось прочитать номер тикета в заголовке модалки.`
+      );
+      const failResult = await failTicket(ticketId, workflow, {
+        ticketId,
+        status: 'failed',
+        reason: 'modal-title-unreadable',
+      });
+      runAbortReason =
+        `Тикет ${ticketId}: не удалось прочитать номер тикета в заголовке модалки, поэтому нельзя убедиться, ` +
+        `что открыт нужный тикет. Прогон остановлен. Скорее всего, изменилась вёрстка модалки — нужно поправить скрипт.`;
+      state.stopRequested = true;
+      return failResult;
+    }
+
+    if (modalTicketId !== extractTicketNumber(ticketId)) {
+      console.error(
+        `[BulkApprove/${workflow.id}] ОТКРЫЛСЯ НЕ ТОТ ТИКЕТ: ожидали ${ticketId}, в модалке ${modalTicketId}.`
+      );
+      const failResult = await failTicket(ticketId, workflow, {
+        ticketId,
+        status: 'failed',
+        reason: 'modal-ticket-mismatch',
+        modalTicketId,
+      });
+      runAbortReason =
+        `ОТКРЫЛСЯ НЕ ТОТ ТИКЕТ: кликали Edit у тикета ${ticketId}, а в модалке оказался ${modalTicketId}. ` +
+        `Ничего не меняли. Прогон остановлен — обнови страницу и запусти заново.`;
+      state.stopRequested = true;
+      return failResult;
     }
 
     await interruptibleSleep(CONFIG.stepDelay);
@@ -642,27 +760,77 @@
     state.stopRequested = false;
     updateButtonsUI();
 
+    // Список тикетов фиксируем по номерам, а не по позициям строк: таблица
+    // перерисовывается прямо во время прогона, и обращение по индексу молча
+    // подсовывало бы не тот тикет либо навсегда пропускало один из них.
+    const plannedTicketIds = rows.map((r) => getTicketIdFromRow(r));
+    const total = plannedTicketIds.length;
+
     const results = [];
     let stoppedEarly = false;
+    let consecutiveFailures = 0;
 
-    for (let i = 0; i < rows.length; i++) {
+    // Серия ошибок подряд означает, что сайт лёг (например, отвечает 529) или
+    // изменилась вёрстка. Гнать в таком состоянии оставшуюся сотню тикетов
+    // бессмысленно и вредно для сервера. Возвращает true, если надо остановиться.
+    const registerFailure = (reason) => {
+      consecutiveFailures++;
+      if (consecutiveFailures < CONFIG.maxConsecutiveFailures) return false;
+      runAbortReason =
+        `Подряд ${consecutiveFailures} тикетов завершились ошибкой (последняя причина: ${reason}). ` +
+        `Похоже, сайт недоступен или изменилась вёрстка. Прогон остановлен, чтобы не гонять впустую ` +
+        `оставшиеся тикеты. Проверь страницу и запусти заново.`;
+      console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
+      return true;
+    };
+
+    for (let i = 0; i < total; i++) {
       if (state.stopRequested) {
         stoppedEarly = true;
         break;
       }
 
-      // Важно: после Apply страница может перерисовать таблицу, поэтому
-      // берём актуальный список строк заново на каждой итерации
-      const currentRows = getTicketRows();
-      const row = currentRows[i];
+      const ticketId = plannedTicketIds[i];
+
+      // Пустая таблица — это НЕ «тикеты кончились», а её перезагрузка. Раньше
+      // скрипт в этот момент молча пролистывал весь остаток списка и рапортовал
+      // «Готово», хотя не посмотрел почти ни одного тикета.
+      if (getTicketRows().length === 0) {
+        console.warn(
+          `[BulkApprove/${workflow.id}] Таблица пуста (идёт перезагрузка?) — жду, пока она вернётся...`
+        );
+        try {
+          await waitFor(() => getTicketRows().length > 0, CONFIG.tableReloadTimeout);
+        } catch (e) {
+          if (e instanceof StopSignal) {
+            stoppedEarly = true;
+            break;
+          }
+          runAbortReason =
+            `Таблица тикетов пропала со страницы и не вернулась за ${CONFIG.tableReloadTimeout / 1000} с. ` +
+            `Прогон остановлен: продолжать вслепую нельзя. Обнови страницу и запусти заново.`;
+          console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
+          stoppedEarly = true;
+          break;
+        }
+      }
+
+      const row = findRowByTicketId(ticketId);
       if (!row) {
-        console.warn(`[BulkApprove/${workflow.id}] Строка №${i + 1} больше не существует, пропускаю.`);
+        console.warn(
+          `[BulkApprove/${workflow.id}] (${i + 1}/${total}) Тикет ${ticketId}: строки больше нет в таблице — НЕ обработан.`
+        );
+        results.push({ ticketId, status: 'failed', reason: 'row-disappeared' });
+        if (registerFailure('row-disappeared')) {
+          stoppedEarly = true;
+          break;
+        }
         continue;
       }
 
       let result;
       try {
-        result = await processTicket(row, i, rows.length, workflow);
+        result = await processTicket(row, i, total, workflow);
         results.push(result);
       } catch (e) {
         if (e instanceof StopSignal) {
@@ -671,14 +839,30 @@
           stoppedEarly = true;
           break;
         }
-        console.error(`[BulkApprove/${workflow.id}] Необработанная ошибка на тикете №${i + 1}:`, e);
-        result = { ticketId: '(error)', status: 'failed', reason: 'exception' };
+        console.error(`[BulkApprove/${workflow.id}] Необработанная ошибка на тикете ${ticketId}:`, e);
+        result = { ticketId, status: 'failed', reason: 'exception' };
         results.push(result);
       }
 
-      const wasSkipped = result && result.status === 'skipped';
+      if (result.status === 'failed') {
+        if (registerFailure(result.reason)) {
+          stoppedEarly = true;
+          break;
+        }
+      } else if (result.status === 'success') {
+        consecutiveFailures = 0;
+      }
 
-      if (i < rows.length - 1 && !state.stopRequested && !wasSkipped) {
+      // Прогон мог остановить сам себя изнутри (не тот тикет в модалке,
+      // залипшая модалка, чужое окно на экране)
+      if (state.stopRequested) {
+        stoppedEarly = true;
+        break;
+      }
+
+      const wasSkipped = result.status === 'skipped';
+
+      if (i < total - 1 && !wasSkipped) {
         try {
           await interruptibleSleep(CONFIG.betweenTicketsDelay);
         } catch (e) {
@@ -697,8 +881,15 @@
     const successCount = results.filter((r) => r.status === 'success').length;
     const wrongStatusSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'wrong-external-status');
     const zeroAmountSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'zero-amount');
-    const failCount = results.filter((r) => r.status === 'failed').length;
+    const failed = results.filter((r) => r.status === 'failed');
+    const rowGone = failed.filter((r) => r.reason === 'row-disappeared');
     const popupCount = capturedPopups.length;
+
+    // Тикеты, до которых прогон вообще не дошёл (остановился раньше).
+    // Без этого отчёт мог показать бодрое «Готово», умолчав, что почти весь
+    // список остался нетронутым.
+    const seenIds = new Set(results.map((r) => r.ticketId));
+    const notReachedIds = plannedTicketIds.filter((id) => !seenIds.has(id));
 
     console.log(`[BulkApprove/${workflow.id}] ИТОГ:`, results);
     // Быстрый доступ из консоли, например:
@@ -734,31 +925,57 @@
           zeroAmountSkips.map((r) => r.ticketId).join('\n')
         : '';
 
-    const skippedSummaryLine =
-      zeroAmountSkips.length > 0
-        ? `Пропущено (не тот External Status): ${wrongStatusSkips.length}\nПропущено (Amount = 0): ${zeroAmountSkips.length}`
-        : `Пропущено (не тот External Status): ${wrongStatusSkips.length}`;
-
-    if (stoppedEarly) {
-      alert(
-        (runAbortReason
-          ? `ПРОГОН ОСТАНОВЛЕН АВТОМАТИЧЕСКИ.\n${runAbortReason}\n\n`
-          : `Остановлено пользователем.\n`) +
-        `Обработано: ${results.length} из ${rows.length}\n` +
-        `Успешно: ${successCount}\n${skippedSummaryLine}\nОшибок: ${failCount}` +
-        popupsListText +
-        zeroAmountListText +
-        `\n\nПодробности — в консоли (F12).`
-      );
-    } else {
-      alert(
-        `Готово.\n` +
-        `Успешно: ${successCount}\n${skippedSummaryLine}\nОшибок: ${failCount}` +
-        popupsListText +
-        zeroAmountListText +
-        `\n\nПодробности — в консоли (F12).`
-      );
+    const summaryLines = [
+      `Всего тикетов в списке: ${total}`,
+      `Успешно: ${successCount}`,
+      `Пропущено (не тот External Status): ${wrongStatusSkips.length}`,
+    ];
+    if (zeroAmountSkips.length > 0) {
+      summaryLines.push(`Пропущено (Amount = 0): ${zeroAmountSkips.length}`);
     }
+    summaryLines.push(`Ошибок: ${failed.length}`);
+    if (rowGone.length > 0) {
+      summaryLines.push(`  из них строка исчезла из таблицы: ${rowGone.length}`);
+    }
+
+    // Всё, что осталось необработанным: и исчезнувшие строки, и тикеты,
+    // до которых прогон не дошёл. Показываем явно — «Готово» больше не врёт.
+    const unprocessed = [
+      ...rowGone.map((r) => `${r.ticketId} (строка исчезла из таблицы)`),
+      ...notReachedIds.map((id) => `${id} (прогон до него не дошёл)`),
+    ];
+    window.__bulkApproveUnprocessed = unprocessed;
+
+    const MAX_LISTED = 40;
+    const unprocessedText =
+      unprocessed.length > 0
+        ? `\n\n⚠ НЕ ОБРАБОТАНО ТИКЕТОВ: ${unprocessed.length}. Прогони их заново или проверь вручную:\n` +
+          unprocessed.slice(0, MAX_LISTED).join('\n') +
+          (unprocessed.length > MAX_LISTED
+            ? `\n… и ещё ${unprocessed.length - MAX_LISTED} — полный список в консоли: window.__bulkApproveUnprocessed`
+            : '')
+        : '';
+
+    if (unprocessed.length > 0) {
+      console.warn(`[BulkApprove/${workflow.id}] НЕ обработаны (${unprocessed.length}):`, unprocessed);
+    }
+
+    const header = stoppedEarly
+      ? runAbortReason
+        ? `ПРОГОН ОСТАНОВЛЕН АВТОМАТИЧЕСКИ.\n${runAbortReason}\n\n`
+        : `Остановлено пользователем.\n`
+      : unprocessed.length > 0
+        ? `Прогон завершён, но НЕ ВСЕ тикеты обработаны.\n`
+        : `Готово.\n`;
+
+    alert(
+      header +
+      summaryLines.join('\n') +
+      popupsListText +
+      zeroAmountListText +
+      unprocessedText +
+      `\n\nПодробности — в консоли (F12).`
+    );
   }
 
   function requestStop() {
