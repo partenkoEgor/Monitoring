@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.1
+// @version      1.2
 // @description  Три помощника в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -251,28 +251,28 @@
         box-sizing: border-box;
         padding: 0 16px;
       }
-      /* Сцена задаёт размер картинки и обрезает её при увеличении.
-         Трансформации самой картинки на раскладку не влияют,
-         поэтому стрелки не прыгают при повороте и зуме. */
+      /* Сцена обрезает картинку при увеличении. Картинка позиционируется
+         абсолютно и центрируется через transform — так её размер можно
+         задавать скриптом, не ломая раскладку соседних стрелок. */
       #th-lightbox-stage {
         flex: 1 1 auto;
         max-width: 88vw;
         height: 76vh;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        position: relative;
         overflow: hidden;
         touch-action: none;
       }
       #th-lightbox img {
-        max-width: 100%;
-        max-height: 100%;
-        object-fit: contain;
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        /* Размер задаёт скрипт — см. applyTransform */
+        max-width: none;
+        max-height: none;
         border-radius: 6px;
         box-shadow: 0 8px 40px rgba(0,0,0,0.5);
         display: block;
         transform-origin: center center;
-        will-change: transform;
         user-select: none;
         -webkit-user-drag: none;
       }
@@ -454,46 +454,72 @@
     let zoom = 1;       // масштаб, заданный пользователем
     let panX = 0;       // сдвиг перетаскиванием, в пикселях экрана
     let panY = 0;
-    let fitScale = 1;   // поправка, чтобы повёрнутая картинка влезала в сцену
 
-    // Повёрнутая на 90° картинка занимает на экране место
-    // «наоборот» — ширина становится высотой. Пересчитываем, во сколько
-    // раз её нужно ужать, чтобы она по-прежнему помещалась в сцену целиком.
-    function computeFitScale() {
+    // Пересчитывает размер и положение картинки.
+    //
+    // Размер задаётся в вёрстке (width/height), а не через transform: scale.
+    // Это принципиально для чёткости: браузер растрирует картинку один раз
+    // в её вёрстанном размере, и scale потом растягивает уже готовый растр,
+    // не обращаясь к оригиналу. Вписанный в экран скриншот 2400px шириной
+    // растрируется, скажем, в 912px — и при увеличении мы видим растянутые
+    // 912px вместо настоящих 2400px. Если же менять именно вёрстанный
+    // размер, браузер каждый раз растрирует заново из полноразмерного
+    // оригинала, и вся детализация файла доходит до экрана.
+    //
+    // Растр крупнее натурального разрешения смысла не имеет — новых деталей
+    // там взяться неоткуда, а память он съедает быстро. Поэтому вёрстанный
+    // размер ограничен оригиналом, а всё, что сверх него, догоняется
+    // через scale.
+    function applyTransform() {
+      const natW = lbImg.naturalWidth;
+      const natH = lbImg.naturalHeight;
+      // Пока новая картинка не загрузилась, размеры относятся к предыдущей
+      if (!natW || !natH || !lbImg.complete) return;
+
       const stageW = lbStage.clientWidth;
       const stageH = lbStage.clientHeight;
-      const w = lbImg.clientWidth;
-      const h = lbImg.clientHeight;
-      if (!w || !h || !stageW || !stageH) return 1;
       const upright = rotation % 180 === 0;
-      const boxW = upright ? w : h;
-      const boxH = upright ? h : w;
-      return Math.min(1, stageW / boxW, stageH / boxH);
-    }
 
-    // Не даём утащить картинку за пределы её собственных краёв
-    function clampPan() {
-      const upright = rotation % 180 === 0;
-      const total = zoom * fitScale;
-      const boxW = (upright ? lbImg.clientWidth : lbImg.clientHeight) * total;
-      const boxH = (upright ? lbImg.clientHeight : lbImg.clientWidth) * total;
-      const maxX = Math.max(0, (boxW - lbStage.clientWidth) / 2);
-      const maxY = Math.max(0, (boxH - lbStage.clientHeight) / 2);
+      // Во сколько раз ужать картинку, чтобы она целиком влезла в сцену
+      // с учётом поворота. Мелкие картинки не растягиваем.
+      const fit = Math.min(
+        1,
+        stageW / (upright ? natW : natH),
+        stageH / (upright ? natH : natW)
+      );
+
+      // Размер, который картинка должна занять на экране
+      const dispW = natW * fit * zoom;
+      const dispH = natH * fit * zoom;
+
+      const layoutW = Math.min(dispW, natW);
+      const layoutH = layoutW * natH / natW;
+      const extra = layoutW > 0 ? dispW / layoutW : 1;
+
+      lbImg.style.width = layoutW + 'px';
+      lbImg.style.height = layoutH + 'px';
+
+      // Габарит на экране с учётом поворота — по нему ограничиваем сдвиг,
+      // чтобы картинку нельзя было утащить за её собственные края
+      const screenW = upright ? dispW : dispH;
+      const screenH = upright ? dispH : dispW;
+      const maxX = Math.max(0, (screenW - stageW) / 2);
+      const maxY = Math.max(0, (screenH - stageH) / 2);
       panX = Math.min(maxX, Math.max(-maxX, panX));
       panY = Math.min(maxY, Math.max(-maxY, panY));
-    }
 
-    function applyTransform() {
-      fitScale = computeFitScale();
-      clampPan();
-      // translate идёт первым — значит сдвиг считается в координатах экрана
-      // и не «переворачивается» вместе с картинкой
+      // Порядок важен: -50% центрирует картинку в сцене, затем сдвиг
+      // считается в координатах экрана и не «переворачивается» вместе
+      // с картинкой, и только потом идут поворот и остаточный масштаб.
       lbImg.style.transform =
-        `translate(${Math.round(panX)}px, ${Math.round(panY)}px) rotate(${rotation}deg) scale(${(zoom * fitScale).toFixed(4)})`;
+        `translate(-50%, -50%) translate(${Math.round(panX)}px, ${Math.round(panY)}px)`
+        + ` rotate(${rotation}deg) scale(${extra.toFixed(4)})`;
+
       lbImg.classList.toggle('zoomed', zoom > 1);
       zoomLabel.textContent = Math.round(zoom * 100) + '%';
       btnZoomOut.disabled = zoom <= CFG.zoom.min + 1e-6;
       btnZoomIn.disabled = zoom >= CFG.zoom.max - 1e-6;
+      updateCounter();
     }
 
     function resetView() {
@@ -535,13 +561,24 @@
       };
     }
 
+    // Показываем разрешение файла: сразу видно, мелкий ли это оригинал,
+    // если картинка выглядит нечёткой при увеличении
+    function updateCounter() {
+      const parts = [];
+      if (lbUrls.length > 1) parts.push(`${lbIndex + 1} / ${lbUrls.length}`);
+      if (lbImg.complete && lbImg.naturalWidth) {
+        parts.push(`${lbImg.naturalWidth}×${lbImg.naturalHeight}`);
+      }
+      lbCounter.textContent = parts.join('  ·  ');
+    }
+
     function updateLightbox() {
       lbImg.src = lbUrls[lbIndex];
       lbPrev.disabled = lbIndex === 0;
       lbNext.disabled = lbIndex === lbUrls.length - 1;
       lbPrev.style.visibility = lbUrls.length > 1 ? 'visible' : 'hidden';
       lbNext.style.visibility = lbUrls.length > 1 ? 'visible' : 'hidden';
-      lbCounter.textContent = lbUrls.length > 1 ? `${lbIndex + 1} / ${lbUrls.length}` : '';
+      updateCounter();
       // Новая картинка — новый лист: поворот и масштаб сбрасываются
       resetView();
     }
