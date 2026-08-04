@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.0
-// @description  Три помощника в одном скрипте: превью вложений при наведении с полноэкранным просмотром, тултип «Предыдущий статус» для закрытых тикетов и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
+// @version      1.1
+// @description  Три помощника в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -44,6 +44,16 @@
       imageExts: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'],
       // Какие расширения считать видео (показывается иконка + имя файла)
       videoExts: ['mp4', 'webm', 'mov', 'avi'],
+      // Масштабирование в полноэкранном режиме
+      zoom: {
+        // Во сколько раз меняется масштаб за одно деление колеса мыши
+        step: 1.15,
+        // Минимальный масштаб. 1 — картинка, вписанная в экран;
+        // меньше единицы разрешает уменьшать её сильнее.
+        min: 1,
+        // Предел увеличения
+        max: 8,
+      },
     },
 
     // ── Предыдущий статус ────────────────────────────────────────────
@@ -237,15 +247,82 @@
         align-items: center;
         justify-content: center;
         gap: 16px;
+        width: 100vw;
+        box-sizing: border-box;
+        padding: 0 16px;
+      }
+      /* Сцена задаёт размер картинки и обрезает её при увеличении.
+         Трансформации самой картинки на раскладку не влияют,
+         поэтому стрелки не прыгают при повороте и зуме. */
+      #th-lightbox-stage {
+        flex: 1 1 auto;
+        max-width: 88vw;
+        height: 76vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        touch-action: none;
       }
       #th-lightbox img {
-        max-width: 90vw;
-        max-height: 85vh;
+        max-width: 100%;
+        max-height: 100%;
         object-fit: contain;
         border-radius: 6px;
         box-shadow: 0 8px 40px rgba(0,0,0,0.5);
         display: block;
+        transform-origin: center center;
+        will-change: transform;
+        user-select: none;
+        -webkit-user-drag: none;
       }
+      #th-lightbox img.zoomed { cursor: grab; }
+      #th-lightbox img.dragging { cursor: grabbing; }
+      #th-lightbox-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 5px 8px;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.10);
+        border: .5px solid rgba(255,255,255,0.22);
+      }
+      .th-lightbox-tool {
+        width: 32px; height: 32px;
+        border-radius: 50%;
+        background: transparent;
+        border: none;
+        color: #fff;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: background .15s;
+        padding: 0;
+      }
+      .th-lightbox-tool:hover:not(:disabled) { background: rgba(255,255,255,0.20); }
+      .th-lightbox-tool:disabled { opacity: .3; cursor: default; }
+      .th-lightbox-sep {
+        width: 1px;
+        height: 18px;
+        background: rgba(255,255,255,0.22);
+        margin: 0 3px;
+      }
+      #th-lightbox-zoom-label {
+        min-width: 48px;
+        padding: 5px 2px;
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        color: rgba(255,255,255,0.85);
+        font-family: inherit;
+        font-size: 11px;
+        font-weight: 600;
+        text-align: center;
+        cursor: pointer;
+        transition: background .15s;
+      }
+      #th-lightbox-zoom-label:hover { background: rgba(255,255,255,0.20); }
       .th-lightbox-arrow {
         width: 40px; height: 40px;
         border-radius: 50%;
@@ -289,6 +366,10 @@
     const ICON_NEW_TAB = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>`;
     const ICON_PDF = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#E24B4A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>`;
     const ICON_VIDEO = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#7C3AED" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
+    const ICON_ROTATE_LEFT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>`;
+    const ICON_ROTATE_RIGHT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>`;
+    const ICON_ZOOM_IN = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>`;
+    const ICON_ZOOM_OUT = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/></svg>`;
 
     const popup = document.createElement('div');
     popup.id = 'th-preview-popup';
@@ -316,19 +397,143 @@
     lbNext.className = 'th-lightbox-arrow';
     lbNext.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
 
+    const lbStage = document.createElement('div');
+    lbStage.id = 'th-lightbox-stage';
+    lbStage.appendChild(lbImg);
+
     const lbCounter = document.createElement('div');
     lbCounter.id = 'th-lightbox-counter';
 
+    // ── Панель поворота и масштаба ───────────────────────────────────
+
+    const toolbar = document.createElement('div');
+    toolbar.id = 'th-lightbox-toolbar';
+
+    function makeTool(title, icon) {
+      const b = document.createElement('button');
+      b.className = 'th-lightbox-tool';
+      b.title = title;
+      b.innerHTML = icon;
+      return b;
+    }
+
+    const btnRotateL = makeTool('Повернуть влево на 90°', ICON_ROTATE_LEFT);
+    const btnRotateR = makeTool('Повернуть вправо на 90°', ICON_ROTATE_RIGHT);
+    const btnZoomOut = makeTool('Уменьшить', ICON_ZOOM_OUT);
+    const btnZoomIn = makeTool('Увеличить', ICON_ZOOM_IN);
+
+    const zoomLabel = document.createElement('button');
+    zoomLabel.id = 'th-lightbox-zoom-label';
+    zoomLabel.title = 'Сбросить поворот и масштаб';
+    zoomLabel.textContent = '100%';
+
+    const sep = document.createElement('div');
+    sep.className = 'th-lightbox-sep';
+
+    toolbar.appendChild(btnRotateL);
+    toolbar.appendChild(btnRotateR);
+    toolbar.appendChild(sep);
+    toolbar.appendChild(btnZoomOut);
+    toolbar.appendChild(zoomLabel);
+    toolbar.appendChild(btnZoomIn);
+
     lbWrap.appendChild(lbPrev);
-    lbWrap.appendChild(lbImg);
+    lbWrap.appendChild(lbStage);
     lbWrap.appendChild(lbNext);
     lightbox.appendChild(lbClose);
     lightbox.appendChild(lbWrap);
+    lightbox.appendChild(toolbar);
     lightbox.appendChild(lbCounter);
     document.body.appendChild(lightbox);
 
     let lbUrls = [];
     let lbIndex = 0;
+
+    // Состояние просмотра текущей картинки
+    let rotation = 0;   // градусы, кратно 90
+    let zoom = 1;       // масштаб, заданный пользователем
+    let panX = 0;       // сдвиг перетаскиванием, в пикселях экрана
+    let panY = 0;
+    let fitScale = 1;   // поправка, чтобы повёрнутая картинка влезала в сцену
+
+    // Повёрнутая на 90° картинка занимает на экране место
+    // «наоборот» — ширина становится высотой. Пересчитываем, во сколько
+    // раз её нужно ужать, чтобы она по-прежнему помещалась в сцену целиком.
+    function computeFitScale() {
+      const stageW = lbStage.clientWidth;
+      const stageH = lbStage.clientHeight;
+      const w = lbImg.clientWidth;
+      const h = lbImg.clientHeight;
+      if (!w || !h || !stageW || !stageH) return 1;
+      const upright = rotation % 180 === 0;
+      const boxW = upright ? w : h;
+      const boxH = upright ? h : w;
+      return Math.min(1, stageW / boxW, stageH / boxH);
+    }
+
+    // Не даём утащить картинку за пределы её собственных краёв
+    function clampPan() {
+      const upright = rotation % 180 === 0;
+      const total = zoom * fitScale;
+      const boxW = (upright ? lbImg.clientWidth : lbImg.clientHeight) * total;
+      const boxH = (upright ? lbImg.clientHeight : lbImg.clientWidth) * total;
+      const maxX = Math.max(0, (boxW - lbStage.clientWidth) / 2);
+      const maxY = Math.max(0, (boxH - lbStage.clientHeight) / 2);
+      panX = Math.min(maxX, Math.max(-maxX, panX));
+      panY = Math.min(maxY, Math.max(-maxY, panY));
+    }
+
+    function applyTransform() {
+      fitScale = computeFitScale();
+      clampPan();
+      // translate идёт первым — значит сдвиг считается в координатах экрана
+      // и не «переворачивается» вместе с картинкой
+      lbImg.style.transform =
+        `translate(${Math.round(panX)}px, ${Math.round(panY)}px) rotate(${rotation}deg) scale(${(zoom * fitScale).toFixed(4)})`;
+      lbImg.classList.toggle('zoomed', zoom > 1);
+      zoomLabel.textContent = Math.round(zoom * 100) + '%';
+      btnZoomOut.disabled = zoom <= CFG.zoom.min + 1e-6;
+      btnZoomIn.disabled = zoom >= CFG.zoom.max - 1e-6;
+    }
+
+    function resetView() {
+      rotation = 0;
+      zoom = 1;
+      panX = 0;
+      panY = 0;
+      applyTransform();
+    }
+
+    function rotateBy(delta) {
+      rotation = (rotation + delta + 360) % 360;
+      // После поворота картинка перекладывается заново — сдвиг от прошлой
+      // ориентации оказался бы бессмысленным
+      panX = 0;
+      panY = 0;
+      applyTransform();
+    }
+
+    // cx, cy — точка, которая должна остаться на месте, в координатах
+    // относительно центра сцены. Без них масштабируем от центра.
+    function setZoom(next, cx, cy) {
+      const clamped = Math.min(CFG.zoom.max, Math.max(CFG.zoom.min, next));
+      if (Math.abs(clamped - zoom) < 1e-6) return;
+      if (cx !== undefined) {
+        const k = clamped / zoom;
+        panX = cx - k * (cx - panX);
+        panY = cy - k * (cy - panY);
+      }
+      zoom = clamped;
+      applyTransform();
+    }
+
+    function stageCenterOffset(e) {
+      const rect = lbStage.getBoundingClientRect();
+      return {
+        x: e.clientX - (rect.left + rect.width / 2),
+        y: e.clientY - (rect.top + rect.height / 2),
+      };
+    }
 
     function updateLightbox() {
       lbImg.src = lbUrls[lbIndex];
@@ -337,6 +542,8 @@
       lbPrev.style.visibility = lbUrls.length > 1 ? 'visible' : 'hidden';
       lbNext.style.visibility = lbUrls.length > 1 ? 'visible' : 'hidden';
       lbCounter.textContent = lbUrls.length > 1 ? `${lbIndex + 1} / ${lbUrls.length}` : '';
+      // Новая картинка — новый лист: поворот и масштаб сбрасываются
+      resetView();
     }
 
     function openLightbox(urls, startIndex) {
@@ -349,7 +556,14 @@
     function closeLightbox() {
       lightbox.classList.remove('open');
       lbImg.src = '';
+      resetView();
     }
+
+    // Размер картинки известен только после загрузки — тогда и считаем вписывание
+    lbImg.addEventListener('load', applyTransform);
+    window.addEventListener('resize', () => {
+      if (lightbox.classList.contains('open')) applyTransform();
+    });
 
     lbPrev.addEventListener('click', e => {
       e.stopPropagation();
@@ -360,7 +574,62 @@
       if (lbIndex < lbUrls.length - 1) { lbIndex++; updateLightbox(); }
     });
     lbClose.addEventListener('click', e => { e.stopPropagation(); closeLightbox(); });
-    lightbox.addEventListener('click', e => { if (e.target === lightbox) closeLightbox(); });
+
+    btnRotateL.addEventListener('click', e => { e.stopPropagation(); rotateBy(-90); });
+    btnRotateR.addEventListener('click', e => { e.stopPropagation(); rotateBy(90); });
+    btnZoomIn.addEventListener('click', e => { e.stopPropagation(); setZoom(zoom * CFG.zoom.step); });
+    btnZoomOut.addEventListener('click', e => { e.stopPropagation(); setZoom(zoom / CFG.zoom.step); });
+    zoomLabel.addEventListener('click', e => { e.stopPropagation(); resetView(); });
+
+    // ── Масштабирование колесом мыши ─────────────────────────────────
+
+    lightbox.addEventListener('wheel', e => {
+      if (!lightbox.classList.contains('open')) return;
+      // Иначе прокрутится страница под лайтбоксом
+      e.preventDefault();
+      const { x, y } = stageCenterOffset(e);
+      setZoom(e.deltaY < 0 ? zoom * CFG.zoom.step : zoom / CFG.zoom.step, x, y);
+    }, { passive: false });
+
+    // ── Перетаскивание увеличенной картинки ──────────────────────────
+
+    let dragging = false;
+    let dragMoved = false;
+    let dragStart = { x: 0, y: 0, panX: 0, panY: 0 };
+
+    lbImg.addEventListener('mousedown', e => {
+      if (zoom <= 1) return;
+      e.preventDefault();
+      dragging = true;
+      dragMoved = false;
+      dragStart = { x: e.clientX, y: e.clientY, panX: panX, panY: panY };
+      lbImg.classList.add('dragging');
+    });
+
+    window.addEventListener('mousemove', e => {
+      if (!dragging) return;
+      const dx = e.clientX - dragStart.x;
+      const dy = e.clientY - dragStart.y;
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) dragMoved = true;
+      panX = dragStart.panX + dx;
+      panY = dragStart.panY + dy;
+      applyTransform();
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      lbImg.classList.remove('dragging');
+    });
+
+    lightbox.addEventListener('click', e => {
+      // Если мышь отпустили за пределами картинки после перетаскивания,
+      // клик всплывает до фона — закрывать лайтбокс в этом случае не нужно
+      if (dragMoved) { dragMoved = false; return; }
+      if (e.target === lightbox) closeLightbox();
+    });
+
+    lbImg.addEventListener('dblclick', e => { e.stopPropagation(); resetView(); });
 
     document.addEventListener('keydown', e => {
       if (!lightbox.classList.contains('open')) return;
