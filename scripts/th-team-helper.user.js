@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.3
-// @description  Четыре помощника в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
+// @version      1.4
+// @description  Пять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, автоподстановка своего Reddy ID в модалку экспорта файла и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -13,6 +13,9 @@
 // @match        https://my-managment.com/en/admin/report/requestrefill*
 // @match        https://managment.io/en/admin/report/requestrefill*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @connect      doc.office.lan
 // @updateURL    https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/scripts/th-team-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/scripts/th-team-helper.user.js
@@ -33,6 +36,8 @@
       prevStatus: true,
       // Поиск лимитов по странице Confluence при выделении текста
       limitsFinder: true,
+      // Подстановка своего Medium ID
+      messengerId: true,
       // Автоподстановка диапазона дат после применения фильтра
       autoDateRange: true,
     },
@@ -84,6 +89,20 @@
       timeout: 15000,
       // Ширина всплывающего окна (px)
       width: 340,
+    },
+
+    // ── Подстановка Reddy ID ──────────────────────────────────────────
+    messengerId: {
+      // Ключ в хранилище Tampermonkey
+      storageKey: 'reddyId',
+      // Атрибут в серверной разметке страницы, откуда берётся ID
+      // (технически это поле называется curr_medium, но в интерфейсе
+      // и в кнопках сайт называет этот мессенджер Reddy)
+      sourceAttr: 'curr_medium',
+      // Плейсхолдер поля в модалке SweetAlert2, куда подставляется ID.
+      // Именно по нему находим поле — оно не имеет id/name, а кнопка,
+      // открывающая модалку, может называться по-разному в разных местах
+      fieldPlaceholder: 'Reddy ID',
     },
 
     // ── Автоподстановка дат ──────────────────────────────────────────
@@ -1748,6 +1767,126 @@
   }
 
   // ==================================================================
+  // 5. ПОДСТАНОВКА REDDY ID
+  // ==================================================================
+
+  // Хранилище Tampermonkey переживает обновления скрипта и общее для всех
+  // трёх доменов. Откат на localStorage нужен только для отладки вне
+  // расширения, где GM-функций нет.
+  const store = {
+    get(key, fallback) {
+      if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);
+      const v = localStorage.getItem('th-helper:' + key);
+      return v === null ? fallback : v;
+    },
+    set(key, value) {
+      if (typeof GM_setValue === 'function') { GM_setValue(key, value); return; }
+      localStorage.setItem('th-helper:' + key, value);
+    },
+  };
+
+  function initMessengerId() {
+    const CFG = CONFIG.messengerId;
+
+    // Reddy ID лежит в серверной разметке страницы на компоненте leftpanel.
+    // К моменту запуска скрипта Vue уже заменил этот элемент собой,
+    // поэтому из DOM атрибут не достать — забираем исходный HTML страницы.
+    function fetchIdFromPage() {
+      return fetch(location.href, { credentials: 'same-origin' })
+        .then(r => r.text())
+        .then(html => {
+          const m = html.match(new RegExp(CFG.sourceAttr + '="([^"]*)"'));
+          return m && m[1] ? m[1].trim() : null;
+        })
+        .catch(err => {
+          log('Не удалось получить ID со страницы', err);
+          return null;
+        });
+    }
+
+    // Один раз найденный ID сохраняется, дальше берётся из хранилища
+    // мгновенно и без запроса.
+    let idPromise = null;
+    function resolveId() {
+      const saved = store.get(CFG.storageKey, '');
+      if (saved) return Promise.resolve(saved);
+      if (!idPromise) {
+        idPromise = fetchIdFromPage().then(id => {
+          if (id) {
+            store.set(CFG.storageKey, id);
+            log('Reddy ID определён со страницы:', id);
+          } else {
+            // Пустой профиль или другая разметка: пусть попробует снова,
+            // а оператор при желании задаст ID через меню расширения
+            idPromise = null;
+            log('Reddy ID на странице не найден, задайте его через меню Tampermonkey');
+          }
+          return id;
+        });
+      }
+      return idPromise;
+    }
+
+    // Пункт меню нужен на случай, когда в профиле Reddy не заполнен
+    // или ID надо поменять руками (например, чтобы временно подставлять
+    // чужой ID вместо своего).
+    if (typeof GM_registerMenuCommand === 'function') {
+      GM_registerMenuCommand('Team Helper: мой Reddy ID', () => {
+        const current = store.get(CFG.storageKey, '');
+        const next = prompt(
+          'Reddy ID для подстановки.\n'
+          + 'Оставьте поле пустым, чтобы скрипт определил его со страницы заново.',
+          current
+        );
+        if (next === null) return;
+        store.set(CFG.storageKey, next.trim());
+        idPromise = null;
+        alert(next.trim()
+          ? 'Reddy ID сохранён: ' + next.trim()
+          : 'Reddy ID очищен, он будет определён со страницы автоматически.');
+      });
+    }
+
+    // Прогреваем значение заранее, чтобы подстановка была мгновенной
+    resolveId();
+
+    // ── Подстановка в модалку SweetAlert2 ─────────────────────────────
+    //
+    // Поле не имеет id/name, поэтому ищем его по классу и плейсхолдеру —
+    // это устойчиво к тому, какая именно кнопка открыла модалку.
+    // Заполняем только если поле пустое: если оператор уже что-то ввёл
+    // (например, чтобы отправить файл коллеге), скрипт это не трогает.
+    // Флаг на самом элементе защищает от повторной обработки одного и
+    // того же поля при последующих срабатываниях наблюдателя, а новая
+    // модалка каждый раз создаёт новый DOM-элемент, так что для неё
+    // подстановка сработает снова.
+    function trySubstituteField(input) {
+      if (input.dataset.thFilled) return;
+      if (input.value.trim()) { input.dataset.thFilled = '1'; return; }
+      resolveId().then(id => {
+        if (!id) return;
+        if (input.dataset.thFilled) return;
+        if (!document.body.contains(input)) return; // модалку уже закрыли
+        if (input.value.trim()) { input.dataset.thFilled = '1'; return; }
+        const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        nativeSetter.call(input, id);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dataset.thFilled = '1';
+        log('Reddy ID подставлен в поле:', id);
+      });
+    }
+
+    const fieldSelector = `input.swal2-input[placeholder="${CFG.fieldPlaceholder}"]`;
+    new MutationObserver(() => {
+      const input = document.querySelector(fieldSelector);
+      if (input) trySubstituteField(input);
+    }).observe(document.body, { childList: true, subtree: true });
+
+    log('Подстановка Reddy ID включена');
+  }
+
+  // ==================================================================
   // ЗАПУСК
   // ==================================================================
 
@@ -1755,6 +1894,7 @@
     if (CONFIG.features.filePreview) initFilePreview();
     if (CONFIG.features.prevStatus) initPrevStatus();
     if (CONFIG.features.limitsFinder) initLimitsFinder();
+    if (CONFIG.features.messengerId) initMessengerId();
     if (CONFIG.features.autoDateRange) initAutoDateRange();
     log('Скрипт запущен на', window.location.pathname);
   }
