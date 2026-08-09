@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.7
+// @version      1.8
 // @description  Шесть помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -1994,12 +1994,27 @@
     // Ожидаемый формат страницы: одна таблица, три столбца в фиксированном
     // порядке — логин | имя | отдел. Столбцы читаются по позиции, а не
     // по названию заголовка, поэтому шапку таблицы можно оформить как угодно.
+    function collectTables(doc) {
+      const tables = Array.from(doc.querySelectorAll('table'));
+      // HTML-макрос Confluence вставляет вложенный HTML как
+      // <iframe srcdoc="...">, а не как обычные узлы в DOM страницы —
+      // в исходнике это просто экранированная строка-атрибут, её нужно
+      // распарсить отдельным DOMParser'ом, чтобы добраться до таблицы.
+      doc.querySelectorAll('iframe[srcdoc]').forEach(frame => {
+        const srcdoc = frame.getAttribute('srcdoc');
+        if (!srcdoc) return;
+        const inner = new DOMParser().parseFromString(srcdoc, 'text/html');
+        tables.push(...collectTables(inner));
+      });
+      return tables;
+    }
+
     function parseDirectory(doc) {
       const map = new Map();
       // Страница Confluence не гарантированно содержит только одну таблицу
       // (макросы, панели свойств и т.п. могут добавить свои перед таблицей
       // с данными) — читаем все и сливаем в одну карту.
-      doc.querySelectorAll('table').forEach(table => {
+      collectTables(doc).forEach(table => {
         table.querySelectorAll('tr').forEach(row => {
           const cells = row.querySelectorAll('td');
           if (cells.length < 3) return; // строка заголовка обычно из th, сюда не попадёт
