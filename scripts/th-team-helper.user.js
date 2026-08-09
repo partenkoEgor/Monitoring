@@ -36,7 +36,7 @@
       prevStatus: true,
       // Поиск лимитов по странице Confluence при выделении текста
       limitsFinder: true,
-      // Подстановка своего Medium ID
+      // Подстановка своего Reddy ID
       messengerId: true,
       // Автоподстановка диапазона дат после применения фильтра
       autoDateRange: true,
