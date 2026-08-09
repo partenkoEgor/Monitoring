@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.4
-// @description  Пять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, автоподстановка своего Reddy ID в модалку экспорта файла и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
+// @version      1.6
+// @description  Шесть помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -36,7 +36,9 @@
       prevStatus: true,
       // Поиск лимитов по странице Confluence при выделении текста
       limitsFinder: true,
-      // Подстановка своего Medium ID
+      // Справочник админов: имя и отдел по логину в окне истории тикета
+      adminDirectory: true,
+      // Подстановка своего Reddy ID
       messengerId: true,
       // Автоподстановка диапазона дат после применения фильтра
       autoDateRange: true,
@@ -89,6 +91,22 @@
       timeout: 15000,
       // Ширина всплывающего окна (px)
       width: 340,
+    },
+
+    // ── Справочник админов ───────────────────────────────────────────
+    adminDirectory: {
+      // Страница Confluence «Расшифровка логинов L2 PS» — одна таблица из
+      // трёх столбцов в этом порядке: логин | имя | отдел. Столбцы
+      // читаются по позиции, а не по названию — заголовки могут быть
+      // любыми.
+      pageUrl: 'https://doc.office.lan/spaces/MENA/pages/663814054/%D0%A0%D0%B0%D1%81%D1%88%D0%B8%D1%84%D1%80%D0%BE%D0%B2%D0%BA%D0%B0+%D0%BB%D0%BE%D0%B3%D0%B8%D0%BD%D0%BE%D0%B2+L2+PS',
+      // Название колонки в окне «История тикета», где лежит логин
+      // (подстрока, в нижнем регистре)
+      column: 'admin username',
+      // Сколько ждать ответа от Confluence (мс)
+      timeout: 15000,
+      // Задержка перед скрытием тултипа (мс)
+      hideDelay: 150,
     },
 
     // ── Подстановка Reddy ID ──────────────────────────────────────────
@@ -1887,6 +1905,203 @@
   }
 
   // ==================================================================
+  // 6. СПРАВОЧНИК АДМИНОВ
+  // ==================================================================
+
+  function initAdminDirectory() {
+    const CFG = CONFIG.adminDirectory;
+
+    addStyle('th-helper-admindir-style', `
+      #th-admin-tt {
+        position: fixed;
+        z-index: 100000;
+        max-width: 260px;
+        background: ${T.bg};
+        border: .5px solid ${T.border};
+        border-radius: 8px;
+        padding: 8px 11px;
+        font-size: 11px;
+        line-height: 1.5;
+        color: ${T.text};
+        box-shadow: ${T.shadow};
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity .12s;
+      }
+      #th-admin-tt.show { opacity: 1; }
+      #th-admin-tt .th-adm-label {
+        font-size: 9.5px;
+        text-transform: uppercase;
+        letter-spacing: .05em;
+        color: ${T.textDim};
+        margin-bottom: 3px;
+      }
+      #th-admin-tt .th-adm-login {
+        font-weight: 600;
+        color: ${T.textStrong};
+      }
+      #th-admin-tt .th-adm-divider {
+        border: none;
+        border-top: .5px solid ${T.border};
+        margin: 6px 0;
+      }
+      #th-admin-tt .th-adm-name {
+        font-weight: 600;
+        color: ${T.textStrong};
+      }
+      #th-admin-tt .th-adm-dept {
+        color: ${T.textDim};
+        margin-top: 2px;
+        font-size: 10.5px;
+      }
+      #th-admin-tt .th-adm-missing,
+      #th-admin-tt .th-adm-loading {
+        color: ${T.textDim};
+        font-style: italic;
+      }
+    `);
+
+    const tt = document.createElement('div');
+    tt.id = 'th-admin-tt';
+    document.body.appendChild(tt);
+
+    function escapeHtml(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    // Страница на другом домене — нужен GM_xmlhttpRequest вместе с @connect
+    // в шапке. Тот же грант уже используется поиском лимитов, новый не
+    // требуется. Запасной путь через fetch — для отладки вне Tampermonkey.
+    function requestPage(url) {
+      return new Promise((resolve, reject) => {
+        if (typeof GM_xmlhttpRequest === 'function') {
+          GM_xmlhttpRequest({
+            method: 'GET',
+            url: url,
+            timeout: CFG.timeout,
+            onload: r => resolve(r.responseText),
+            onerror: () => reject(new Error('network')),
+            ontimeout: () => reject(new Error('timeout')),
+          });
+          return;
+        }
+        fetch(url, { credentials: 'include' })
+          .then(r => r.text())
+          .then(resolve, reject);
+      });
+    }
+
+    // Ожидаемый формат страницы: одна таблица, три столбца в фиксированном
+    // порядке — логин | имя | отдел. Столбцы читаются по позиции, а не
+    // по названию заголовка, поэтому шапку таблицы можно оформить как угодно.
+    function parseDirectory(doc) {
+      const map = new Map();
+      const table = doc.querySelector('table');
+      if (!table) return map;
+
+      table.querySelectorAll('tr').forEach(row => {
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 3) return; // строка заголовка обычно из th, сюда не попадёт
+        const login = cells[0].textContent.trim();
+        if (!login) return;
+        map.set(login, {
+          name: cells[1].textContent.trim(),
+          department: cells[2].textContent.trim(),
+        });
+      });
+
+      return map;
+    }
+
+    // Справочник грузится один раз за сессию, дальше все наведения — это
+    // мгновенный поиск в уже загруженной карте, без обращений к серверу.
+    let dirPromise = null;
+    function loadDirectory() {
+      if (!dirPromise) {
+        dirPromise = requestPage(CFG.pageUrl)
+          .then(html => parseDirectory(new DOMParser().parseFromString(html, 'text/html')))
+          .catch(err => {
+            dirPromise = null;
+            log('Не удалось загрузить справочник админов', err);
+            throw err;
+          });
+      }
+      return dirPromise;
+    }
+
+    function render(login, state, entry) {
+      const header = `<div class="th-adm-label">Admin username</div>`
+        + `<div class="th-adm-login">${escapeHtml(login)}</div>`
+        + `<hr class="th-adm-divider">`;
+      if (state === 'loading') { tt.innerHTML = header + `<span class="th-adm-loading">Загрузка…</span>`; return; }
+      if (state === 'error')   { tt.innerHTML = header + `<span class="th-adm-missing">Ошибка загрузки справочника</span>`; return; }
+      if (state === 'none')    { tt.innerHTML = header + `<span class="th-adm-missing">Не найден в справочнике</span>`; return; }
+      tt.innerHTML = header
+        + `<div class="th-adm-name">${escapeHtml(entry.name)}</div>`
+        + (entry.department ? `<div class="th-adm-dept">${escapeHtml(entry.department)}</div>` : '');
+    }
+
+    // Таблица в окне «История тикета» не оборачивает шапку в <thead> —
+    // строка заголовка это <tr class="table-head">, поэтому ищем и там,
+    // и в <thead> на случай, если колонка встретится в таблице другого типа.
+    function getAdminColIndex(table) {
+      const headers = Array.from(table.querySelectorAll('tr.table-head th, thead th'));
+      return headers.findIndex(h => h.textContent.trim().toLowerCase() === CFG.column);
+    }
+
+    let hideTimer = null;
+    let currentLogin = null;
+
+    document.addEventListener('mouseover', e => {
+      const td = e.target instanceof Element ? e.target.closest('td') : null;
+      if (!td) return;
+
+      const table = td.closest('table');
+      if (!table) return;
+
+      const colIdx = getAdminColIndex(table);
+      if (colIdx === -1 || td.cellIndex !== colIdx) return;
+
+      const login = td.textContent.trim();
+      if (!login) return;
+
+      clearTimeout(hideTimer);
+      currentLogin = login;
+
+      render(login, 'loading');
+      tt.classList.add('show');
+      placeNearCursor(tt, e.clientX, e.clientY);
+
+      loadDirectory().then(map => {
+        // Пока грузилось, мышь могла уйти на другой логин
+        if (currentLogin !== login) return;
+        const entry = map.get(login);
+        render(login, entry ? 'found' : 'none', entry);
+        placeNearCursor(tt, e.clientX, e.clientY);
+      }).catch(() => {
+        if (currentLogin !== login) return;
+        render(login, 'error');
+        placeNearCursor(tt, e.clientX, e.clientY);
+      });
+    });
+
+    document.addEventListener('mousemove', e => {
+      if (tt.classList.contains('show')) placeNearCursor(tt, e.clientX, e.clientY);
+    });
+
+    document.addEventListener('mouseout', e => {
+      const td = e.target instanceof Element ? e.target.closest('td') : null;
+      if (!td) return;
+      hideTimer = setTimeout(() => {
+        tt.classList.remove('show');
+        currentLogin = null;
+      }, CFG.hideDelay);
+    });
+
+    log('Справочник админов включён, страница:', CFG.pageUrl);
+  }
+
+  // ==================================================================
   // ЗАПУСК
   // ==================================================================
 
@@ -1894,6 +2109,7 @@
     if (CONFIG.features.filePreview) initFilePreview();
     if (CONFIG.features.prevStatus) initPrevStatus();
     if (CONFIG.features.limitsFinder) initLimitsFinder();
+    if (CONFIG.features.adminDirectory) initAdminDirectory();
     if (CONFIG.features.messengerId) initMessengerId();
     if (CONFIG.features.autoDateRange) initAutoDateRange();
     log('Скрипт запущен на', window.location.pathname);
