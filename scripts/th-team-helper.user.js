@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.6
+// @version      1.7
 // @description  Шесть помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -1996,17 +1996,19 @@
     // по названию заголовка, поэтому шапку таблицы можно оформить как угодно.
     function parseDirectory(doc) {
       const map = new Map();
-      const table = doc.querySelector('table');
-      if (!table) return map;
-
-      table.querySelectorAll('tr').forEach(row => {
-        const cells = row.querySelectorAll('td');
-        if (cells.length < 3) return; // строка заголовка обычно из th, сюда не попадёт
-        const login = cells[0].textContent.trim();
-        if (!login) return;
-        map.set(login, {
-          name: cells[1].textContent.trim(),
-          department: cells[2].textContent.trim(),
+      // Страница Confluence не гарантированно содержит только одну таблицу
+      // (макросы, панели свойств и т.п. могут добавить свои перед таблицей
+      // с данными) — читаем все и сливаем в одну карту.
+      doc.querySelectorAll('table').forEach(table => {
+        table.querySelectorAll('tr').forEach(row => {
+          const cells = row.querySelectorAll('td');
+          if (cells.length < 3) return; // строка заголовка обычно из th, сюда не попадёт
+          const login = cells[0].textContent.trim();
+          if (!login) return;
+          map.set(login, {
+            name: cells[1].textContent.trim(),
+            department: cells[2].textContent.trim(),
+          });
         });
       });
 
@@ -2019,7 +2021,13 @@
     function loadDirectory() {
       if (!dirPromise) {
         dirPromise = requestPage(CFG.pageUrl)
-          .then(html => parseDirectory(new DOMParser().parseFromString(html, 'text/html')))
+          .then(html => {
+            const map = parseDirectory(new DOMParser().parseFromString(html, 'text/html'));
+            if (map.size === 0) {
+              log('Справочник админов загружен, но не удалось разобрать ни одной строки — проверьте разметку страницы Confluence');
+            }
+            return map;
+          })
           .catch(err => {
             dirPromise = null;
             log('Не удалось загрузить справочник админов', err);
