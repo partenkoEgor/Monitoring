@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.2
-// @description  Три помощника в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
+// @version      1.3
+// @description  Четыре помощника в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -12,7 +12,8 @@
 // @match        https://th-managment.com/en/admin/report/requestrefill*
 // @match        https://my-managment.com/en/admin/report/requestrefill*
 // @match        https://managment.io/en/admin/report/requestrefill*
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      doc.office.lan
 // @updateURL    https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/scripts/th-team-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/scripts/th-team-helper.user.js
 // ==/UserScript==
@@ -30,6 +31,8 @@
       filePreview: true,
       // Тултип с предыдущим статусом для закрытых тикетов
       prevStatus: true,
+      // Поиск лимитов по странице Confluence при выделении текста
+      limitsFinder: true,
       // Автоподстановка диапазона дат после применения фильтра
       autoDateRange: true,
     },
@@ -68,6 +71,21 @@
       hideDelay: 150,
     },
 
+    // ── Поиск лимитов в Confluence ───────────────────────────────────
+    limitsFinder: {
+      // ВАЖНО: проверьте, что это нужная вам страница. Адрес взят из
+      // скрипта Team B; если у вашей команды лимиты лежат на другой
+      // странице, замените ссылку здесь.
+      pageUrl: 'https://doc.office.lan/spaces/MENA/pages/373073072/%D0%9B%D0%98%D0%9C%D0%98%D0%A2%D0%AB+%D0%A0%D0%A3%D0%A7%D0%9D%D0%AB%D0%95',
+      // В какой колонке таблицы работает выделение текста (подстрока
+      // названия колонки, в нижнем регистре)
+      column: 'query subagent',
+      // Сколько ждать ответа от Confluence (мс)
+      timeout: 15000,
+      // Ширина всплывающего окна (px)
+      width: 340,
+    },
+
     // ── Автоподстановка дат ──────────────────────────────────────────
     autoDateRange: {
       // Насколько назад отсчитывать начало диапазона.
@@ -92,7 +110,11 @@
   // ОБЩЕЕ
   // ------------------------------------------------------------------
 
-  const isDark = window._THEME === 'dark';
+  // Со включённым @grant скрипт работает в песочнице, и window здесь —
+  // не окно страницы. Тему админка держит в своей переменной, поэтому
+  // читаем её через unsafeWindow, когда он доступен.
+  const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+  const isDark = pageWindow._THEME === 'dark';
 
   const T = isDark ? {
     bg: '#1C2128',
@@ -101,6 +123,7 @@
     textStrong: '#E6EDF3',
     textDim: '#8B949E',
     imgBg: '#0D1117',
+    panel: '#161B22',
     shadow: '0 8px 24px rgba(0,0,0,0.45)',
   } : {
     bg: '#fff',
@@ -109,6 +132,7 @@
     textStrong: '#172B4D',
     textDim: '#8993A4',
     imgBg: '#F7F8FA',
+    panel: '#F6F7F8',
     shadow: '0 8px 24px rgba(0,0,0,0.18)',
   };
 
@@ -1024,7 +1048,625 @@
   }
 
   // ==================================================================
-  // 3. АВТОПОДСТАНОВКА ДИАПАЗОНА ДАТ
+  // 3. ПОИСК ЛИМИТОВ В CONFLUENCE
+  // ==================================================================
+
+  function initLimitsFinder() {
+    const CFG = CONFIG.limitsFinder;
+
+    addStyle('th-helper-limits-style', `
+      #th-lim-popup {
+        position: fixed;
+        z-index: 999999;
+        display: none;
+        flex-direction: column;
+        background: ${T.bg};
+        border: 1px solid ${T.border};
+        border-radius: 10px;
+        box-shadow: ${T.shadow};
+        font-family: "Open Sans", Tahoma, Arial, sans-serif;
+        font-size: 12px;
+        color: ${T.text};
+        width: ${CFG.width}px;
+        max-height: calc(100vh - 32px);
+        overflow: visible;
+        clip-path: inset(0 round 10px);
+        animation: th-lim-appear .16s cubic-bezier(0.34, 1.4, 0.64, 1) both;
+        transform-origin: top center;
+      }
+      @keyframes th-lim-appear {
+        from { opacity: 0; transform: scale(0.88) translateY(-4px); }
+        to   { opacity: 1; transform: scale(1) translateY(0); }
+      }
+      #th-lim-popup.th-lim-hiding { animation: th-lim-vanish .1s ease both; }
+      @keyframes th-lim-vanish {
+        to { opacity: 0; transform: scale(0.94) translateY(-3px); }
+      }
+
+      #th-lim-header {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 9px 12px 8px;
+        background: linear-gradient(135deg, ${ACCENT} 0%, ${ACCENT_HOVER} 100%);
+        flex-shrink: 0;
+      }
+      #th-lim-header-icon {
+        width: 22px; height: 22px;
+        border-radius: 5px;
+        background: rgba(255,255,255,0.2);
+        color: #fff;
+        display: flex; align-items: center; justify-content: center;
+        flex-shrink: 0;
+      }
+      #th-lim-header-icon svg { width: 12px; height: 12px; }
+      #th-lim-header-text { flex: 1; min-width: 0; }
+      #th-lim-label {
+        font-size: 9px; font-weight: 700;
+        letter-spacing: .08em; text-transform: uppercase;
+        color: rgba(255,255,255,0.8);
+        margin-bottom: 1px;
+      }
+      #th-lim-query {
+        font-size: 11.5px; font-weight: 600; color: #fff;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      #th-lim-open {
+        color: rgba(255,255,255,0.7);
+        text-decoration: none;
+        flex-shrink: 0;
+        display: flex; align-items: center;
+        transition: color .1s;
+      }
+      #th-lim-open:hover { color: #fff; }
+      #th-lim-open svg { width: 13px; height: 13px; }
+
+      #th-lim-state {
+        display: none;
+        align-items: center;
+        gap: 8px;
+        padding: 14px;
+        font-size: 11.5px;
+        color: ${T.textDim};
+      }
+      #th-lim-state.loading { color: ${ACCENT}; }
+      #th-lim-state svg { width: 15px; height: 15px; flex-shrink: 0; }
+
+      #th-lim-nav {
+        display: none;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        background: ${T.panel};
+        border-bottom: 1px solid ${T.border};
+        flex-shrink: 0;
+      }
+      #th-lim-counter { flex: 1; font-size: 11px; font-weight: 600; color: ${T.textDim}; }
+      #th-lim-counter b { color: ${T.text}; }
+      .th-lim-nav-btn {
+        width: 24px; height: 24px;
+        border-radius: 5px;
+        border: 1px solid ${T.border};
+        background: ${T.bg};
+        color: ${T.text};
+        cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        padding: 0;
+        transition: background .1s, border-color .1s;
+      }
+      .th-lim-nav-btn:hover { background: ${T.panel}; }
+      .th-lim-nav-btn svg { width: 11px; height: 11px; }
+
+      #th-lim-heading {
+        display: none;
+        align-items: center;
+        gap: 6px;
+        padding: 7px 12px 6px;
+        background: rgba(42,191,207,0.07);
+        border-bottom: 1px solid rgba(42,191,207,0.15);
+        font-size: 11px;
+        font-weight: 700;
+        color: ${ACCENT_HOVER};
+        line-height: 1.3;
+      }
+      #th-lim-heading svg { width: 11px; height: 11px; flex-shrink: 0; opacity: .7; }
+
+      #th-lim-result {
+        display: none;
+        flex-direction: column;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        min-height: 0;
+        flex: 1 1 auto;
+      }
+      #th-lim-result::-webkit-scrollbar { width: 4px; }
+      #th-lim-result::-webkit-scrollbar-track { background: transparent; }
+      #th-lim-result::-webkit-scrollbar-thumb { background: ${T.border}; border-radius: 4px; }
+      .th-lim-row { display: flex; border-bottom: 1px solid ${T.border}; }
+      .th-lim-row:last-child { border-bottom: none; }
+      .th-lim-col-label {
+        width: 110px;
+        flex-shrink: 0;
+        padding: 7px 10px;
+        background: ${T.panel};
+        border-right: 1px solid ${T.border};
+        font-size: 10px;
+        font-weight: 700;
+        color: ${T.textDim};
+        text-transform: uppercase;
+        letter-spacing: .05em;
+        line-height: 1.3;
+        word-break: break-word;
+        display: flex;
+        align-items: flex-start;
+      }
+      .th-lim-col-value {
+        flex: 1;
+        padding: 7px 10px;
+        font-size: 11.5px;
+        color: ${T.text};
+        line-height: 1.45;
+        word-break: break-word;
+        min-width: 0;
+      }
+      .th-lim-hl {
+        background: #fde047;
+        color: #1c1917;
+        border-radius: 2px;
+        padding: 0 1px;
+        font-weight: 700;
+      }
+      /* Зачёркнутые строки таблицы означают отменённый лимит */
+      .th-lim-row.striked .th-lim-col-value {
+        color: ${T.textDim};
+        text-decoration: line-through;
+      }
+      .th-lim-row.striked .th-lim-col-label { opacity: .6; }
+
+      #th-lim-arrow {
+        position: fixed;
+        z-index: 999998;
+        display: none;
+        pointer-events: none;
+        width: 12px; height: 7px;
+      }
+    `);
+
+    const popup = document.createElement('div');
+    popup.id = 'th-lim-popup';
+    popup.innerHTML = `
+      <div id="th-lim-header">
+        <div id="th-lim-header-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+        </div>
+        <div id="th-lim-header-text">
+          <div id="th-lim-label">Лимиты</div>
+          <div id="th-lim-query">…</div>
+        </div>
+        <a id="th-lim-open" target="_blank" rel="noopener" title="Открыть страницу Confluence">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+            <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+          </svg>
+        </a>
+      </div>
+
+      <div id="th-lim-state">
+        <svg id="th-lim-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></svg>
+        <span id="th-lim-state-text"></span>
+      </div>
+
+      <div id="th-lim-nav">
+        <span id="th-lim-counter"></span>
+        <button class="th-lim-nav-btn" id="th-lim-prev" title="Предыдущий (стрелка влево)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+               stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <button class="th-lim-nav-btn" id="th-lim-next" title="Следующий (стрелка вправо)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+               stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+
+      <div id="th-lim-heading">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/>
+          <line x1="3" y1="18" x2="18" y2="18"/>
+        </svg>
+        <span id="th-lim-heading-text"></span>
+      </div>
+      <div id="th-lim-result"></div>
+    `;
+    document.body.appendChild(popup);
+    popup.querySelector('#th-lim-open').href = CFG.pageUrl;
+
+    const arrow = document.createElement('div');
+    arrow.id = 'th-lim-arrow';
+    arrow.innerHTML = `<svg width="12" height="7" viewBox="0 0 12 7">
+      <path id="th-lim-arrow-path" d="M6 0L12 7H0Z" fill="${T.bg}"/></svg>`;
+    document.body.appendChild(arrow);
+
+    const stateEl = popup.querySelector('#th-lim-state');
+    const stateIcon = popup.querySelector('#th-lim-state-icon');
+    const stateText = popup.querySelector('#th-lim-state-text');
+    const navEl = popup.querySelector('#th-lim-nav');
+    const counterEl = popup.querySelector('#th-lim-counter');
+    const headingEl = popup.querySelector('#th-lim-heading');
+    const headingText = popup.querySelector('#th-lim-heading-text');
+    const resultEl = popup.querySelector('#th-lim-result');
+    const queryEl = popup.querySelector('#th-lim-query');
+
+    let results = [];
+    let curIdx = 0;
+    let currentText = '';
+    let hideTimer = null;
+
+    // ── Загрузка страницы Confluence ─────────────────────────────────
+
+    // Страница на другом домене, поэтому обычный fetch её не возьмёт:
+    // нужен GM_xmlhttpRequest вместе с @connect в шапке. Запасной путь
+    // через fetch оставлен для отладки вне Tampermonkey.
+    function requestPage(url) {
+      return new Promise((resolve, reject) => {
+        if (typeof GM_xmlhttpRequest === 'function') {
+          GM_xmlhttpRequest({
+            method: 'GET',
+            url: url,
+            timeout: CFG.timeout,
+            onload: r => resolve(r.responseText),
+            onerror: () => reject(new Error('network')),
+            ontimeout: () => reject(new Error('timeout')),
+          });
+          return;
+        }
+        fetch(url, { credentials: 'include' })
+          .then(r => r.text())
+          .then(resolve, reject);
+      });
+    }
+
+    // Один запрос на всю сессию. Параллельные вызовы получают тот же
+    // промис, а после ошибки кэш сбрасывается, чтобы можно было повторить.
+    let pagePromise = null;
+    function loadPage() {
+      if (!pagePromise) {
+        pagePromise = requestPage(CFG.pageUrl)
+          .then(html => new DOMParser().parseFromString(html, 'text/html'))
+          .catch(err => { pagePromise = null; throw err; });
+      }
+      return pagePromise;
+    }
+
+    // ── Разбор страницы ──────────────────────────────────────────────
+
+    // Ближайший заголовок выше таблицы: он говорит, к какому разделу
+    // лимитов относится найденная строка
+    function findHeadingBefore(table, doc) {
+      const headings = Array.from(doc.querySelectorAll('h1, h2, h3, h4'));
+      let best = null;
+      for (const h of headings) {
+        if (h.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING) best = h;
+      }
+      if (!best) return null;
+      const clone = best.cloneNode(true);
+      clone.querySelectorAll('.copy-heading-link-container, button, .aui-icon, [aria-label]')
+        .forEach(n => n.remove());
+      return clone.textContent.trim().replace(/\s+/g, ' ');
+    }
+
+    function searchTables(doc, query) {
+      const q = query.trim().toLowerCase();
+      const found = [];
+
+      doc.querySelectorAll('table').forEach(table => {
+        const headers = [];
+        const theadCells = table.querySelectorAll('thead td, thead th');
+        if (theadCells.length) {
+          theadCells.forEach(th => headers.push(th.textContent.trim()));
+        } else {
+          const firstRow = table.querySelector('tr');
+          if (firstRow) {
+            firstRow.querySelectorAll('td, th').forEach(c => headers.push(c.textContent.trim()));
+          }
+        }
+
+        const heading = findHeadingBefore(table, doc);
+
+        table.querySelectorAll('tbody tr').forEach(row => {
+          const cells = row.querySelectorAll('td');
+          if (!cells.length) return;
+          // Совпадение ищем только в первом столбце: там имя субагента
+          if (!cells[0].textContent.trim().toLowerCase().includes(q)) return;
+
+          const cellData = [];
+          cells.forEach((td, i) => {
+            cellData.push({ label: headers[i] || `Столбец ${i + 1}`, html: td.innerHTML });
+          });
+
+          found.push({
+            cells: cellData,
+            striked: !!cells[0].querySelector('s'),
+            raw: cells[0].textContent.trim(),
+            heading: heading,
+          });
+        });
+      });
+
+      return found;
+    }
+
+    // ── Отрисовка ────────────────────────────────────────────────────
+
+    function escHtml(s) {
+      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function escRx(s) {
+      return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function highlight(text, query) {
+      const q = query.trim();
+      if (!q) return escHtml(text);
+      return escHtml(text).replace(new RegExp(escRx(q), 'gi'), m => `<span class="th-lim-hl">${m}</span>`);
+    }
+
+    // Из разметки Confluence оставляем читаемый текст с переносами
+    function cleanHtml(html) {
+      const div = document.createElement('div');
+      div.innerHTML = html;
+      div.querySelectorAll('.tj-source, .tj-hidden').forEach(el => el.remove());
+      div.querySelectorAll('p').forEach(p => p.insertAdjacentText('afterend', '\n'));
+      div.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
+      return div.textContent.trim().replace(/\n{3,}/g, '\n\n');
+    }
+
+    function renderResult(idx) {
+      const res = results[idx];
+      resultEl.innerHTML = '';
+
+      if (res.heading) {
+        headingText.textContent = res.heading;
+        headingEl.style.display = 'flex';
+      } else {
+        headingEl.style.display = 'none';
+      }
+
+      res.cells.forEach((cell, i) => {
+        const text = i === 0 ? res.raw : cleanHtml(cell.html);
+        if (!text.trim()) return;
+
+        const row = document.createElement('div');
+        row.className = 'th-lim-row' + (res.striked ? ' striked' : '');
+
+        const label = document.createElement('div');
+        label.className = 'th-lim-col-label';
+        label.textContent = cell.label;
+
+        const value = document.createElement('div');
+        value.className = 'th-lim-col-value';
+        if (i === 0) {
+          value.innerHTML = highlight(text, currentText);
+        } else {
+          value.style.whiteSpace = 'pre-line';
+          value.textContent = text;
+        }
+
+        row.appendChild(label);
+        row.appendChild(value);
+        resultEl.appendChild(row);
+      });
+
+      resultEl.style.display = 'flex';
+      requestAnimationFrame(() => { resultEl.scrollTop = 0; });
+    }
+
+    function renderNav() {
+      if (results.length > 1) {
+        navEl.style.display = 'flex';
+        counterEl.innerHTML = `<b>${curIdx + 1}</b> из <b>${results.length}</b>`;
+      } else {
+        navEl.style.display = 'none';
+      }
+    }
+
+    function showState(kind, text, iconMarkup) {
+      stateEl.className = kind;
+      stateEl.style.display = 'flex';
+      stateIcon.innerHTML = iconMarkup;
+      stateText.textContent = text;
+      resultEl.style.display = 'none';
+      navEl.style.display = 'none';
+      headingEl.style.display = 'none';
+    }
+
+    const ICON_SPINNER = '<circle cx="12" cy="12" r="9" stroke-dasharray="28 57" stroke-linecap="round">'
+      + '<animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12"'
+      + ' dur="0.9s" repeatCount="indefinite"/></circle>';
+    const ICON_EMPTY = '<circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12"/>'
+      + '<line x1="12" y1="16" x2="12.01" y2="16"/>';
+    const ICON_ERROR = '<circle cx="12" cy="12" r="9"/><line x1="15" y1="9" x2="9" y2="15"/>'
+      + '<line x1="9" y1="9" x2="15" y2="15"/>';
+
+    async function runSearch(query) {
+      currentText = query.trim();
+      queryEl.textContent = currentText.length > 36 ? currentText.slice(0, 36) + '…' : currentText;
+
+      showState('loading', 'Загружаю страницу…', ICON_SPINNER);
+
+      try {
+        const doc = await loadPage();
+        results = searchTables(doc, currentText);
+        curIdx = 0;
+
+        if (!results.length) {
+          showState('empty', `«${currentText}» не найдено на странице`, ICON_EMPTY);
+          return;
+        }
+
+        stateEl.style.display = 'none';
+        renderResult(curIdx);
+        renderNav();
+      } catch (e) {
+        log('Не удалось загрузить страницу Confluence', e);
+        showState('empty', 'Ошибка загрузки страницы Confluence', ICON_ERROR);
+      }
+    }
+
+    // ── Позиционирование ─────────────────────────────────────────────
+
+    function place(rect) {
+      popup.style.display = 'flex';
+      popup.classList.remove('th-lim-hiding');
+
+      const gap = 10;
+      const margin = 8;
+      const maxH = window.innerHeight - margin * 2;
+      popup.style.maxHeight = maxH + 'px';
+
+      const pw = popup.offsetWidth || CFG.width;
+      const ph = Math.min(popup.offsetHeight || 80, maxH);
+
+      let left = rect.left + rect.width / 2 - pw / 2;
+      if (left + pw > window.innerWidth - margin) left = window.innerWidth - pw - margin;
+      if (left < margin) left = margin;
+
+      // Сначала пробуем над выделением, потом под ним, иначе прижимаем к верху
+      let top = rect.top - ph - gap;
+      let below = false;
+      if (top < margin) {
+        const topIfBelow = rect.bottom + gap;
+        if (topIfBelow + ph <= window.innerHeight - margin) {
+          top = topIfBelow;
+          below = true;
+        } else {
+          top = margin;
+        }
+      }
+
+      popup.style.left = left + 'px';
+      popup.style.top = top + 'px';
+
+      const ax = Math.min(Math.max(rect.left + rect.width / 2 - 6, left + 12), left + pw - 18);
+      const path = document.getElementById('th-lim-arrow-path');
+      if (path) path.setAttribute('fill', below ? ACCENT : T.bg);
+      arrow.style.left = ax + 'px';
+      arrow.style.top = (below ? top - 7 : top + ph) + 'px';
+      arrow.querySelector('svg').style.transform = below ? 'rotate(0deg)' : 'rotate(180deg)';
+      arrow.style.display = 'block';
+    }
+
+    function show(text, rect) {
+      clearTimeout(hideTimer);
+      place(rect);
+      // После загрузки высота меняется, поэтому позицию считаем ещё раз
+      runSearch(text).then(() => place(rect));
+    }
+
+    function hide() {
+      clearTimeout(hideTimer);
+      if (popup.style.display === 'none') return;
+      popup.classList.add('th-lim-hiding');
+      arrow.style.display = 'none';
+      hideTimer = setTimeout(() => {
+        popup.style.display = 'none';
+        popup.classList.remove('th-lim-hiding');
+        resultEl.style.display = 'none';
+        navEl.style.display = 'none';
+        stateEl.style.display = 'none';
+        headingEl.style.display = 'none';
+        results = [];
+        curIdx = 0;
+      }, 110);
+    }
+
+    // ── Определение нужной колонки ───────────────────────────────────
+
+    function cellInTargetColumn(node) {
+      const td = node && node.closest ? node.closest('td') : null;
+      if (!td) return null;
+      const tr = td.closest('tr');
+      const table = td.closest('table');
+      if (!tr || !table) return null;
+      const headers = table.querySelectorAll('thead th');
+      const idx = Array.from(tr.children).indexOf(td);
+      for (let i = 0; i < headers.length; i++) {
+        if (headers[i].textContent.trim().toLowerCase().includes(CFG.column)) {
+          return i === idx ? td : null;
+        }
+      }
+      return null;
+    }
+
+    function elementOf(node) {
+      if (!node) return null;
+      return node.nodeType === 3 ? node.parentElement : node;
+    }
+
+    // ── События ──────────────────────────────────────────────────────
+
+    document.getElementById('th-lim-prev').addEventListener('click', () => {
+      curIdx = (curIdx - 1 + results.length) % results.length;
+      renderResult(curIdx);
+      renderNav();
+    });
+    document.getElementById('th-lim-next').addEventListener('click', () => {
+      curIdx = (curIdx + 1) % results.length;
+      renderResult(curIdx);
+      renderNav();
+    });
+
+    document.addEventListener('mouseup', e => {
+      if (popup.contains(e.target)) return;
+      // Выделение появляется не мгновенно после отпускания кнопки
+      setTimeout(() => {
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed) { hide(); return; }
+        const text = sel.toString().trim();
+        if (!text) { hide(); return; }
+        const a = elementOf(sel.anchorNode);
+        const f = elementOf(sel.focusNode);
+        if (!cellInTargetColumn(a) && !cellInTargetColumn(f)) { hide(); return; }
+        show(text, sel.getRangeAt(0).getBoundingClientRect());
+      }, 15);
+    });
+
+    document.addEventListener('mousedown', e => {
+      if (popup.contains(e.target) || arrow.contains(e.target)) return;
+      hide();
+    });
+
+    document.addEventListener('keydown', e => {
+      if (popup.style.display === 'none') return;
+      if (e.key === 'Escape') { hide(); return; }
+      if (results.length > 1) {
+        if (e.key === 'ArrowLeft') document.getElementById('th-lim-prev').click();
+        if (e.key === 'ArrowRight') document.getElementById('th-lim-next').click();
+      }
+    });
+
+    document.addEventListener('scroll', e => {
+      if (popup.contains(e.target)) return;
+      hide();
+    }, { passive: true, capture: true });
+
+    // Прогреваем кэш, пока оператор только наводит мышь на колонку
+    document.addEventListener('mouseover', e => {
+      const el = elementOf(e.target);
+      if (cellInTargetColumn(el)) loadPage().catch(() => {});
+    }, { passive: true });
+
+    log('Поиск лимитов включён, страница:', CFG.pageUrl);
+  }
+
+  // ==================================================================
+  // 4. АВТОПОДСТАНОВКА ДИАПАЗОНА ДАТ
   // ==================================================================
 
   function initAutoDateRange() {
@@ -1112,6 +1754,7 @@
   function start() {
     if (CONFIG.features.filePreview) initFilePreview();
     if (CONFIG.features.prevStatus) initPrevStatus();
+    if (CONFIG.features.limitsFinder) initLimitsFinder();
     if (CONFIG.features.autoDateRange) initAutoDateRange();
     log('Скрипт запущен на', window.location.pathname);
   }
