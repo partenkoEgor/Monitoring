@@ -13,6 +13,9 @@
 // @match        https://my-managment.com/en/admin/report/requestrefill*
 // @match        https://managment.io/en/admin/report/requestrefill*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @connect      doc.office.lan
 // @updateURL    https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/scripts/th-team-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/scripts/th-team-helper.user.js
@@ -33,6 +36,8 @@
       prevStatus: true,
       // Поиск лимитов по странице Confluence при выделении текста
       limitsFinder: true,
+      // Подстановка своего Medium ID
+      messengerId: true,
       // Автоподстановка диапазона дат после применения фильтра
       autoDateRange: true,
     },
@@ -84,6 +89,14 @@
       timeout: 15000,
       // Ширина всплывающего окна (px)
       width: 340,
+    },
+
+    // ── Подстановка Medium ID ────────────────────────────────────────
+    messengerId: {
+      // Ключ в хранилище Tampermonkey
+      storageKey: 'mediumId',
+      // Атрибут в серверной разметке страницы, откуда берётся ID
+      sourceAttr: 'curr_medium',
     },
 
     // ── Автоподстановка дат ──────────────────────────────────────────
@@ -1748,6 +1761,92 @@
   }
 
   // ==================================================================
+  // 5. ПОДСТАНОВКА MEDIUM ID
+  // ==================================================================
+
+  // Хранилище Tampermonkey переживает обновления скрипта и общее для всех
+  // трёх доменов. Откат на localStorage нужен только для отладки вне
+  // расширения, где GM-функций нет.
+  const store = {
+    get(key, fallback) {
+      if (typeof GM_getValue === 'function') return GM_getValue(key, fallback);
+      const v = localStorage.getItem('th-helper:' + key);
+      return v === null ? fallback : v;
+    },
+    set(key, value) {
+      if (typeof GM_setValue === 'function') { GM_setValue(key, value); return; }
+      localStorage.setItem('th-helper:' + key, value);
+    },
+  };
+
+  function initMessengerId() {
+    const CFG = CONFIG.messengerId;
+
+    // ID лежит в серверной разметке страницы на компоненте leftpanel.
+    // К моменту запуска скрипта Vue уже заменил этот элемент собой,
+    // поэтому из DOM атрибут не достать — забираем исходный HTML страницы.
+    function fetchIdFromPage() {
+      return fetch(location.href, { credentials: 'same-origin' })
+        .then(r => r.text())
+        .then(html => {
+          const m = html.match(new RegExp(CFG.sourceAttr + '="([^"]*)"'));
+          return m && m[1] ? m[1].trim() : null;
+        })
+        .catch(err => {
+          log('Не удалось получить ID со страницы', err);
+          return null;
+        });
+    }
+
+    // Один раз найденный ID сохраняется, дальше берётся из хранилища
+    // мгновенно и без запроса.
+    let idPromise = null;
+    function resolveId() {
+      const saved = store.get(CFG.storageKey, '');
+      if (saved) return Promise.resolve(saved);
+      if (!idPromise) {
+        idPromise = fetchIdFromPage().then(id => {
+          if (id) {
+            store.set(CFG.storageKey, id);
+            log('ID определён со страницы:', id);
+          } else {
+            // Пустой профиль или другая разметка: пусть попробует снова,
+            // а оператор при желании задаст ID через меню расширения
+            idPromise = null;
+            log('ID на странице не найден, задайте его через меню Tampermonkey');
+          }
+          return id;
+        });
+      }
+      return idPromise;
+    }
+
+    // Пункт меню нужен на случай, когда в профиле Medium не заполнен
+    // или ID надо поменять руками.
+    if (typeof GM_registerMenuCommand === 'function') {
+      GM_registerMenuCommand('Team Helper: мой Medium ID', () => {
+        const current = store.get(CFG.storageKey, '');
+        const next = prompt(
+          'Medium ID для подстановки.\n'
+          + 'Оставьте поле пустым, чтобы скрипт определил его со страницы заново.',
+          current
+        );
+        if (next === null) return;
+        store.set(CFG.storageKey, next.trim());
+        idPromise = null;
+        alert(next.trim()
+          ? 'Medium ID сохранён: ' + next.trim()
+          : 'Medium ID очищен, он будет определён со страницы автоматически.');
+      });
+    }
+
+    // Прогреваем значение заранее, чтобы подстановка была мгновенной
+    resolveId();
+
+    log('Подстановка Medium ID включена');
+  }
+
+  // ==================================================================
   // ЗАПУСК
   // ==================================================================
 
@@ -1755,6 +1854,7 @@
     if (CONFIG.features.filePreview) initFilePreview();
     if (CONFIG.features.prevStatus) initPrevStatus();
     if (CONFIG.features.limitsFinder) initLimitsFinder();
+    if (CONFIG.features.messengerId) initMessengerId();
     if (CONFIG.features.autoDateRange) initAutoDateRange();
     log('Скрипт запущен на', window.location.pathname);
   }
