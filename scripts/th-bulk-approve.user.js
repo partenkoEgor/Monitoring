@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      2.4
+// @version      2.5
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)" (тикеты с Amount = 0 пропускаются и выносятся в отдельный список для ручной проверки). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -84,6 +84,32 @@
   // Причина автоматической остановки прогона (залипшая модалка и т.п.);
   // показывается в финальном alert вместо "Остановлено пользователем"
   let runAbortReason = null;
+
+  // ------------------------------------------------------------------
+  // Человеческие формулировки для технических кодов ошибок (reason).
+  // Раньше в итоговом окне была только цифра «Ошибок: N», а расшифровка
+  // лежала в консоли — оператор не знал ни какие тикеты упали, ни почему.
+  // Ключи должны совпадать с reason в результатах processTicket.
+  // ------------------------------------------------------------------
+  const REASON_LABELS = {
+    'row-disappeared': 'строка исчезла из таблицы — тикет даже не открывали',
+    'no-edit-link': 'в строке нет кнопки Edit',
+    'modal-not-shown': 'окно Edit не открылось',
+    'modal-title-unreadable': 'не удалось прочитать номер тикета в заголовке окна — ничего не меняли',
+    'modal-ticket-mismatch': 'открылся ДРУГОЙ тикет — ничего не меняли',
+    'no-status-field': 'в окне не появилось поле Status (сайт не отрисовал форму)',
+    'no-multiselect-tags': 'поле Status непривычной вёрстки — скрипт его не понял',
+    'dropdown-not-opened-or-no-match': 'не открылся список статусов или нужного статуса в нём нет',
+    'no-apply-button': 'не найдена кнопка Apply',
+    'modal-not-closed': 'нажали Apply, но окно не закрылось — ПРОВЕРЬ ВРУЧНУЮ, сохранился ли статус',
+    'blocking-popup': 'на экране висело незакрытое окно сайта',
+    'stale-modal-before-edit': 'не закрылось окно от предыдущего тикета',
+    exception: 'непредвиденная ошибка скрипта (подробности в консоли)',
+  };
+
+  function describeReason(reason) {
+    return REASON_LABELS[reason] || `неизвестная причина: ${reason}`;
+  }
 
   // Спец. класс ошибки, которым прерываем цепочку await'ов при нажатии СТОП
   class StopSignal extends Error {}
@@ -777,7 +803,7 @@
       consecutiveFailures++;
       if (consecutiveFailures < CONFIG.maxConsecutiveFailures) return false;
       runAbortReason =
-        `Подряд ${consecutiveFailures} тикетов завершились ошибкой (последняя причина: ${reason}). ` +
+        `Подряд ${consecutiveFailures} тикетов завершились ошибкой (последняя причина: ${describeReason(reason)}). ` +
         `Похоже, сайт недоступен или изменилась вёрстка. Прогон остановлен, чтобы не гонять впустую ` +
         `оставшиеся тикеты. Проверь страницу и запусти заново.`;
       console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
@@ -882,7 +908,6 @@
     const wrongStatusSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'wrong-external-status');
     const zeroAmountSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'zero-amount');
     const failed = results.filter((r) => r.status === 'failed');
-    const rowGone = failed.filter((r) => r.reason === 'row-disappeared');
     const popupCount = capturedPopups.length;
 
     // Тикеты, до которых прогон вообще не дошёл (остановился раньше).
@@ -925,6 +950,14 @@
           zeroAmountSkips.map((r) => r.ticketId).join('\n')
         : '';
 
+    // Разбивка ошибок по причинам, от частых к редким: одна цифра «Ошибок: 7»
+    // не говорит, сломался ли сайт целиком или это семь разных мелочей.
+    const failureCounts = new Map();
+    failed.forEach((r) => {
+      failureCounts.set(r.reason, (failureCounts.get(r.reason) || 0) + 1);
+    });
+    const failureBreakdown = [...failureCounts.entries()].sort((a, b) => b[1] - a[1]);
+
     const summaryLines = [
       `Всего тикетов в списке: ${total}`,
       `Успешно: ${successCount}`,
@@ -934,27 +967,42 @@
       summaryLines.push(`Пропущено (Amount = 0): ${zeroAmountSkips.length}`);
     }
     summaryLines.push(`Ошибок: ${failed.length}`);
-    if (rowGone.length > 0) {
-      summaryLines.push(`  из них строка исчезла из таблицы: ${rowGone.length}`);
-    }
+    failureBreakdown.forEach(([reason, count]) => {
+      summaryLines.push(`  • ${describeReason(reason)}: ${count}`);
+    });
 
-    // Всё, что осталось необработанным: и исчезнувшие строки, и тикеты,
-    // до которых прогон не дошёл. Показываем явно — «Готово» больше не врёт.
+    const MAX_LISTED = 40;
+
+    // Поимённый список упавших тикетов с причиной. Без него оператор видел
+    // только счётчик и не знал, какие именно тикеты перезапускать.
+    const failedList = failed.map((r) => `${r.ticketId} — ${describeReason(r.reason)}`);
+    window.__bulkApproveFailed = failed;
+
+    const failedText =
+      failedList.length > 0
+        ? `\n\n⚠ ТИКЕТЫ С ОШИБКАМИ (${failedList.length}) — не обработаны, прогони заново или проверь вручную:\n` +
+          failedList.slice(0, MAX_LISTED).join('\n') +
+          (failedList.length > MAX_LISTED
+            ? `\n… и ещё ${failedList.length - MAX_LISTED} — полный список в консоли: window.__bulkApproveFailed`
+            : '')
+        : '';
+
+    const notReachedText =
+      notReachedIds.length > 0
+        ? `\n\n⚠ ПРОГОН НЕ ДОШЁЛ ДО ТИКЕТОВ (${notReachedIds.length}) — они не тронуты, запусти прогон заново:\n` +
+          notReachedIds.slice(0, MAX_LISTED).join('\n') +
+          (notReachedIds.length > MAX_LISTED
+            ? `\n… и ещё ${notReachedIds.length - MAX_LISTED} — полный список в консоли: window.__bulkApproveUnprocessed`
+            : '')
+        : '';
+
+    // Всё, что осталось необработанным: и упавшие тикеты, и те, до которых
+    // прогон не дошёл. Показываем явно — «Готово» больше не врёт.
     const unprocessed = [
-      ...rowGone.map((r) => `${r.ticketId} (строка исчезла из таблицы)`),
+      ...failed.map((r) => `${r.ticketId} (${describeReason(r.reason)})`),
       ...notReachedIds.map((id) => `${id} (прогон до него не дошёл)`),
     ];
     window.__bulkApproveUnprocessed = unprocessed;
-
-    const MAX_LISTED = 40;
-    const unprocessedText =
-      unprocessed.length > 0
-        ? `\n\n⚠ НЕ ОБРАБОТАНО ТИКЕТОВ: ${unprocessed.length}. Прогони их заново или проверь вручную:\n` +
-          unprocessed.slice(0, MAX_LISTED).join('\n') +
-          (unprocessed.length > MAX_LISTED
-            ? `\n… и ещё ${unprocessed.length - MAX_LISTED} — полный список в консоли: window.__bulkApproveUnprocessed`
-            : '')
-        : '';
 
     if (unprocessed.length > 0) {
       console.warn(`[BulkApprove/${workflow.id}] НЕ обработаны (${unprocessed.length}):`, unprocessed);
@@ -973,7 +1021,8 @@
       summaryLines.join('\n') +
       popupsListText +
       zeroAmountListText +
-      unprocessedText +
+      failedText +
+      notReachedText +
       `\n\nПодробности — в консоли (F12).`
     );
   }
