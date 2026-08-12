@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.8
+// @version      1.9
 // @description  Шесть помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -9,9 +9,6 @@
 // @match        https://th-managment.com/en/admin/backoffice/ExtendedPaymentRequestList*
 // @match        https://my-managment.com/en/admin/backoffice/ExtendedPaymentRequestList*
 // @match        https://managment.io/en/admin/backoffice/ExtendedPaymentRequestList*
-// @match        https://th-managment.com/en/admin/report/requestrefill*
-// @match        https://my-managment.com/en/admin/report/requestrefill*
-// @match        https://managment.io/en/admin/report/requestrefill*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
