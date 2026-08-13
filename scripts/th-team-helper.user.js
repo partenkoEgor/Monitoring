@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.9
-// @description  Шесть помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла и автоподстановка диапазона дат в фильтр. Каждая функция включается и выключается отдельно в блоке CONFIG.
+// @version      1.10
+// @description  Семь помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр и кнопка «Данные тикета» в форме редактирования, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена. Каждая функция включается и выключается отдельно в блоке CONFIG.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -39,6 +39,9 @@
       messengerId: true,
       // Автоподстановка диапазона дат после применения фильтра
       autoDateRange: true,
+      // Кнопка «Данные тикета» в форме редактирования: собирает поля
+      // тикета и копирует их в буфер обмена
+      ticketCopy: true,
     },
 
     // ── Превью вложений ──────────────────────────────────────────────
@@ -134,6 +137,42 @@
       // Сколько ещё пытаться, если поле не появилось сразу
       retryInterval: 100,
       retryTimeout: 3000,
+    },
+
+    // ── Копирование данных тикета ──────────────────────────────────────
+    ticketCopy: {
+      // Заголовок поля, после которого вставляется кнопка
+      anchorField: 'Comment (internal)',
+      // Заголовки полей формы/шапки тикета, откуда берутся данные
+      fields: {
+        subagent: 'Subagent',
+        userId: 'User ID',
+        amount: 'Amount by receipt',
+        date: 'Payment creation date',
+        agentWallet: 'Agent wallet',
+        userWallet: "User's wallet",
+      },
+      // Чем заменяется пустое значение поля в итоговом тексте
+      emptyPlaceholder: '—',
+      // Варианты комментария в шапке сообщения. template получает объект
+      // выбранных под-опций (или ничего, если под-опций нет) и
+      // возвращает строку комментария, либо null — тогда комментарий не
+      // добавляется вовсе.
+      comments: [
+        { label: 'Без комментария', template: null },
+        {
+          label: 'Лимит + возврат из Request for a refund',
+          choices: [
+            { key: 'limit', title: 'Сумма', options: ['ниже лимита', 'выше лимита'] },
+            { key: 'status', title: 'Вернулся в', options: ['Received (M)', 'Approved (M)'] },
+          ],
+          template: (c) => `сумма ${c.limit}, уже ранее был в Request for a refund (M), вернулся в ${c.status} уточните, пожалуйста, получал ли агент средства?`,
+        },
+        {
+          label: 'Подозрительный скриншот',
+          template: () => 'уточните, пожалуйста, получал ли агент средства? Скриншот выглядит подозрительно.',
+        },
+      ],
     },
 
     // Подробный лог в консоль (F12 → Console)
@@ -2122,6 +2161,490 @@
   }
 
   // ==================================================================
+  // 7. КОПИРОВАНИЕ ДАННЫХ ТИКЕТА
+  // ==================================================================
+
+  function initTicketCopy() {
+    const CFG = CONFIG.ticketCopy;
+
+    addStyle('th-helper-ticketcopy-style', `
+      .th-tc-open-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin: 6px 0;
+        padding: 6px 14px;
+        border: none;
+        border-radius: 6px;
+        background: ${ACCENT};
+        color: #fff;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+        letter-spacing: .02em;
+        transition: background .15s;
+      }
+      .th-tc-open-btn:hover { background: ${ACCENT_HOVER}; }
+
+      #th-tc-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 999999;
+        background: rgba(0,0,0,0.5);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+      #th-tc-overlay.show { display: flex; }
+
+      #th-tc-modal {
+        width: 420px;
+        max-width: 100%;
+        max-height: 90vh;
+        overflow-y: auto;
+        background: ${T.bg};
+        border: 1px solid ${T.border};
+        border-radius: 10px;
+        box-shadow: ${T.shadow};
+        font-family: "Open Sans", Tahoma, Arial, sans-serif;
+        font-size: 12px;
+        color: ${T.text};
+      }
+      #th-tc-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 16px;
+        background: linear-gradient(135deg, ${ACCENT} 0%, ${ACCENT_HOVER} 100%);
+        border-radius: 10px 10px 0 0;
+      }
+      #th-tc-header-icon {
+        width: 26px; height: 26px;
+        border-radius: 6px;
+        background: rgba(255,255,255,0.2);
+        display: flex; align-items: center; justify-content: center;
+        flex-shrink: 0;
+      }
+      #th-tc-header-text { flex: 1; min-width: 0; }
+      #th-tc-title { font-size: 13px; font-weight: 700; color: #fff; line-height: 1.3; }
+      #th-tc-subtitle {
+        font-size: 10.5px; color: rgba(255,255,255,0.8); margin-top: 2px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+
+      #th-tc-body { padding: 14px 16px; }
+      .th-tc-section-label {
+        font-size: 10px; font-weight: 700; color: ${T.textDim};
+        text-transform: uppercase; letter-spacing: .05em; margin-bottom: 7px;
+      }
+      .th-tc-options { display: flex; flex-direction: column; gap: 6px; }
+      .th-tc-option {
+        display: block;
+        width: 100%;
+        text-align: left;
+        padding: 8px 11px;
+        border: 1px solid ${T.border};
+        border-radius: 7px;
+        background: ${T.bg};
+        color: ${T.text};
+        font-family: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        box-sizing: border-box;
+        transition: border-color .12s, background .12s;
+      }
+      .th-tc-option:hover { border-color: ${ACCENT}; }
+      .th-tc-option.selected { border-color: ${ACCENT}; background: rgba(42,191,207,0.08); }
+      .th-tc-opt-label { font-weight: 600; }
+      .th-tc-choices {
+        display: none;
+        flex-direction: column;
+        gap: 8px;
+        margin-top: 9px;
+        padding-top: 9px;
+        border-top: 1px dashed ${T.border};
+      }
+      .th-tc-choices.visible { display: flex; }
+      .th-tc-choice-block { display: flex; flex-direction: column; gap: 4px; }
+      .th-tc-choice-title {
+        font-size: 10px; color: ${T.textDim}; font-weight: 600;
+        text-transform: uppercase; letter-spacing: .04em;
+      }
+      .th-tc-choice-row { display: flex; flex-wrap: wrap; gap: 6px; }
+      .th-tc-choice-btn {
+        padding: 4px 11px;
+        border: 1px solid ${T.border};
+        border-radius: 999px;
+        background: ${T.panel};
+        color: ${T.text};
+        font-size: 11px;
+        font-family: inherit;
+        cursor: pointer;
+        transition: background .12s, border-color .12s, color .12s;
+      }
+      .th-tc-choice-btn:hover { border-color: ${ACCENT}; }
+      .th-tc-choice-btn.active { background: ${ACCENT}; border-color: ${ACCENT}; color: #fff; font-weight: 600; }
+
+      .th-tc-preview-wrap { margin-top: 12px; border: 1px solid ${T.border}; border-radius: 7px; overflow: hidden; }
+      .th-tc-preview-label {
+        padding: 5px 10px; background: ${T.panel}; font-size: 10px; font-weight: 700;
+        color: ${T.textDim}; text-transform: uppercase; letter-spacing: .06em;
+        border-bottom: 1px solid ${T.border};
+      }
+      .th-tc-preview-text {
+        margin: 0; padding: 9px 11px; background: ${T.bg}; font-size: 12px; color: ${T.text};
+        line-height: 1.6; white-space: pre-wrap; word-break: break-word; font-family: inherit;
+      }
+      .th-tc-missing {
+        margin-top: 10px; padding: 8px 11px; border-radius: 6px;
+        background: rgba(226,75,74,0.08); border: 1px solid rgba(226,75,74,0.35);
+        color: #E24B4A; font-size: 11px; line-height: 1.5;
+      }
+
+      #th-tc-footer {
+        display: flex; gap: 8px; justify-content: flex-end;
+        padding: 12px 16px; border-top: 1px solid ${T.border};
+      }
+      #th-tc-back {
+        padding: 6px 16px; border-radius: 6px; font-size: 12px; font-family: inherit; font-weight: 500;
+        cursor: pointer; border: 1px solid ${T.border}; background: ${T.panel}; color: ${T.text};
+      }
+      #th-tc-back:hover { opacity: .85; }
+      #th-tc-copy {
+        padding: 6px 18px; border-radius: 6px; font-size: 12px; font-family: inherit; font-weight: 600;
+        cursor: pointer; border: none; background: ${ACCENT}; color: #fff;
+        display: flex; align-items: center; gap: 5px;
+      }
+      #th-tc-copy:hover { background: ${ACCENT_HOVER}; }
+      #th-tc-copy.copied { background: #3fb950; }
+    `);
+
+    function escapeHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // ── Поиск полей в форме тикета ──────────────────────────────────
+    // Портировано из скрипта коллег (Team B), уже проверено в проде
+    // на этом же сайте.
+
+    function ticketModalRoot(el) {
+      return (el && el.closest && el.closest('.modal_content, .modal_wrap'))
+          || document.querySelector('.modal_content, .modal_wrap[role="dialog"]')
+          || document;
+    }
+
+    // Заголовки приходят с &nbsp;, разным регистром и разными апострофами
+    // (User's wallet / User’s wallet) — сравниваем по нормализованному виду.
+    function normTitle(text) {
+      return (text || '')
+        .replace(/ /g, ' ')
+        .replace(/[’‘`´]/g, "'")
+        .replace(/:\s*$/, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    }
+
+    // Ищем сначала в переданном корне, а если не нашли — по всему
+    // документу: открытая форма редактирования всё равно одна.
+    function findGroup(root, title) {
+      const wanted = normTitle(title);
+      const scopes = root === document ? [document] : [root, document];
+      for (const scope of scopes) {
+        for (const group of scope.querySelectorAll('.input-group')) {
+          const t = group.querySelector('.title');
+          if (t && normTitle(t.textContent) === wanted) return group;
+        }
+      }
+      return null;
+    }
+
+    function inputValueByTitle(root, title) {
+      const group = findGroup(root, title);
+      if (!group) return '';
+      const inp = group.querySelector('input.mx-input, input[type="text"]:not(.multiselect__input)');
+      return inp ? inp.value.trim() : '';
+    }
+
+    function selectValueByTitle(root, title) {
+      const group = findGroup(root, title);
+      if (!group) return '';
+      const single = group.querySelector('.multiselect__single');
+      return single ? single.textContent.trim() : '';
+    }
+
+    // Шапка тикета: <span class="success-txt"><strong>User ID:</strong> 889142155</span>
+    function headerValue(root, label) {
+      const wanted = normTitle(label);
+      const scopes = root === document ? [document] : [root, document];
+      for (const scope of scopes) {
+        for (const sp of scope.querySelectorAll('.success-txt')) {
+          const strong = sp.querySelector('strong');
+          if (!strong || normTitle(strong.textContent) !== wanted) continue;
+          const value = sp.textContent.replace(strong.textContent, '').trim();
+          if (value) return value;
+        }
+      }
+      return '';
+    }
+
+    function collectTicketData(root) {
+      const F = CFG.fields;
+      return {
+        subagent: selectValueByTitle(root, F.subagent) || headerValue(root, F.subagent),
+        userId: headerValue(root, F.userId) || inputValueByTitle(root, F.userId),
+        amount: inputValueByTitle(root, F.amount),
+        date: inputValueByTitle(root, F.date),
+        agentWallet: inputValueByTitle(root, F.agentWallet),
+        userWallet: inputValueByTitle(root, F.userWallet),
+      };
+    }
+
+    function buildTicketText(data, comment) {
+      const v = (x) => x || CFG.emptyPlaceholder;
+      const head = comment ? `${v(data.subagent)} // ${comment}` : v(data.subagent);
+      return [
+        head,
+        `User ID: ${v(data.userId)}`,
+        `Amount: ${v(data.amount)}`,
+        `Time of deposit: ${v(data.date)}`,
+        `Agent wallet: ${v(data.agentWallet)}`,
+        `User Wallet number: ${v(data.userWallet)}`,
+      ].join('\n');
+    }
+
+    function missingFields(data) {
+      const F = CFG.fields;
+      return [
+        [F.subagent, data.subagent],
+        [F.userId, data.userId],
+        [F.amount, data.amount],
+        [F.date, data.date],
+        [F.agentWallet, data.agentWallet],
+        [F.userWallet, data.userWallet],
+      ].filter(([, value]) => !value).map(([label]) => label);
+    }
+
+    // "Change ticket no.20538044" — единственный div.title в форме,
+    // остальные заголовки полей лежат в span.title.
+    function getModalSubtitle(root) {
+      const titleEl = Array.from(root.querySelectorAll('div.title'))
+        .find(t => /change ticket/i.test(t.textContent));
+      return titleEl ? titleEl.textContent.trim() : '';
+    }
+
+    // ── Буфер обмена ─────────────────────────────────────────────────
+
+    function copyTextFallback(text) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0;';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch (err) { /* браузер запретил — текст остаётся в модалке */ }
+      ta.remove();
+    }
+
+    function copyText(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text).catch(() => copyTextFallback(text));
+      }
+      return Promise.resolve(copyTextFallback(text));
+    }
+
+    // ── Модалка «Данные тикета» ─────────────────────────────────────
+
+    const overlay = document.createElement('div');
+    overlay.id = 'th-tc-overlay';
+    overlay.innerHTML = '<div id="th-tc-modal"></div>';
+    document.body.appendChild(overlay);
+    const modalEl = overlay.querySelector('#th-tc-modal');
+
+    let state = null; // { data, subtitle, commentIdx, choiceValues }
+    let copiedTimer = null;
+
+    function resolveComment() {
+      const option = CFG.comments[state.commentIdx];
+      if (!option || !option.template) return null;
+      const values = {};
+      (option.choices || []).forEach(ch => {
+        values[ch.key] = state.choiceValues[ch.key] || ch.options[0];
+      });
+      return option.template(values);
+    }
+
+    function renderModal() {
+      const comment = resolveComment();
+      const text = buildTicketText(state.data, comment);
+      const missing = missingFields(state.data);
+
+      const optionsHtml = CFG.comments.map((option, i) => {
+        const selected = i === state.commentIdx;
+        let choicesHtml = '';
+        if (option.choices) {
+          choicesHtml = `<div class="th-tc-choices${selected ? ' visible' : ''}">`
+            + option.choices.map(ch => {
+              const current = state.choiceValues[ch.key] || ch.options[0];
+              return `<div class="th-tc-choice-block">`
+                + `<span class="th-tc-choice-title">${escapeHtml(ch.title)}</span>`
+                + `<div class="th-tc-choice-row">`
+                + ch.options.map(opt => `<button type="button" class="th-tc-choice-btn${opt === current ? ' active' : ''}" data-choice-key="${escapeHtml(ch.key)}" data-choice-value="${escapeHtml(opt)}">${escapeHtml(opt)}</button>`).join('')
+                + `</div></div>`;
+            }).join('')
+            + `</div>`;
+        }
+        return `<div class="th-tc-option${selected ? ' selected' : ''}" role="button" tabindex="0" data-option-idx="${i}">`
+          + `<div class="th-tc-opt-label">${escapeHtml(option.label)}</div>`
+          + choicesHtml
+          + `</div>`;
+      }).join('');
+
+      const missingHtml = missing.length
+        ? `<div class="th-tc-missing">⚠ Не заполнено: <strong>${escapeHtml(missing.join(', '))}</strong></div>`
+        : '';
+
+      modalEl.innerHTML = `
+        <div id="th-tc-header">
+          <div id="th-tc-header-icon">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </div>
+          <div id="th-tc-header-text">
+            <div id="th-tc-title">Данные тикета</div>
+            <div id="th-tc-subtitle">${escapeHtml(state.subtitle)}</div>
+          </div>
+        </div>
+        <div id="th-tc-body">
+          <div class="th-tc-section-label">Комментарий</div>
+          <div class="th-tc-options">${optionsHtml}</div>
+          <div class="th-tc-preview-wrap">
+            <div class="th-tc-preview-label">Что будет скопировано</div>
+            <pre class="th-tc-preview-text">${escapeHtml(text)}</pre>
+          </div>
+          ${missingHtml}
+        </div>
+        <div id="th-tc-footer">
+          <button type="button" id="th-tc-back">← Назад</button>
+          <button type="button" id="th-tc-copy">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            Копировать
+          </button>
+        </div>
+      `;
+    }
+
+    function closeModal() {
+      overlay.classList.remove('show');
+      state = null;
+      if (copiedTimer) { clearTimeout(copiedTimer); copiedTimer = null; }
+    }
+
+    function openModal(root) {
+      state = {
+        data: collectTicketData(root),
+        subtitle: getModalSubtitle(root),
+        commentIdx: 0,
+        choiceValues: {},
+      };
+      renderModal();
+      overlay.classList.add('show');
+    }
+
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeModal();
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (!state) return;
+      if (e.key === 'Escape') { e.stopPropagation(); closeModal(); }
+    });
+
+    modalEl.addEventListener('click', (e) => {
+      const choiceBtn = e.target.closest('.th-tc-choice-btn');
+      if (choiceBtn) {
+        e.preventDefault(); e.stopPropagation();
+        state.choiceValues[choiceBtn.dataset.choiceKey] = choiceBtn.dataset.choiceValue;
+        renderModal();
+        return;
+      }
+      const optionBtn = e.target.closest('.th-tc-option');
+      if (optionBtn) {
+        e.preventDefault(); e.stopPropagation();
+        state.commentIdx = Number(optionBtn.dataset.optionIdx);
+        renderModal();
+        return;
+      }
+      const backBtn = e.target.closest('#th-tc-back');
+      if (backBtn) {
+        e.preventDefault(); e.stopPropagation();
+        closeModal();
+        return;
+      }
+      const copyBtn = e.target.closest('#th-tc-copy');
+      if (copyBtn) {
+        e.preventDefault(); e.stopPropagation();
+        const text = buildTicketText(state.data, resolveComment());
+        copyText(text).then(() => {
+          copyBtn.classList.add('copied');
+          copyBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> Скопировано`;
+          if (copiedTimer) clearTimeout(copiedTimer);
+          copiedTimer = setTimeout(() => {
+            if (state) renderModal();
+          }, 1500);
+        });
+        return;
+      }
+    });
+
+    // ── Вставка кнопки в форму тикета ───────────────────────────────
+
+    function getOpenTicketModal() {
+      const modals = document.querySelectorAll('.modal_wrap[role="dialog"]');
+      for (const m of modals) {
+        if (window.getComputedStyle(m).display !== 'none') return m;
+      }
+      return null;
+    }
+
+    function buildOpenButton() {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'th-tc-open-btn';
+      btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Данные тикета`;
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openModal(ticketModalRoot(btn));
+      });
+      return btn;
+    }
+
+    // .input-group хранит флаг, чтобы не вставлять кнопку повторно —
+    // при следующем открытии формы это уже новый DOM-узел, флаг сам
+    // сбрасывается (тот же приём, что и thFilled в подстановке Reddy ID).
+    function injectButton() {
+      const modal = getOpenTicketModal();
+      if (!modal) return;
+      const group = findGroup(modal, CFG.anchorField);
+      if (!group || group.dataset.thTicketCopyInjected) return;
+      const titleEl = group.querySelector('.title');
+      if (!titleEl) return;
+      titleEl.insertAdjacentElement('afterend', buildOpenButton());
+      group.dataset.thTicketCopyInjected = '1';
+    }
+
+    injectButton();
+    new MutationObserver(injectButton).observe(document.body, { childList: true, subtree: true });
+
+    log('Копирование данных тикета включено');
+  }
+
+  // ==================================================================
   // ЗАПУСК
   // ==================================================================
 
@@ -2132,6 +2655,7 @@
     if (CONFIG.features.adminDirectory) initAdminDirectory();
     if (CONFIG.features.messengerId) initMessengerId();
     if (CONFIG.features.autoDateRange) initAutoDateRange();
+    if (CONFIG.features.ticketCopy) initTicketCopy();
     log('Скрипт запущен на', window.location.pathname);
   }
 
