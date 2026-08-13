@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.12
+// @version      1.13
 // @description  Восемь помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, и компактные кнопки вместо длинных ссылок на файлы в таблице. Каждая функция включается и выключается отдельно в блоке CONFIG.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -127,10 +127,12 @@
 
     // ── Автоподстановка дат ──────────────────────────────────────────
     autoDateRange: {
-      // Насколько назад отсчитывать начало диапазона.
-      // Текущее правило: год назад (+1 день, чтобы попасть ровно в годовое окно).
+      // Насколько назад отсчитывать начало диапазона
       yearsBack: 1,
-      daysOffset: 1,
+      // Случайный сдвиг даты «от» вперёд от точки «год назад», в днях
+      // [мин, макс] включительно. Минимум 1 — чтобы не выйти за годовое
+      // окно и чтобы дата не была ровно «год назад» каждый раз.
+      shiftDays: [1, 30],
       // Время начала и конца диапазона [часы, минуты]
       startTime: [0, 0],
       endTime: [23, 59],
@@ -1778,17 +1780,22 @@
       return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
     }
 
-    // Всегда «год назад → сегодня». Смещение на день — чтобы попасть ровно
-    // в годовое окно, а не выйти за него на сутки.
+    // «Примерно год назад → сегодня». Дата «от» — точка «год назад» плюс
+    // случайный сдвиг вперёд из CFG.shiftDays; новый сдвиг на каждое
+    // нажатие Apply. Минимальный сдвиг в 1 день заодно гарантирует, что
+    // диапазон не выйдет за годовое окно.
     function getDateRange() {
       const now = new Date();
 
       const end = new Date(now);
       end.setHours(CFG.endTime[0], CFG.endTime[1], 0, 0);
 
+      const [minShift, maxShift] = CFG.shiftDays;
+      const shift = minShift + Math.floor(Math.random() * (maxShift - minShift + 1));
+
       const start = new Date(now);
       start.setFullYear(start.getFullYear() - CFG.yearsBack);
-      start.setDate(start.getDate() + CFG.daysOffset);
+      start.setDate(start.getDate() + shift);
       start.setHours(CFG.startTime[0], CFG.startTime[1], 0, 0);
 
       return `${fmt(start)} ~ ${fmt(end)}`;
