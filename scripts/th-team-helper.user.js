@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.10
+// @version      1.11
 // @description  Семь помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр и кнопка «Данные тикета» в форме редактирования, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена. Каждая функция включается и выключается отдельно в блоке CONFIG.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -151,6 +151,10 @@
         date: 'Payment creation date',
         agentWallet: 'Agent wallet',
         userWallet: "User's wallet",
+        recipientDepartment: 'Recipient department',
+        transactionId: 'Transaction ID',
+        uniqueTransferNumber: 'Unique transfer number',
+        agent: 'Agent',
       },
       // Чем заменяется пустое значение поля в итоговом тексте
       emptyPlaceholder: '—',
@@ -2403,6 +2407,10 @@
         date: inputValueByTitle(root, F.date),
         agentWallet: inputValueByTitle(root, F.agentWallet),
         userWallet: inputValueByTitle(root, F.userWallet),
+        recipientDepartment: selectValueByTitle(root, F.recipientDepartment),
+        transactionId: inputValueByTitle(root, F.transactionId) || headerValue(root, F.transactionId),
+        uniqueTransferNumber: inputValueByTitle(root, F.uniqueTransferNumber),
+        agent: selectValueByTitle(root, F.agent) || headerValue(root, F.agent),
       };
     }
 
@@ -2416,6 +2424,10 @@
         `Time of deposit: ${v(data.date)}`,
         `Agent wallet: ${v(data.agentWallet)}`,
         `User Wallet number: ${v(data.userWallet)}`,
+        `Recipient department: ${v(data.recipientDepartment)}`,
+        `Transaction ID: ${v(data.transactionId)}`,
+        `Unique transfer number: ${v(data.uniqueTransferNumber)}`,
+        `Agent: ${v(data.agent)}`,
       ].join('\n');
     }
 
@@ -2428,6 +2440,10 @@
         [F.date, data.date],
         [F.agentWallet, data.agentWallet],
         [F.userWallet, data.userWallet],
+        [F.recipientDepartment, data.recipientDepartment],
+        [F.transactionId, data.transactionId],
+        [F.uniqueTransferNumber, data.uniqueTransferNumber],
+        [F.agent, data.agent],
       ].filter(([, value]) => !value).map(([label]) => label);
     }
 
