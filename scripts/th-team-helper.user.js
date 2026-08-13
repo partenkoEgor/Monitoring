@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.11
-// @description  Семь помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр и кнопка «Данные тикета» в форме редактирования, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена. Каждая функция включается и выключается отдельно в блоке CONFIG.
+// @version      1.12
+// @description  Восемь помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, и компактные кнопки вместо длинных ссылок на файлы в таблице. Каждая функция включается и выключается отдельно в блоке CONFIG.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -42,6 +42,8 @@
       // Кнопка «Данные тикета» в форме редактирования: собирает поля
       // тикета и копирует их в буфер обмена
       ticketCopy: true,
+      // Компактные кнопки вместо длинных ссылок на файлы в таблице
+      fileButtons: true,
     },
 
     // ── Превью вложений ──────────────────────────────────────────────
@@ -177,6 +179,27 @@
           template: () => 'уточните, пожалуйста, получал ли агент средства? Скриншот выглядит подозрительно.',
         },
       ],
+    },
+
+    // ── Кнопки вместо ссылок на файлы ──────────────────────────────────
+    fileButtons: {
+      // В каких колонках ссылки заменяются кнопками. Сравнение точное,
+      // после нормализации пробелов и апострофов, в нижнем регистре.
+      columns: ['user files', "agent's files", "support team's files"],
+      // Подпись кнопки по расширению файла. Всё, что не попало сюда,
+      // подписывается значением fallbackLabel.
+      types: {
+        'Скрин': ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'heic', 'heif', 'tif', 'tiff', 'svg'],
+        'GIF': ['gif'],
+        'PDF': ['pdf'],
+        'Видео': ['mp4', 'webm', 'mov', 'avi', 'mkv', 'mpeg', 'mpg', 'm4v', '3gp'],
+        'Аудио': ['mp3', 'wav', 'm4a', 'ogg', 'aac'],
+        'DOC': ['doc', 'docx', 'odt', 'rtf'],
+        'XLS': ['xls', 'xlsx', 'csv', 'ods'],
+        'Архив': ['zip', 'rar', '7z', 'tar', 'gz'],
+        'TXT': ['txt'],
+      },
+      fallbackLabel: 'Файл',
     },
 
     // Подробный лог в консоль (F12 → Console)
@@ -2661,6 +2684,140 @@
   }
 
   // ==================================================================
+  // 8. КНОПКИ ВМЕСТО ССЫЛОК НА ФАЙЛЫ
+  // ==================================================================
+
+  function initFileButtons() {
+    const CFG = CONFIG.fileButtons;
+
+    addStyle('th-helper-filebtn-style', `
+      .th-file-cell { white-space: normal !important; }
+
+      a.th-file-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        width: 80px;
+        min-height: 30px;
+        margin: 2px 3px 2px 0;
+        padding: 3px 5px;
+        border-radius: 6px;
+        background: ${ACCENT};
+        color: #fff !important;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.2;
+        text-decoration: none !important;
+        white-space: nowrap;
+        cursor: pointer;
+        transition: background .12s;
+      }
+      a.th-file-btn:hover { background: ${ACCENT_HOVER}; }
+    `);
+
+    // Заголовки приходят с разным регистром, лишними пробелами и разными
+    // апострофами (Agent's files / Agent’s files) — сравниваем по
+    // нормализованному виду. Неразрывный пробел отдельно обрабатывать не
+    // нужно: \s в JS его уже покрывает.
+    function normHeader(text) {
+      return (text || '')
+        .replace(/[’‘`´]/g, "'")
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    }
+
+    // Возвращает набор индексов колонок с файлами. В этой админке шапка
+    // бывает и в <thead>, и в <tr class="table-head"> — учитываем оба.
+    function getFileColIndexes(table) {
+      const headers = Array.from(table.querySelectorAll('tr.table-head th, thead th'));
+      const indexes = new Set();
+      headers.forEach((h, i) => {
+        if (CFG.columns.includes(normHeader(h.textContent))) indexes.add(i);
+      });
+      return indexes;
+    }
+
+    // Ссылка ведёт на вьюер вида /admin/amazon/?url=<реальный путь>.
+    // Тип файла и имя определяем по реальному пути, а href не трогаем.
+    function resolveFilePath(anchor) {
+      const href = anchor.getAttribute('href') || '';
+      try {
+        const abs = new URL(href, window.location.origin);
+        const urlParam = abs.searchParams.get('url');
+        if (urlParam) return urlParam.split('?')[0];
+        return decodeURIComponent(abs.pathname);
+      } catch (e) {
+        return href.split('?')[0];
+      }
+    }
+
+    function getExt(path) {
+      const name = path.split('/').pop() || '';
+      const m = name.match(/\.([a-z0-9]+)$/i);
+      return m ? m[1].toLowerCase() : '';
+    }
+
+    function labelForExt(ext) {
+      for (const label of Object.keys(CFG.types)) {
+        if (CFG.types[label].includes(ext)) return label;
+      }
+      return CFG.fallbackLabel;
+    }
+
+    // Флаг на самой ссылке защищает от повторной обработки: без него
+    // наблюдатель переписывал бы «1. Скрин» в «1. 1. Скрин» и вызывал
+    // новые мутации по кругу.
+    function decorate(anchor, number) {
+      if (anchor.dataset.thFileBtn) return;
+
+      const path = resolveFilePath(anchor);
+      const fileName = path.split('/').pop() || path;
+
+      anchor.textContent = `${number}. ${labelForExt(getExt(path))}`;
+      anchor.title = fileName ? `Открыть: ${fileName}` : 'Открыть файл';
+      anchor.target = '_blank';
+      anchor.rel = 'noopener noreferrer';
+      anchor.classList.add('th-file-btn');
+      anchor.dataset.thFileBtn = '1';
+    }
+
+    function fileAnchors(cell) {
+      return Array.from(cell.querySelectorAll('a[href]')).filter(a => {
+        const href = a.getAttribute('href') || '';
+        return href && !href.toLowerCase().startsWith('javascript:');
+      });
+    }
+
+    function processTable(table) {
+      const cols = getFileColIndexes(table);
+      if (!cols.size) return;
+
+      table.querySelectorAll('tr').forEach(row => {
+        Array.from(row.children).forEach(cell => {
+          if (cell.tagName !== 'TD' || !cols.has(cell.cellIndex)) return;
+          const anchors = fileAnchors(cell);
+          if (!anchors.length) return;
+          cell.classList.add('th-file-cell');
+          // Нумерация идёт по порядку ссылок в ячейке, чтобы номера на
+          // кнопках совпадали с тем, что оператор видит слева направо.
+          anchors.forEach((a, i) => decorate(a, i + 1));
+        });
+      });
+    }
+
+    function processAll() {
+      document.querySelectorAll('table').forEach(processTable);
+    }
+
+    processAll();
+    new MutationObserver(processAll).observe(document.body, { childList: true, subtree: true });
+
+    log('Кнопки вместо ссылок на файлы включены');
+  }
+
+  // ==================================================================
   // ЗАПУСК
   // ==================================================================
 
@@ -2672,6 +2829,7 @@
     if (CONFIG.features.messengerId) initMessengerId();
     if (CONFIG.features.autoDateRange) initAutoDateRange();
     if (CONFIG.features.ticketCopy) initTicketCopy();
+    if (CONFIG.features.fileButtons) initFileButtons();
     log('Скрипт запущен на', window.location.pathname);
   }
 
