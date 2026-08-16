@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.18
+// @version      1.19
 // @description  Девять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки при наведении на неё. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -169,19 +169,15 @@
       // (например, нет на ExtendedPaymentRequestList) — Ticket history
       // есть везде
       tableRowButtonColumn: 'Ticket history',
-      // Заголовки колонок обычной таблицы для тех же 10 полей — не
-      // совпадают дословно с названиями полей формы Edit (fields выше)
+      // Заголовки колонок обычной таблицы для короткого набора полей,
+      // который копирует кнопка в таблице (отличается от fields выше —
+      // там полный набор для модалки в форме Edit)
       tableFields: {
         subagent: 'Subagent',
         userId: 'User ID',
-        amount: 'Amount',
-        date: 'Date of payment',
-        agentWallet: "Agent's wallet",
-        userWallet: "User's wallet",
+        ticketId: 'Ticket ID',
         recipientDepartment: 'Department',
-        transactionId: 'Transaction ID',
-        uniqueTransferNumber: 'Unique transfer number',
-        agent: 'Agent',
+        country: 'Country',
       },
       // Варианты комментария в шапке сообщения. template получает объект
       // выбранных под-опций (или ничего, если под-опций нет) и
@@ -2397,7 +2393,7 @@
 
       .th-tc-history-cell {
         position: relative;
-        padding-right: 30px;
+        padding-right: 34px;
       }
       .th-tc-row-btn {
         position: absolute;
@@ -2766,6 +2762,18 @@
     const rowBtnIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
     const rowBtnCheckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>`;
 
+    // Короткий набор из tableFields — не те же 10 полей, что в модалке
+    function buildRowText(data) {
+      const v = (x) => x || CFG.emptyPlaceholder;
+      return [
+        v(data.subagent),
+        `User ID: ${v(data.userId)}`,
+        `Ticket ID: ${v(data.ticketId)}`,
+        `Department: ${v(data.recipientDepartment)}`,
+        `Country: ${v(data.country)}`,
+      ].join('\n');
+    }
+
     function buildRowButton(row, cols) {
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -2776,7 +2784,7 @@
       btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        const text = buildTicketText(collectRowData(row, cols), null);
+        const text = buildRowText(collectRowData(row, cols));
         copyText(text).then(() => {
           btn.classList.add('copied');
           btn.innerHTML = rowBtnCheckIcon;
@@ -2959,7 +2967,7 @@
     addStyle('th-helper-cellcopy-style', `
       .th-cc-cell {
         position: relative;
-        padding-right: 20px;
+        padding-right: 24px;
       }
       .th-cc-btn {
         position: absolute;
