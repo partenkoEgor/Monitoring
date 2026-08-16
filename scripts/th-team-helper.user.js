@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.19
+// @version      1.20
 // @description  Девять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки при наведении на неё. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -2393,12 +2393,12 @@
 
       .th-tc-history-cell {
         position: relative;
-        padding-right: 34px;
+        padding-right: 40px;
       }
       .th-tc-row-btn {
         position: absolute;
         top: 50%;
-        right: 4px;
+        right: 0;
         transform: translateY(-50%);
         display: inline-flex;
         align-items: center;
@@ -2967,7 +2967,7 @@
     addStyle('th-helper-cellcopy-style', `
       .th-cc-cell {
         position: relative;
-        padding-right: 24px;
+        padding-right: 30px;
       }
       .th-cc-btn {
         position: absolute;
