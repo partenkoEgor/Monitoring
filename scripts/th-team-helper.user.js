@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.17
+// @version      1.18
 // @description  Девять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки при наведении на неё. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -2395,7 +2395,15 @@
       #th-tc-copy:hover { background: ${ACCENT_HOVER}; }
       #th-tc-copy.copied { background: #3fb950; }
 
+      .th-tc-history-cell {
+        position: relative;
+        padding-right: 30px;
+      }
       .th-tc-row-btn {
+        position: absolute;
+        top: 50%;
+        right: 4px;
+        transform: translateY(-50%);
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -2407,6 +2415,7 @@
         background: ${ACCENT};
         color: #fff;
         cursor: pointer;
+        z-index: 1;
         transition: background .12s;
       }
       .th-tc-row-btn:hover { background: ${ACCENT_HOVER}; }
@@ -2789,6 +2798,11 @@
         const cell = row.children[cols.__rowBtn];
         if (!cell || cell.dataset.thRowCopyInjected) return;
         cell.dataset.thRowCopyInjected = '1';
+        // Кнопка позиционируется абсолютно (см. .th-tc-history-cell) —
+        // выведена из потока текста, поэтому никогда не переносится на
+        // отдельную строку рядом со ссылкой Show, независимо от ширины
+        // колонки
+        cell.classList.add('th-tc-history-cell');
         cell.appendChild(buildRowButton(row, cols));
       });
     }
@@ -2943,13 +2957,20 @@
 
   function initCellCopy() {
     addStyle('th-helper-cellcopy-style', `
+      .th-cc-cell {
+        position: relative;
+        padding-right: 20px;
+      }
       .th-cc-btn {
+        position: absolute;
+        top: 50%;
+        right: 2px;
+        transform: translateY(-50%);
         display: inline-flex;
         align-items: center;
         justify-content: center;
         width: 16px;
         height: 16px;
-        margin-right: 4px;
         padding: 0;
         border: none;
         border-radius: 4px;
@@ -2958,10 +2979,10 @@
         cursor: pointer;
         opacity: 0;
         pointer-events: none;
-        vertical-align: middle;
+        z-index: 1;
         transition: opacity .1s, color .1s, background .1s;
       }
-      td:hover .th-cc-btn {
+      .th-cc-cell:hover .th-cc-btn {
         opacity: 1;
         pointer-events: auto;
       }
@@ -3012,10 +3033,11 @@
           // Значение берём до вставки кнопки — её иконка (svg) в
           // textContent не попадает, но так надёжнее
           const value = cell.textContent.trim();
-          // Кнопка — первый дочерний элемент ячейки, а не последний:
-          // переноситься на новую строку тогда может только текст после
-          // неё, сама кнопка никогда не окажется одна на отдельной строке
-          cell.insertBefore(buildCellButton(value), cell.firstChild);
+          // Кнопка позиционируется абсолютно (см. .th-cc-cell) — выведена
+          // из потока текста, поэтому никогда не переносится на отдельную
+          // строку независимо от ширины колонки
+          cell.classList.add('th-cc-cell');
+          cell.appendChild(buildCellButton(value));
         });
       });
     }
