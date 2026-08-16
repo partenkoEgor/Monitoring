@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.15
-// @description  Восемь помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, и компактные кнопки вместо длинных ссылок на файлы в таблице. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @version      1.16
+// @description  Девять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки при наведении на неё. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -44,6 +44,8 @@
       ticketCopy: true,
       // Компактные кнопки вместо длинных ссылок на файлы в таблице
       fileButtons: true,
+      // Маленькая кнопка копирования значения одной ячейки при наведении
+      cellCopy: true,
     },
 
     // ── Превью вложений ──────────────────────────────────────────────
@@ -163,8 +165,10 @@
       // Чем заменяется пустое значение поля в итоговом тексте
       emptyPlaceholder: '—',
       // Колонка в обычной таблице (не в форме Edit), куда вставляется
-      // компактная кнопка копирования
-      tableActionsColumn: 'Actions',
+      // компактная кнопка копирования. Actions есть не на всех листах
+      // (например, нет на ExtendedPaymentRequestList) — Ticket history
+      // есть везде
+      tableRowButtonColumn: 'Ticket history',
       // Заголовки колонок обычной таблицы для тех же 10 полей — не
       // совпадают дословно с названиями полей формы Edit (fields выше)
       tableFields: {
@@ -1890,6 +1894,26 @@
     },
   };
 
+  // Буфер обмена — используется несколькими независимо переключаемыми
+  // функциями (копирование данных тикета, копирование значения ячейки),
+  // поэтому вынесено сюда, а не дублируется в каждой из них.
+  function copyTextFallback(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (err) { /* браузер запретил — текст остаётся в поле */ }
+    ta.remove();
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).catch(() => copyTextFallback(text));
+    }
+    return Promise.resolve(copyTextFallback(text));
+  }
+
   function initMessengerId() {
     const CFG = CONFIG.messengerId;
 
@@ -2519,26 +2543,8 @@
       return titleEl ? titleEl.textContent.trim() : '';
     }
 
-    // ── Буфер обмена ─────────────────────────────────────────────────
-
-    function copyTextFallback(text) {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0;';
-      document.body.appendChild(ta);
-      ta.select();
-      try { document.execCommand('copy'); } catch (err) { /* браузер запретил — текст остаётся в модалке */ }
-      ta.remove();
-    }
-
-    function copyText(text) {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        return navigator.clipboard.writeText(text).catch(() => copyTextFallback(text));
-      }
-      return Promise.resolve(copyTextFallback(text));
-    }
-
     // ── Модалка «Данные тикета» ─────────────────────────────────────
+    // copyText/copyTextFallback теперь общие — см. секцию 5.
 
     const overlay = document.createElement('div');
     overlay.id = 'th-tc-overlay';
@@ -2734,7 +2740,7 @@
         Object.keys(CFG.tableFields).forEach(key => {
           if (normTitle(CFG.tableFields[key]) === norm) cols[key] = i;
         });
-        if (norm === normTitle(CFG.tableActionsColumn)) cols.__actions = i;
+        if (norm === normTitle(CFG.tableRowButtonColumn)) cols.__rowBtn = i;
       });
       return cols;
     }
@@ -2777,10 +2783,10 @@
 
     function processRowButtonsTable(table) {
       const cols = getRowColIndexes(table);
-      if (cols.__actions === undefined) return;
+      if (cols.__rowBtn === undefined) return;
 
       table.querySelectorAll('tbody tr').forEach(row => {
-        const cell = row.children[cols.__actions];
+        const cell = row.children[cols.__rowBtn];
         if (!cell || cell.dataset.thRowCopyInjected) return;
         cell.dataset.thRowCopyInjected = '1';
         cell.appendChild(buildRowButton(row, cols));
@@ -2932,6 +2938,96 @@
   }
 
   // ==================================================================
+  // 9. КОПИРОВАНИЕ ЗНАЧЕНИЯ ЯЧЕЙКИ
+  // ==================================================================
+
+  function initCellCopy() {
+    addStyle('th-helper-cellcopy-style', `
+      .th-cc-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        margin-left: 4px;
+        padding: 0;
+        border: none;
+        border-radius: 4px;
+        background: transparent;
+        color: ${T.textDim};
+        cursor: pointer;
+        opacity: 0;
+        pointer-events: none;
+        vertical-align: middle;
+        transition: opacity .1s, color .1s, background .1s;
+      }
+      td:hover .th-cc-btn {
+        opacity: 1;
+        pointer-events: auto;
+      }
+      .th-cc-btn:hover { background: ${ACCENT}; color: #fff; }
+      .th-cc-btn.copied { background: #3fb950; color: #fff; opacity: 1; pointer-events: auto; }
+    `);
+
+    const ccIcon = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+    const ccCheckIcon = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>`;
+
+    // Только ячейки с обычным текстом — ячейки со своими ссылками/кнопками
+    // (Ticket history, файлы) пропускаем: копировать там нечего или
+    // непонятно что
+    function isPlainCell(cell) {
+      if (cell.querySelector('a, button')) return false;
+      return !!cell.textContent.trim();
+    }
+
+    function buildCellButton(value) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'th-cc-btn';
+      btn.title = 'Копировать';
+      btn.innerHTML = ccIcon;
+      let copiedTimer = null;
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        copyText(value).then(() => {
+          btn.classList.add('copied');
+          btn.innerHTML = ccCheckIcon;
+          if (copiedTimer) clearTimeout(copiedTimer);
+          copiedTimer = setTimeout(() => {
+            btn.classList.remove('copied');
+            btn.innerHTML = ccIcon;
+          }, 1200);
+        });
+      });
+      return btn;
+    }
+
+    function processCellsTable(table) {
+      table.querySelectorAll('tbody tr').forEach(row => {
+        Array.from(row.children).forEach(cell => {
+          if (cell.tagName !== 'TD' || cell.dataset.thCellCopyInjected) return;
+          cell.dataset.thCellCopyInjected = '1';
+          if (!isPlainCell(cell)) return;
+          // Значение берём до вставки кнопки — её иконка (svg) в
+          // textContent не попадает, но так надёжнее
+          const value = cell.textContent.trim();
+          cell.appendChild(buildCellButton(value));
+        });
+      });
+    }
+
+    function processAllCells() {
+      document.querySelectorAll('table').forEach(processCellsTable);
+    }
+
+    processAllCells();
+    new MutationObserver(processAllCells).observe(document.body, { childList: true, subtree: true });
+
+    log('Копирование значения ячейки при наведении включено');
+  }
+
+  // ==================================================================
   // ПАНЕЛЬ НАСТРОЕК: ВКЛЮЧЕНИЕ И ВЫКЛЮЧЕНИЕ ФУНКЦИЙ БЕЗ ПРАВКИ КОДА
   // ==================================================================
 
@@ -2945,6 +3041,7 @@
     autoDateRange: 'Автоподстановка дат',
     ticketCopy: 'Копирование данных тикета',
     fileButtons: 'Кнопки вместо ссылок на файлы',
+    cellCopy: 'Копирование значения ячейки при наведении',
   };
 
   // CONFIG.features задаёт дефолт при первом запуске; панель настроек и
@@ -3204,6 +3301,7 @@
     if (isFeatureEnabled('autoDateRange')) initAutoDateRange();
     if (isFeatureEnabled('ticketCopy')) initTicketCopy();
     if (isFeatureEnabled('fileButtons')) initFileButtons();
+    if (isFeatureEnabled('cellCopy')) initCellCopy();
     log('Скрипт запущен на', window.location.pathname);
   }
 
