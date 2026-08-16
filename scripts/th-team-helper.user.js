@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.13
-// @description  Восемь помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, и компактные кнопки вместо длинных ссылок на файлы в таблице. Каждая функция включается и выключается отдельно в блоке CONFIG.
+// @version      1.14
+// @description  Восемь помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, и компактные кнопки вместо длинных ссылок на файлы в таблице. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -2825,18 +2825,278 @@
   }
 
   // ==================================================================
+  // ПАНЕЛЬ НАСТРОЕК: ВКЛЮЧЕНИЕ И ВЫКЛЮЧЕНИЕ ФУНКЦИЙ БЕЗ ПРАВКИ КОДА
+  // ==================================================================
+
+  // Порядок и подписи держим синхронно с CONFIG.features
+  const FEATURE_LABELS = {
+    filePreview: 'Превью вложений',
+    prevStatus: 'Предыдущий статус',
+    limitsFinder: 'Поиск лимитов в Confluence',
+    adminDirectory: 'Справочник админов',
+    messengerId: 'Автоподстановка Reddy ID',
+    autoDateRange: 'Автоподстановка дат',
+    ticketCopy: 'Копирование данных тикета',
+    fileButtons: 'Кнопки вместо ссылок на файлы',
+  };
+
+  // CONFIG.features задаёт дефолт при первом запуске; панель настроек и
+  // пункт меню Tampermonkey пишут поверх него через store — переживает
+  // обновления скрипта и общее для всех трёх доменов.
+  function isFeatureEnabled(name) {
+    return store.get('feature:' + name, CONFIG.features[name] ? '1' : '0') === '1';
+  }
+
+  function initSettingsPanel() {
+    addStyle('th-helper-settings-style', `
+      #th-settings-btn {
+        position: fixed;
+        left: 20px;
+        bottom: 20px;
+        z-index: 100000;
+        width: 40px;
+        height: 40px;
+        border: 1px solid ${T.border};
+        border-radius: 50%;
+        background: ${T.panel};
+        color: ${T.textDim};
+        font-size: 18px;
+        line-height: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        box-shadow: ${T.shadow};
+        opacity: .55;
+        transition: opacity .15s, color .15s, border-color .15s;
+      }
+      #th-settings-btn:hover {
+        opacity: 1;
+        color: ${ACCENT};
+        border-color: ${ACCENT};
+      }
+
+      #th-settings-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 999999;
+        background: rgba(0,0,0,0.5);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+      #th-settings-overlay.show { display: flex; }
+
+      #th-settings-panel {
+        width: 360px;
+        max-width: 100%;
+        max-height: 90vh;
+        overflow-y: auto;
+        background: ${T.bg};
+        border: 1px solid ${T.border};
+        border-radius: 10px;
+        box-shadow: ${T.shadow};
+        font-family: "Open Sans", Tahoma, Arial, sans-serif;
+        font-size: 12px;
+        color: ${T.text};
+      }
+      #th-settings-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 16px;
+        border-bottom: 1px solid ${T.border};
+      }
+      #th-settings-title {
+        font-size: 13px;
+        font-weight: 700;
+        color: ${T.textStrong};
+      }
+      #th-settings-close {
+        border: none;
+        background: transparent;
+        color: ${T.textDim};
+        font-size: 18px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0 4px;
+      }
+      #th-settings-close:hover { color: ${T.textStrong}; }
+
+      #th-settings-body { padding: 4px 16px; }
+
+      .th-settings-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 9px 0;
+        border-bottom: 1px solid ${T.border};
+        cursor: pointer;
+      }
+      .th-settings-row:last-child { border-bottom: none; }
+      .th-settings-row-label { color: ${T.text}; }
+
+      .th-toggle {
+        position: relative;
+        display: inline-block;
+        flex: 0 0 auto;
+        width: 36px;
+        height: 20px;
+      }
+      .th-toggle-input {
+        position: absolute;
+        inset: 0;
+        margin: 0;
+        opacity: 0;
+        cursor: pointer;
+        z-index: 1;
+      }
+      .th-toggle-track {
+        position: absolute;
+        inset: 0;
+        background: ${T.border};
+        border-radius: 999px;
+        transition: background .15s;
+      }
+      .th-toggle-thumb {
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(0,0,0,.3);
+        transition: transform .15s;
+      }
+      .th-toggle-input:checked + .th-toggle-track { background: ${ACCENT}; }
+      .th-toggle-input:checked + .th-toggle-track .th-toggle-thumb { transform: translateX(16px); }
+
+      #th-settings-notice {
+        display: none;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin: 12px 16px 14px;
+        padding: 8px 10px;
+        border-radius: 6px;
+        background: ${T.panel};
+        border: 1px solid ${T.border};
+        color: ${T.textDim};
+        font-size: 11px;
+      }
+      #th-settings-notice.show { display: flex; }
+      #th-settings-reload {
+        flex: 0 0 auto;
+        border: none;
+        border-radius: 6px;
+        background: ${ACCENT};
+        color: #fff;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 5px 12px;
+        cursor: pointer;
+        transition: background .15s;
+      }
+      #th-settings-reload:hover { background: ${ACCENT_HOVER}; }
+    `);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'th-settings-btn';
+    btn.title = 'Настройки Team Helper';
+    btn.textContent = '⚙';
+    document.body.appendChild(btn);
+
+    const rowsHtml = Object.keys(FEATURE_LABELS).map(name => `
+      <label class="th-settings-row">
+        <span class="th-settings-row-label">${FEATURE_LABELS[name]}</span>
+        <span class="th-toggle">
+          <input type="checkbox" class="th-toggle-input" data-feature="${name}">
+          <span class="th-toggle-track"><span class="th-toggle-thumb"></span></span>
+        </span>
+      </label>
+    `).join('');
+
+    const overlay = document.createElement('div');
+    overlay.id = 'th-settings-overlay';
+    overlay.innerHTML = `
+      <div id="th-settings-panel">
+        <div id="th-settings-header">
+          <div id="th-settings-title">Team Helper — настройки</div>
+          <button type="button" id="th-settings-close" aria-label="Закрыть">×</button>
+        </div>
+        <div id="th-settings-body">${rowsHtml}</div>
+        <div id="th-settings-notice">
+          <span>Изменения вступят в силу после обновления страницы.</span>
+          <button type="button" id="th-settings-reload">Обновить</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const notice = overlay.querySelector('#th-settings-notice');
+    const checkboxes = Array.from(overlay.querySelectorAll('.th-toggle-input'));
+
+    function openPanel() {
+      checkboxes.forEach(cb => { cb.checked = isFeatureEnabled(cb.dataset.feature); });
+      notice.classList.remove('show');
+      overlay.classList.add('show');
+    }
+
+    function closePanel() {
+      overlay.classList.remove('show');
+    }
+
+    btn.addEventListener('click', () => {
+      if (overlay.classList.contains('show')) closePanel(); else openPanel();
+    });
+
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closePanel();
+    });
+
+    overlay.querySelector('#th-settings-close').addEventListener('click', closePanel);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && overlay.classList.contains('show')) closePanel();
+    });
+
+    checkboxes.forEach(cb => {
+      cb.addEventListener('change', () => {
+        store.set('feature:' + cb.dataset.feature, cb.checked ? '1' : '0');
+        notice.classList.add('show');
+      });
+    });
+
+    overlay.querySelector('#th-settings-reload').addEventListener('click', () => {
+      location.reload();
+    });
+
+    if (typeof GM_registerMenuCommand === 'function') {
+      GM_registerMenuCommand('Team Helper: Настройки', openPanel);
+    }
+
+    log('Панель настроек готова');
+  }
+
+  // ==================================================================
   // ЗАПУСК
   // ==================================================================
 
   function start() {
-    if (CONFIG.features.filePreview) initFilePreview();
-    if (CONFIG.features.prevStatus) initPrevStatus();
-    if (CONFIG.features.limitsFinder) initLimitsFinder();
-    if (CONFIG.features.adminDirectory) initAdminDirectory();
-    if (CONFIG.features.messengerId) initMessengerId();
-    if (CONFIG.features.autoDateRange) initAutoDateRange();
-    if (CONFIG.features.ticketCopy) initTicketCopy();
-    if (CONFIG.features.fileButtons) initFileButtons();
+    initSettingsPanel();
+    if (isFeatureEnabled('filePreview')) initFilePreview();
+    if (isFeatureEnabled('prevStatus')) initPrevStatus();
+    if (isFeatureEnabled('limitsFinder')) initLimitsFinder();
+    if (isFeatureEnabled('adminDirectory')) initAdminDirectory();
+    if (isFeatureEnabled('messengerId')) initMessengerId();
+    if (isFeatureEnabled('autoDateRange')) initAutoDateRange();
+    if (isFeatureEnabled('ticketCopy')) initTicketCopy();
+    if (isFeatureEnabled('fileButtons')) initFileButtons();
     log('Скрипт запущен на', window.location.pathname);
   }
 
