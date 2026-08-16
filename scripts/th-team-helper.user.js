@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.14
+// @version      1.15
 // @description  Восемь помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, и компактные кнопки вместо длинных ссылок на файлы в таблице. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -162,6 +162,23 @@
       },
       // Чем заменяется пустое значение поля в итоговом тексте
       emptyPlaceholder: '—',
+      // Колонка в обычной таблице (не в форме Edit), куда вставляется
+      // компактная кнопка копирования
+      tableActionsColumn: 'Actions',
+      // Заголовки колонок обычной таблицы для тех же 10 полей — не
+      // совпадают дословно с названиями полей формы Edit (fields выше)
+      tableFields: {
+        subagent: 'Subagent',
+        userId: 'User ID',
+        amount: 'Amount',
+        date: 'Date of payment',
+        agentWallet: "Agent's wallet",
+        userWallet: "User's wallet",
+        recipientDepartment: 'Department',
+        transactionId: 'Transaction ID',
+        uniqueTransferNumber: 'Unique transfer number',
+        agent: 'Agent',
+      },
       // Варианты комментария в шапке сообщения. template получает объект
       // выбранных под-опций (или ничего, если под-опций нет) и
       // возвращает строку комментария, либо null — тогда комментарий не
@@ -2353,6 +2370,23 @@
       }
       #th-tc-copy:hover { background: ${ACCENT_HOVER}; }
       #th-tc-copy.copied { background: #3fb950; }
+
+      .th-tc-row-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: none;
+        border-radius: 5px;
+        background: ${ACCENT};
+        color: #fff;
+        cursor: pointer;
+        transition: background .12s;
+      }
+      .th-tc-row-btn:hover { background: ${ACCENT_HOVER}; }
+      .th-tc-row-btn.copied { background: #3fb950; }
     `);
 
     function escapeHtml(s) {
@@ -2686,6 +2720,79 @@
 
     injectButton();
     new MutationObserver(injectButton).observe(document.body, { childList: true, subtree: true });
+
+    // ── Кнопка в строке обычной таблицы: копирует сразу, без модалки ─
+
+    // По образцу getFileColIndexes из initFileButtons — та же шапка
+    // таблицы (tr.table-head внутри thead). normTitle уже определён выше
+    // в этой функции.
+    function getRowColIndexes(table) {
+      const headers = Array.from(table.querySelectorAll('tr.table-head th, thead th'));
+      const cols = {};
+      headers.forEach((h, i) => {
+        const norm = normTitle(h.textContent);
+        Object.keys(CFG.tableFields).forEach(key => {
+          if (normTitle(CFG.tableFields[key]) === norm) cols[key] = i;
+        });
+        if (norm === normTitle(CFG.tableActionsColumn)) cols.__actions = i;
+      });
+      return cols;
+    }
+
+    function collectRowData(row, cols) {
+      const data = {};
+      Object.keys(CFG.tableFields).forEach(key => {
+        const cell = cols[key] === undefined ? null : row.children[cols[key]];
+        data[key] = cell ? cell.textContent.trim() : '';
+      });
+      return data;
+    }
+
+    const rowBtnIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>`;
+    const rowBtnCheckIcon = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>`;
+
+    function buildRowButton(row, cols) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'th-tc-row-btn';
+      btn.title = 'Копировать данные тикета';
+      btn.innerHTML = rowBtnIcon;
+      let copiedTimer2 = null;
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const text = buildTicketText(collectRowData(row, cols), null);
+        copyText(text).then(() => {
+          btn.classList.add('copied');
+          btn.innerHTML = rowBtnCheckIcon;
+          if (copiedTimer2) clearTimeout(copiedTimer2);
+          copiedTimer2 = setTimeout(() => {
+            btn.classList.remove('copied');
+            btn.innerHTML = rowBtnIcon;
+          }, 1500);
+        });
+      });
+      return btn;
+    }
+
+    function processRowButtonsTable(table) {
+      const cols = getRowColIndexes(table);
+      if (cols.__actions === undefined) return;
+
+      table.querySelectorAll('tbody tr').forEach(row => {
+        const cell = row.children[cols.__actions];
+        if (!cell || cell.dataset.thRowCopyInjected) return;
+        cell.dataset.thRowCopyInjected = '1';
+        cell.appendChild(buildRowButton(row, cols));
+      });
+    }
+
+    function processAllRowButtons() {
+      document.querySelectorAll('table').forEach(processRowButtonsTable);
+    }
+
+    processAllRowButtons();
+    new MutationObserver(processAllRowButtons).observe(document.body, { childList: true, subtree: true });
 
     log('Копирование данных тикета включено');
   }
