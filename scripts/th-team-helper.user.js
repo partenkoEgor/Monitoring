@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.23
+// @version      1.24
 // @description  Девять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки по клику. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -208,21 +208,27 @@
     fileButtons: {
       // В каких колонках ссылки заменяются кнопками. Сравнение точное,
       // после нормализации пробелов и апострофов, в нижнем регистре.
-      columns: ['user files', "agent's files", "support team's files"],
-      // Подпись кнопки по расширению файла. Всё, что не попало сюда,
-      // подписывается значением fallbackLabel.
+      // В окне «История тикета» тот же смысловой столбец, что в основной
+      // таблице называется Support team's files, называется Internal files —
+      // поэтому оба варианта в списке.
+      columns: ['user files', "agent's files", "support team's files", 'internal files'],
+      // Подпись и цветовая категория (kind) кнопки по расширению файла.
+      // kind: 'image' | 'pdf' | 'video' | 'other' — своим цветом выделены
+      // только pdf и video, всё остальное (включая незнакомые расширения,
+      // см. fallbackKind) — 'other', чтобы такие файлы бросались в глаза.
       types: {
-        'Скрин': ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'heic', 'heif', 'tif', 'tiff', 'svg'],
-        'GIF': ['gif'],
-        'PDF': ['pdf'],
-        'Видео': ['mp4', 'webm', 'mov', 'avi', 'mkv', 'mpeg', 'mpg', 'm4v', '3gp'],
-        'Аудио': ['mp3', 'wav', 'm4a', 'ogg', 'aac'],
-        'DOC': ['doc', 'docx', 'odt', 'rtf'],
-        'XLS': ['xls', 'xlsx', 'csv', 'ods'],
-        'Архив': ['zip', 'rar', '7z', 'tar', 'gz'],
-        'TXT': ['txt'],
+        'Скрин': { exts: ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'heic', 'heif', 'tif', 'tiff', 'svg'], kind: 'image' },
+        'GIF': { exts: ['gif'], kind: 'image' },
+        'PDF': { exts: ['pdf'], kind: 'pdf' },
+        'Видео': { exts: ['mp4', 'webm', 'mov', 'avi', 'mkv', 'mpeg', 'mpg', 'm4v', '3gp'], kind: 'video' },
+        'Аудио': { exts: ['mp3', 'wav', 'm4a', 'ogg', 'aac'], kind: 'other' },
+        'DOC': { exts: ['doc', 'docx', 'odt', 'rtf'], kind: 'other' },
+        'XLS': { exts: ['xls', 'xlsx', 'csv', 'ods'], kind: 'other' },
+        'Архив': { exts: ['zip', 'rar', '7z', 'tar', 'gz'], kind: 'other' },
+        'TXT': { exts: ['txt'], kind: 'other' },
       },
       fallbackLabel: 'Файл',
+      fallbackKind: 'other',
     },
 
     // Подробный лог в консоль (F12 → Console)
@@ -2860,6 +2866,12 @@
         transition: background .12s;
       }
       a.th-file-btn:hover { background: ${ACCENT_HOVER}; }
+      a.th-file-btn.th-file-btn--pdf { background: #D97706; }
+      a.th-file-btn.th-file-btn--pdf:hover { background: #B45309; }
+      a.th-file-btn.th-file-btn--video { background: #8957E5; }
+      a.th-file-btn.th-file-btn--video:hover { background: #7A46D6; }
+      a.th-file-btn.th-file-btn--other { background: #DA3633; }
+      a.th-file-btn.th-file-btn--other:hover { background: #B92E2A; }
     `);
 
     // Заголовки приходят с разным регистром, лишними пробелами и разными
@@ -2905,11 +2917,11 @@
       return m ? m[1].toLowerCase() : '';
     }
 
-    function labelForExt(ext) {
+    function typeForExt(ext) {
       for (const label of Object.keys(CFG.types)) {
-        if (CFG.types[label].includes(ext)) return label;
+        if (CFG.types[label].exts.includes(ext)) return { label, kind: CFG.types[label].kind };
       }
-      return CFG.fallbackLabel;
+      return { label: CFG.fallbackLabel, kind: CFG.fallbackKind };
     }
 
     // Флаг на самой ссылке защищает от повторной обработки: без него
@@ -2920,12 +2932,13 @@
 
       const path = resolveFilePath(anchor);
       const fileName = path.split('/').pop() || path;
+      const { label, kind } = typeForExt(getExt(path));
 
-      anchor.textContent = `${number}. ${labelForExt(getExt(path))}`;
+      anchor.textContent = `${number}. ${label}`;
       anchor.title = fileName ? `Открыть: ${fileName}` : 'Открыть файл';
       anchor.target = '_blank';
       anchor.rel = 'noopener noreferrer';
-      anchor.classList.add('th-file-btn');
+      anchor.classList.add('th-file-btn', `th-file-btn--${kind}`);
       anchor.dataset.thFileBtn = '1';
     }
 
