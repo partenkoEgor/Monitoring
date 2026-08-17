@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.21
+// @version      1.22
 // @description  Девять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки по клику. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -2990,9 +2990,12 @@
           if (!isPlainCell(cell)) return;
           cell.classList.add('th-cc-cell');
           let copiedTimer = null;
-          cell.addEventListener('click', () => {
-            // Не мешаем ручному выделению части текста (drag-select) —
-            // если в момент клика есть активное выделение, ничего не копируем
+          let pendingClickTimer = null;
+
+          function doCopy() {
+            // Не мешаем ручному выделению части текста (drag-select или
+            // слово двойным кликом) — если к моменту срабатывания есть
+            // активное выделение, ничего не копируем
             if (window.getSelection().toString()) return;
             const value = cell.textContent.trim();
             if (!value) return;
@@ -3001,7 +3004,18 @@
               if (copiedTimer) clearTimeout(copiedTimer);
               copiedTimer = setTimeout(() => cell.classList.remove('th-cc-copied'), 900);
             });
+          }
+
+          cell.addEventListener('click', (e) => {
+            // Второй/третий клик серии — за отмену уже отвечает dblclick
+            if (e.detail > 1) return;
+            // Ждём: если это первый клик двойного клика (выделение
+            // слова), dblclick отменит копирование раньше, чем сработает
+            // таймер
+            clearTimeout(pendingClickTimer);
+            pendingClickTimer = setTimeout(doCopy, 300);
           });
+          cell.addEventListener('dblclick', () => clearTimeout(pendingClickTimer));
         });
       });
     }
