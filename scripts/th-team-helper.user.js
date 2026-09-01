@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.25
+// @version      1.26
 // @description  Девять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки по клику. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -151,8 +151,6 @@
 
     // ── Копирование данных тикета ──────────────────────────────────────
     ticketCopy: {
-      // Заголовок поля, после которого вставляется кнопка
-      anchorField: 'Comment (internal)',
       // Заголовки полей формы/шапки тикета, откуда берутся данные
       fields: {
         subagent: 'Subagent',
@@ -2267,6 +2265,15 @@
       }
       .th-tc-open-btn:hover { background: ${ACCENT_HOVER}; }
 
+      .th-tc-modal-card { position: relative; }
+      .th-tc-open-btn--corner {
+        position: absolute;
+        top: 44px;
+        right: 24px;
+        margin: 0;
+        z-index: 10;
+      }
+
       #th-tc-overlay {
         position: fixed;
         inset: 0;
@@ -2723,18 +2730,27 @@
       return btn;
     }
 
-    // .input-group хранит флаг, чтобы не вставлять кнопку повторно —
+    // Кнопка ставится в правый верхний угол самой карточки модалки —
+    // видимая белая область диалога, а не серая подложка (modal_wrap
+    // занимает весь экран). Ставим position: relative на карточку сами
+    // (безопасно даже если сайт уже сделал это для своего крестика
+    // закрытия — position: relative без смещений ничего не двигает),
+    // чтобы наш абсолютный оверлей позиционировался относительно неё,
+    // а не относительно всей страницы.
+    //
+    // Флаг храним на самой карточке, чтобы не вставлять кнопку повторно —
     // при следующем открытии формы это уже новый DOM-узел, флаг сам
     // сбрасывается (тот же приём, что и thFilled в подстановке Reddy ID).
     function injectButton() {
       const modal = getOpenTicketModal();
       if (!modal) return;
-      const group = findGroup(modal, CFG.anchorField);
-      if (!group || group.dataset.thTicketCopyInjected) return;
-      const titleEl = group.querySelector('.title');
-      if (!titleEl) return;
-      titleEl.insertAdjacentElement('afterend', buildOpenButton());
-      group.dataset.thTicketCopyInjected = '1';
+      const card = modal.querySelector('.modal_content') || modal;
+      if (card.dataset.thTicketCopyInjected) return;
+      card.classList.add('th-tc-modal-card');
+      const btn = buildOpenButton();
+      btn.classList.add('th-tc-open-btn--corner');
+      card.appendChild(btn);
+      card.dataset.thTicketCopyInjected = '1';
     }
 
     injectButton();
