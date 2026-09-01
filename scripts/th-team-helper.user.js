@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.26
+// @version      1.27
 // @description  Девять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки по клику. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -2268,8 +2268,11 @@
       .th-tc-modal-card { position: relative; }
       .th-tc-open-btn--corner {
         position: absolute;
+        /* top выставляется в JS — по центру блока с шапкой тикета,
+           см. positionCornerButton. Это значение — запасной вариант на
+           случай, если блок почему-то не нашёлся */
         top: 44px;
-        right: 24px;
+        right: 20px;
         margin: 0;
         z-index: 10;
       }
@@ -2730,6 +2733,24 @@
       return btn;
     }
 
+    // Кнопку центрируем по вертикали относительно блока шапки тикета
+    // (User ID / Transaction ID / ... / Country), а не по подобранному
+    // на глаз отступу сверху — число строк в шапке отличается от тикета
+    // к тикету (например, длинный Subagent может занять две строки), и
+    // фиксированный top в таких случаях либо налезает на заголовок
+    // окна, либо оставляет кнопку слишком далеко от шапки.
+    function positionCornerButton(card, btn, infoSpans) {
+      let block = infoSpans[0].parentElement;
+      while (block && block !== card && !Array.from(infoSpans).every(sp => block.contains(sp))) {
+        block = block.parentElement;
+      }
+      if (!block || block === card) return;
+      const cardRect = card.getBoundingClientRect();
+      const blockRect = block.getBoundingClientRect();
+      const top = (blockRect.top - cardRect.top) + (blockRect.height - btn.offsetHeight) / 2;
+      btn.style.top = Math.max(8, Math.round(top)) + 'px';
+    }
+
     // Кнопка ставится в правый верхний угол самой карточки модалки —
     // видимая белая область диалога, а не серая подложка (modal_wrap
     // занимает весь экран). Ставим position: relative на карточку сами
@@ -2738,18 +2759,23 @@
     // чтобы наш абсолютный оверлей позиционировался относительно неё,
     // а не относительно всей страницы.
     //
-    // Флаг храним на самой карточке, чтобы не вставлять кнопку повторно —
-    // при следующем открытии формы это уже новый DOM-узел, флаг сам
+    // Ждём появления шапки тикета (.success-txt) — по ней же вычисляем
+    // позицию кнопки, поэтому вставлять её раньше смысла нет. Флаг храним
+    // на самой карточке, чтобы не вставлять кнопку повторно — при
+    // следующем открытии формы это уже новый DOM-узел, флаг сам
     // сбрасывается (тот же приём, что и thFilled в подстановке Reddy ID).
     function injectButton() {
       const modal = getOpenTicketModal();
       if (!modal) return;
       const card = modal.querySelector('.modal_content') || modal;
       if (card.dataset.thTicketCopyInjected) return;
+      const infoSpans = card.querySelectorAll('.success-txt');
+      if (!infoSpans.length) return;
       card.classList.add('th-tc-modal-card');
       const btn = buildOpenButton();
       btn.classList.add('th-tc-open-btn--corner');
       card.appendChild(btn);
+      positionCornerButton(card, btn, infoSpans);
       card.dataset.thTicketCopyInjected = '1';
     }
 
