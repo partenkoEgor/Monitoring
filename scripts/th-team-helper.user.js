@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.28
+// @version      1.29
 // @description  Девять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки по клику. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -151,6 +151,13 @@
 
     // ── Копирование данных тикета ──────────────────────────────────────
     ticketCopy: {
+      // Заголовок поля, по которому распознаём, что открыта именно
+      // форма редактирования тикета, а не какой-то другой диалог сайта.
+      // Общая вёрстка модалок (.modal_wrap/.modal_content) и класс
+      // .success-txt (просто зелёный текст) используются и в других
+      // окнах, например в «Saved filters» — поэтому одного успешного
+      // поиска .success-txt для показа кнопки недостаточно
+      modalMarkerField: 'Comment (internal)',
       // Заголовки полей формы/шапки тикета, откуда берутся данные
       fields: {
         subagent: 'Subagent',
@@ -2272,7 +2279,7 @@
            см. positionCornerButton. Это значение — запасной вариант на
            случай, если блок почему-то не нашёлся */
         top: 44px;
-        right: 14px;
+        right: 24px;
         margin: 0;
         z-index: 10;
       }
@@ -2478,6 +2485,19 @@
         }
       }
       return null;
+    }
+
+    // В отличие от findGroup, ищет строго внутри root, без отката к
+    // document — нужен для проверки «это точно нужная модалка», а не
+    // для поиска значения поля (там откат к document уместен, так как
+    // открытая форма всегда одна)
+    function hasFieldGroup(root, title) {
+      const wanted = normTitle(title);
+      for (const group of root.querySelectorAll('.input-group')) {
+        const t = group.querySelector('.title');
+        if (t && normTitle(t.textContent) === wanted) return true;
+      }
+      return false;
     }
 
     function inputValueByTitle(root, title) {
@@ -2759,16 +2779,24 @@
     // чтобы наш абсолютный оверлей позиционировался относительно неё,
     // а не относительно всей страницы.
     //
-    // Ждём появления шапки тикета (.success-txt) — по ней же вычисляем
-    // позицию кнопки, поэтому вставлять её раньше смысла нет. Флаг храним
-    // на самой карточке, чтобы не вставлять кнопку повторно — при
-    // следующем открытии формы это уже новый DOM-узел, флаг сам
+    // Сначала проверяем по modalMarkerField, что это именно форма
+    // редактирования тикета — иначе кнопка вылезает и на других диалогах
+    // сайта с той же общей вёрсткой (например, на «Saved filters»).
+    // Затем ждём появления шапки тикета (.success-txt) — по ней же
+    // вычисляем позицию кнопки, поэтому вставлять её раньше смысла нет.
+    // Флаг храним на самой карточке, чтобы не вставлять кнопку повторно —
+    // при следующем открытии формы это уже новый DOM-узел, флаг сам
     // сбрасывается (тот же приём, что и thFilled в подстановке Reddy ID).
     function injectButton() {
       const modal = getOpenTicketModal();
       if (!modal) return;
       const card = modal.querySelector('.modal_content') || modal;
       if (card.dataset.thTicketCopyInjected) return;
+      // Строго внутри card, без отката к document.querySelector, — иначе
+      // findGroup нашёл бы Comment (internal) в другой, скрытой за этим
+      // диалогом форме редактирования и ложно посчитал бы Saved filters
+      // за неё
+      if (!hasFieldGroup(card, CFG.modalMarkerField)) return;
       const infoSpans = card.querySelectorAll('.success-txt');
       if (!infoSpans.length) return;
       card.classList.add('th-tc-modal-card');
