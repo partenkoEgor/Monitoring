@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.24
+// @version      1.25
 // @description  Девять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки по клику. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -2402,17 +2402,16 @@
       #th-tc-copy.copied { background: #3fb950; }
 
       .th-tc-history-cell {
-        position: relative;
-        padding-right: 40px;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        white-space: nowrap;
       }
       .th-tc-row-btn {
-        position: absolute;
-        top: 50%;
-        right: 0;
-        transform: translateY(-50%);
         display: inline-flex;
         align-items: center;
         justify-content: center;
+        flex-shrink: 0;
         width: 24px;
         height: 24px;
         padding: 0;
@@ -2421,7 +2420,6 @@
         background: ${ACCENT};
         color: #fff;
         cursor: pointer;
-        z-index: 1;
         transition: background .12s;
       }
       .th-tc-row-btn:hover { background: ${ACCENT_HOVER}; }
@@ -2816,12 +2814,18 @@
         const cell = row.children[cols.__rowBtn];
         if (!cell || cell.dataset.thRowCopyInjected) return;
         cell.dataset.thRowCopyInjected = '1';
-        // Кнопка позиционируется абсолютно (см. .th-tc-history-cell) —
-        // выведена из потока текста, поэтому никогда не переносится на
-        // отдельную строку рядом со ссылкой Show, независимо от ширины
-        // колонки
-        cell.classList.add('th-tc-history-cell');
-        cell.appendChild(buildRowButton(row, cols));
+        // Кнопка идёт в общем потоке рядом со ссылкой Show внутри
+        // flex-обёртки (см. .th-tc-history-cell) — white-space: nowrap
+        // не даёт им разъехаться по разным строкам независимо от
+        // ширины колонки. Раньше кнопка была position: absolute, из-за
+        // чего при обычной прокрутке колесом мыши она на долю кадра
+        // съезжала наверх — известный глюк рендеринга абсолютных
+        // элементов с transform внутри ячейки таблицы.
+        const wrap = document.createElement('span');
+        wrap.className = 'th-tc-history-cell';
+        while (cell.firstChild) wrap.appendChild(cell.firstChild);
+        wrap.appendChild(buildRowButton(row, cols));
+        cell.appendChild(wrap);
       });
     }
 
