@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.27
+// @version      1.28
 // @description  Девять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки по клику. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -2250,14 +2250,14 @@
       .th-tc-open-btn {
         display: inline-flex;
         align-items: center;
-        gap: 6px;
+        gap: 7px;
         margin: 6px 0;
-        padding: 6px 14px;
+        padding: 8px 16px;
         border: none;
-        border-radius: 6px;
+        border-radius: 7px;
         background: ${ACCENT};
         color: #fff;
-        font-size: 11px;
+        font-size: 13px;
         font-weight: 600;
         cursor: pointer;
         letter-spacing: .02em;
@@ -2272,7 +2272,7 @@
            см. positionCornerButton. Это значение — запасной вариант на
            случай, если блок почему-то не нашёлся */
         top: 44px;
-        right: 20px;
+        right: 14px;
         margin: 0;
         z-index: 10;
       }
@@ -2724,7 +2724,7 @@
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'th-tc-open-btn';
-      btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Данные тикета`;
+      btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Данные тикета`;
       btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
