@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.29
-// @description  Девять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки по клику. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @version      1.30
+// @description  Десять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки по клику. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -42,6 +42,9 @@
       // Кнопка «Данные тикета» в форме редактирования: собирает поля
       // тикета и копирует их в буфер обмена
       ticketCopy: true,
+      // Кнопка «Добавить шаблонный комментарий» над Comment (internal)
+      // в форме Change ticket — набор готовых текстов зависит от статуса
+      commentTemplates: true,
       // Компактные кнопки вместо длинных ссылок на файлы в таблице
       fileButtons: true,
       // Маленькая кнопка копирования значения одной ячейки при наведении
@@ -205,6 +208,89 @@
         {
           label: 'Подозрительный скриншот',
           template: () => 'уточните, пожалуйста, получал ли агент средства? Скриншот выглядит подозрительно.',
+        },
+      ],
+    },
+
+    // ── Шаблонные комментарии для Change ticket ─────────────────────────
+    // Портировано из скрипта коллег (Team B, Edit Helper). В отличие от
+    // оригинала, поля Status и Comment (internal) ищутся строго внутри
+    // открытой карточки тикета, а не по всему документу — иначе на
+    // странице со своим фильтром Status (или на другом диалоге сайта)
+    // можно случайно прочитать чужое поле.
+    commentTemplates: {
+      // Заголовки полей формы тикета
+      statusField: 'Status',
+      commentField: 'Comment (internal)',
+      // Префикс перед вставляемым текстом
+      prefix: '// ',
+      // Каждая группа матчится по числовому ID в начале названия статуса
+      // (например "209 - Approved with correction (M)"). kind определяет
+      // форму ввода:
+      //  - 'options'   — список вариантов; у части может быть свой input
+      //  - 'input'     — одно текстовое поле
+      //  - 'antifraud' — переключатель «есть/нет одобренная транзакция»
+      //                  + список Ticket ID (статусы 216/98)
+      groups: [
+        {
+          ids: ['209', '55'],
+          kind: 'options',
+          options: [
+            { label: 'Корректировка даты', text: 'Sir, please check the date and time. They have been corrected.' },
+            { label: 'Другой субагент', text: 'Sir, please check this ticket. The payment was made to your wallet.' },
+            { label: 'Корректировка суммы', text: 'Sir, please check the amount. It has been corrected.' },
+            {
+              label: 'Ошибка агента (найдено зачисление)',
+              input: { placeholder: 'Номер транзакции' },
+              template: (val) => `Sir, please check ${val || '(вставьте транзакцию)'} and set the right status.`,
+            },
+            { label: 'Ошибка агента (не найдено зачисление)', text: 'Sir, please attach the approved transaction related to the payment from the ticket or set the right status.' },
+          ],
+        },
+        {
+          ids: ['207'],
+          kind: 'options',
+          options: [
+            { label: 'Ниже лимита', text: 'Sir, the amount is below the limit, please refund the money to the user and provide a screenshot.' },
+            { label: 'Выше лимита', text: 'Sir, the amount is above the limit, please refund the money to the user and provide a screenshot.' },
+          ],
+        },
+        {
+          ids: ['210', '90'],
+          kind: 'input',
+          label: 'Original Ticket ID',
+          placeholder: 'Номер оригинального тикета',
+          template: (val) => `Original Ticket — ${val || '(не указан)'}`,
+        },
+        {
+          ids: ['216', '98'],
+          kind: 'antifraud',
+          radios: [
+            { value: 'no', label: 'Нет одобренной транзакции' },
+            { value: 'yes', label: 'Есть одобренная транзакция' },
+          ],
+          approvedPlaceholder: 'например: 21078117761',
+          template: (ticketIds, approvedTxn, hasApproved) => hasApproved
+            ? `To Antifraud / Spam of complaints with approved payment ${approvedTxn || '(номер транзакции)'} / ${ticketIds.join(' / ') || '(тикеты)'}`
+            : `To Antifraud / Who is the owner of payments? Received/Not Received / ${ticketIds.join(' / ') || '(тикеты)'}`,
+        },
+        {
+          ids: ['243', '72'],
+          kind: 'input',
+          label: 'Номер транзакции',
+          placeholder: 'Номер транзакции',
+          template: (val) => `Credited to another account - ${val || '(номер транзакции)'}`,
+        },
+        {
+          ids: ['240', '97'],
+          kind: 'options',
+          options: [
+            { label: 'Ожидание ответа из Передачи смены', text: 'waiting for agent' },
+            { label: 'Ожидание ответа от старших / передача старшим', text: 'waiting for senior' },
+            { label: 'Передача старшим для создания транзакции', text: 'waiting for NR' },
+            { label: 'Агент дважды выставляет неверный статус без корректной информации', text: 'Waiting for TA' },
+            { label: 'Не получается изменить субагента в Deposits Recalculation', text: 'Waiting for MN' },
+          ],
         },
       ],
     },
@@ -3122,6 +3208,561 @@
   }
 
   // ==================================================================
+  // 10. ШАБЛОННЫЕ КОММЕНТАРИИ ДЛЯ CHANGE TICKET
+  // ==================================================================
+
+  function initCommentTemplates() {
+    const CFG = CONFIG.commentTemplates;
+
+    addStyle('th-helper-commenttemplates-style', `
+      .th-ct-trigger-wrap {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        margin: 8px 0 6px 0;
+      }
+      .th-ct-trigger-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 14px;
+        border: none;
+        border-radius: 6px;
+        background: ${ACCENT};
+        color: #fff;
+        font-family: inherit;
+        font-size: 11px;
+        font-weight: 600;
+        cursor: pointer;
+        letter-spacing: 0.02em;
+        transition: background .15s;
+      }
+      .th-ct-trigger-btn:hover { background: ${ACCENT_HOVER}; }
+      .th-ct-trigger-btn svg { flex-shrink: 0; opacity: .9; }
+
+      #th-ct-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 999999;
+        background: rgba(0,0,0,0.5);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+      #th-ct-overlay.show { display: flex; }
+
+      #th-ct-modal {
+        width: 460px;
+        max-width: 100%;
+        max-height: 90vh;
+        overflow-y: auto;
+        background: ${T.bg};
+        border: 1px solid ${T.border};
+        border-radius: 10px;
+        box-shadow: ${T.shadow};
+        font-family: "Open Sans", Tahoma, Arial, sans-serif;
+        font-size: 12px;
+        color: ${T.text};
+      }
+      #th-ct-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 16px;
+        background: linear-gradient(135deg, ${ACCENT} 0%, ${ACCENT_HOVER} 100%);
+        border-radius: 10px 10px 0 0;
+      }
+      #th-ct-header-icon {
+        width: 26px; height: 26px;
+        border-radius: 6px;
+        background: rgba(255,255,255,0.2);
+        display: flex; align-items: center; justify-content: center;
+        flex-shrink: 0;
+      }
+      #th-ct-header-text { flex: 1; min-width: 0; }
+      #th-ct-title { font-size: 13px; font-weight: 700; color: #fff; line-height: 1.3; }
+      #th-ct-subtitle { font-size: 10.5px; color: rgba(255,255,255,0.8); margin-top: 2px; }
+
+      #th-ct-body { padding: 14px 16px; }
+      .th-ct-section-label {
+        font-size: 10px; font-weight: 700; color: ${T.textDim};
+        text-transform: uppercase; letter-spacing: .05em; margin: 0 0 7px;
+      }
+      .th-ct-section-label + .th-ct-section-label { margin-top: 12px; }
+      .th-ct-options { display: flex; flex-direction: column; gap: 5px; }
+      .th-ct-option {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 9px 12px;
+        border: 1px solid ${T.border};
+        border-radius: 7px;
+        cursor: pointer;
+        background: ${T.bg};
+        text-align: left;
+        font-family: inherit;
+        font-size: 12px;
+        color: ${T.text};
+        line-height: 1.4;
+        width: 100%;
+        box-sizing: border-box;
+        transition: border-color .15s, background .15s;
+        position: relative;
+      }
+      .th-ct-option:hover { border-color: ${ACCENT}; }
+      .th-ct-option.selected { border-color: ${ACCENT}; background: rgba(42,191,207,0.08); }
+      .th-ct-option.selected::before {
+        content: '';
+        position: absolute;
+        left: 0; top: 0; bottom: 0;
+        width: 3px;
+        background: ${ACCENT};
+        border-radius: 7px 0 0 7px;
+      }
+      .th-ct-opt-label { font-weight: 600; color: ${T.text}; font-size: 12px; }
+      .th-ct-opt-preview { color: ${T.textDim}; font-size: 11px; margin-top: 3px; line-height: 1.5; }
+      .th-ct-input-wrap {
+        display: none;
+        flex-direction: column;
+        gap: 4px;
+        margin-top: 9px;
+        padding-top: 9px;
+        border-top: 1px dashed ${T.border};
+      }
+      .th-ct-input-wrap.visible { display: flex; }
+      .th-ct-input-wrap label { font-size: 10px; color: ${T.textDim}; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+      .th-ct-field-inp {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px 10px;
+        border: 1px solid ${T.border};
+        border-radius: 6px;
+        font-family: inherit;
+        font-size: 12px;
+        color: ${T.text};
+        background: ${T.bg};
+        outline: none;
+      }
+      .th-ct-field-inp:focus { border-color: ${ACCENT}; box-shadow: 0 0 0 2px rgba(42,191,207,0.15); }
+      .th-ct-preview-wrap { margin-top: 12px; border: 1px solid ${T.border}; border-radius: 7px; overflow: hidden; }
+      .th-ct-preview-label {
+        padding: 5px 10px; background: ${T.panel}; font-size: 10px; font-weight: 700;
+        color: ${T.textDim}; text-transform: uppercase; letter-spacing: .06em;
+        border-bottom: 1px solid ${T.border};
+      }
+      .th-ct-preview-text {
+        margin: 0; padding: 9px 11px; background: ${T.bg}; font-size: 12px; color: ${T.text};
+        line-height: 1.6; white-space: pre-wrap; word-break: break-word; font-family: inherit;
+        min-height: 18px;
+      }
+      .th-ct-radio-row {
+        display: flex; gap: 0; margin-bottom: 12px;
+        border: 1px solid ${T.border}; border-radius: 7px; overflow: hidden;
+      }
+      .th-ct-radio-row label {
+        flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px;
+        padding: 7px 10px; cursor: pointer; font-size: 11px; font-weight: 500;
+        color: ${T.textDim}; background: ${T.panel}; border-right: 1px solid ${T.border};
+        transition: background .15s, color .15s;
+      }
+      .th-ct-radio-row label:last-child { border-right: none; }
+      .th-ct-radio-row input[type=radio] { display: none; }
+      .th-ct-radio-row label.checked { background: rgba(42,191,207,0.12); color: ${ACCENT}; font-weight: 600; }
+      .th-ct-ticket-ids { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+      .th-ct-ticket-id-row { display: flex; gap: 6px; align-items: center; }
+      .th-ct-ticket-id-row input {
+        flex: 1; padding: 6px 10px; border: 1px solid ${T.border}; border-radius: 6px;
+        font-family: inherit; font-size: 12px; color: ${T.text};
+        background: ${T.bg}; outline: none; box-sizing: border-box;
+      }
+      .th-ct-ticket-id-row input:focus { border-color: ${ACCENT}; }
+      .th-ct-btn-rm {
+        padding: 5px 9px; border: 1px solid ${T.border}; border-radius: 5px;
+        background: ${T.panel}; color: ${T.textDim}; cursor: pointer; font-size: 14px;
+        line-height: 1; font-family: inherit; transition: all .15s;
+      }
+      .th-ct-btn-rm:hover { background: rgba(226,75,74,0.1); color: #E24B4A; border-color: rgba(226,75,74,0.4); }
+      .th-ct-btn-add-ticket {
+        padding: 5px 12px; border: 1px dashed ${T.border}; border-radius: 6px;
+        background: transparent; color: ${T.textDim}; cursor: pointer; font-size: 11px;
+        font-family: inherit; margin-bottom: 12px; transition: all .15s;
+      }
+      .th-ct-btn-add-ticket:hover { border-color: ${ACCENT}; color: ${ACCENT}; }
+      #th-ct-footer {
+        display: flex; gap: 8px; justify-content: flex-end;
+        padding: 12px 16px; border-top: 1px solid ${T.border};
+      }
+      #th-ct-back {
+        padding: 6px 16px; border-radius: 6px; font-size: 12px; font-family: inherit; font-weight: 500;
+        cursor: pointer; border: 1px solid ${T.border}; background: ${T.panel}; color: ${T.text};
+      }
+      #th-ct-back:hover { opacity: .85; }
+      #th-ct-insert {
+        padding: 6px 18px; border-radius: 6px; font-size: 12px; font-family: inherit; font-weight: 600;
+        cursor: pointer; border: none; background: ${ACCENT}; color: #fff;
+        display: flex; align-items: center; gap: 5px;
+      }
+      #th-ct-insert:hover { background: ${ACCENT_HOVER}; }
+    `);
+
+    function mk(tag, cls) {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      return e;
+    }
+
+    // Заголовки приходят с &nbsp;, разным регистром и разными апострофами —
+    // сравниваем по нормализованному виду.
+    function normTitle(text) {
+      return (text || '')
+        .replace(/ /g, ' ')
+        .replace(/[’‘`´]/g, "'")
+        .replace(/:\s*$/, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    }
+
+    // Строго внутри root, без отката к document — иначе на странице со
+    // своим фильтром Status (или на другом открытом диалоге) можно
+    // случайно прочитать чужое поле вместо поля текущего тикета.
+    function findGroupIn(root, title) {
+      const wanted = normTitle(title);
+      for (const group of root.querySelectorAll('.input-group')) {
+        const t = group.querySelector('.title');
+        if (t && normTitle(t.textContent) === wanted) return group;
+      }
+      return null;
+    }
+
+    function getOpenTicketCard() {
+      const modals = document.querySelectorAll('.modal_wrap[role="dialog"]');
+      for (const m of modals) {
+        if (window.getComputedStyle(m).display !== 'none') {
+          return m.querySelector('.modal_content') || m;
+        }
+      }
+      return null;
+    }
+
+    function getSelectedStatus(card) {
+      const group = findGroupIn(card, CFG.statusField);
+      if (!group) return null;
+      const single = group.querySelector('.multiselect__single');
+      if (single && single.textContent.trim()) return single.textContent.trim();
+      const tag = group.querySelector('.multiselect__tag span');
+      if (tag && tag.textContent.trim()) return tag.textContent.trim();
+      return null;
+    }
+
+    function statusId(status) {
+      if (!status) return null;
+      const m = String(status).match(/^(\d+)/);
+      return m ? m[1] : null;
+    }
+
+    function findTemplateGroup(status) {
+      const id = statusId(status);
+      if (!id) return null;
+      return CFG.groups.find(g => g.ids.includes(id)) || null;
+    }
+
+    function withPrefix(text) {
+      return text ? CFG.prefix + text : text;
+    }
+
+    function appendComment(textarea, text) {
+      if (!textarea || !text) return;
+      textarea.value = textarea.value ? textarea.value + '\n' + text : text;
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      textarea.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    // ── Модалка выбора шаблона ────────────────────────────────────────
+
+    function removeModal() {
+      const el = document.getElementById('th-ct-overlay');
+      if (el) el.remove();
+    }
+
+    function makePreviewWrap(initialText) {
+      const wrap = mk('div', 'th-ct-preview-wrap');
+      const label = mk('div', 'th-ct-preview-label'); label.textContent = 'Итоговый комментарий';
+      const box = mk('div', 'th-ct-preview-text'); box.textContent = initialText || '';
+      wrap.appendChild(label); wrap.appendChild(box);
+      return { wrap, box };
+    }
+
+    // Список вариантов; часть опций может нести свой input (например,
+    // номер транзакции) — как у статуса 209/55.
+    function buildOptions(group, body) {
+      const lbl = mk('div', 'th-ct-section-label'); lbl.textContent = 'Выберите вариант';
+      body.appendChild(lbl);
+
+      const optsWrap = mk('div', 'th-ct-options');
+      let selectedIdx = null;
+      const { wrap: pvWrap, box: pvBox } = makePreviewWrap('');
+
+      group.options.forEach((item, i) => {
+        const optBtn = mk('button', 'th-ct-option');
+        optBtn.type = 'button';
+        const optLabel = mk('div', 'th-ct-opt-label'); optLabel.textContent = item.label;
+        const optPreview = mk('div', 'th-ct-opt-preview');
+        optPreview.textContent = withPrefix(item.input ? item.template('') : item.text);
+        optBtn.appendChild(optLabel); optBtn.appendChild(optPreview);
+
+        let inputEl = null;
+        if (item.input) {
+          const inputWrap = mk('div', 'th-ct-input-wrap');
+          const inputLbl = mk('label'); inputLbl.textContent = item.input.placeholder;
+          inputEl = mk('input', 'th-ct-field-inp');
+          inputEl.type = 'text';
+          inputEl.placeholder = item.input.placeholder;
+          inputEl.addEventListener('click', e => e.stopPropagation());
+          inputEl.addEventListener('input', () => {
+            const t = withPrefix(item.template(inputEl.value.trim()));
+            optPreview.textContent = t;
+            if (selectedIdx === i) pvBox.textContent = t;
+          });
+          inputWrap.appendChild(inputLbl); inputWrap.appendChild(inputEl);
+          optBtn.appendChild(inputWrap);
+        }
+
+        optBtn.addEventListener('click', () => {
+          optsWrap.querySelectorAll('.th-ct-option').forEach(o => {
+            o.classList.remove('selected');
+            const iw = o.querySelector('.th-ct-input-wrap');
+            if (iw) iw.classList.remove('visible');
+          });
+          optBtn.classList.add('selected');
+          selectedIdx = i;
+          if (item.input) {
+            optBtn.querySelector('.th-ct-input-wrap').classList.add('visible');
+            pvBox.textContent = withPrefix(item.template(inputEl ? inputEl.value.trim() : ''));
+          } else {
+            pvBox.textContent = withPrefix(item.text);
+          }
+        });
+
+        optsWrap.appendChild(optBtn);
+      });
+
+      body.appendChild(optsWrap);
+      body.appendChild(pvWrap);
+
+      return () => {
+        if (selectedIdx === null) return null;
+        const item = group.options[selectedIdx];
+        if (!item.input) return withPrefix(item.text);
+        const inp = optsWrap.children[selectedIdx].querySelector('input.th-ct-field-inp');
+        return withPrefix(item.template(inp ? inp.value.trim() : ''));
+      };
+    }
+
+    // Одно текстовое поле (Original Ticket ID / номер транзакции).
+    function buildSingleInput(group, body) {
+      const lbl = mk('div', 'th-ct-section-label'); lbl.textContent = group.label;
+      body.appendChild(lbl);
+
+      const inp = mk('input', 'th-ct-field-inp');
+      inp.type = 'text';
+      inp.placeholder = group.placeholder;
+      inp.style.marginBottom = '4px';
+
+      const { wrap: pvWrap, box: pvBox } = makePreviewWrap(withPrefix(group.template('')));
+      inp.addEventListener('input', () => {
+        pvBox.textContent = withPrefix(group.template(inp.value.trim()));
+      });
+
+      body.appendChild(inp); body.appendChild(pvWrap);
+      return () => withPrefix(group.template(inp.value.trim()));
+    }
+
+    // Эскалация в антифрод: переключатель «есть/нет одобренная
+    // транзакция» + динамический список Ticket ID (статусы 216/98).
+    function buildAntifraud(group, body) {
+      const typeLbl = mk('div', 'th-ct-section-label'); typeLbl.textContent = 'Тип';
+      body.appendChild(typeLbl);
+
+      const radioRow = mk('div', 'th-ct-radio-row');
+      function makeRadio(value, labelText, checked) {
+        const l = mk('label');
+        if (checked) l.classList.add('checked');
+        const r = mk('input'); r.type = 'radio'; r.name = 'th-ct-antifraud-type'; r.value = value;
+        if (checked) r.checked = true;
+        const sp = mk('span'); sp.textContent = labelText;
+        l.appendChild(r); l.appendChild(sp);
+        return { l, r };
+      }
+      const { l: l1, r: r1 } = makeRadio(group.radios[0].value, group.radios[0].label, true);
+      const { l: l2, r: r2 } = makeRadio(group.radios[1].value, group.radios[1].label, false);
+      radioRow.appendChild(l1); radioRow.appendChild(l2);
+      body.appendChild(radioRow);
+
+      const txnApprWrap = mk('div', 'th-ct-input-wrap');
+      const txnApprLbl = mk('label'); txnApprLbl.textContent = 'Номер одобренной транзакции';
+      const txnApprInp = mk('input', 'th-ct-field-inp');
+      txnApprInp.type = 'text'; txnApprInp.placeholder = group.approvedPlaceholder || '';
+      txnApprWrap.appendChild(txnApprLbl); txnApprWrap.appendChild(txnApprInp);
+      body.appendChild(txnApprWrap);
+
+      const ticketLbl = mk('div', 'th-ct-section-label'); ticketLbl.textContent = 'Ticket ID';
+      body.appendChild(ticketLbl);
+
+      const ticketContainer = mk('div', 'th-ct-ticket-ids');
+      body.appendChild(ticketContainer);
+      let ticketInputs = [];
+
+      const btnAdd = mk('button', 'th-ct-btn-add-ticket');
+      btnAdd.type = 'button';
+      btnAdd.textContent = '+ Добавить тикет';
+      body.appendChild(btnAdd);
+
+      const { wrap: pvWrap, box: pvBox } = makePreviewWrap('');
+      body.appendChild(pvWrap);
+
+      function update() {
+        const ids = ticketInputs.map(i => i.value.trim()).filter(Boolean);
+        pvBox.textContent = withPrefix(group.template(ids, txnApprInp.value.trim(), r2.checked));
+      }
+
+      function addTicketRow(val) {
+        const row = mk('div', 'th-ct-ticket-id-row');
+        const inp = document.createElement('input');
+        inp.type = 'text'; inp.placeholder = 'Ticket ID'; inp.value = val || '';
+        inp.addEventListener('input', update);
+        ticketInputs.push(inp);
+        const rm = mk('button', 'th-ct-btn-rm');
+        rm.type = 'button'; rm.textContent = '×';
+        rm.addEventListener('click', () => { ticketInputs = ticketInputs.filter(i => i !== inp); row.remove(); update(); });
+        row.appendChild(inp); row.appendChild(rm);
+        ticketContainer.appendChild(row);
+        update();
+      }
+
+      addTicketRow('');
+      btnAdd.addEventListener('click', () => addTicketRow(''));
+      r1.addEventListener('change', () => {
+        l1.classList.add('checked'); l2.classList.remove('checked');
+        txnApprWrap.classList.remove('visible'); update();
+      });
+      r2.addEventListener('change', () => {
+        l2.classList.add('checked'); l1.classList.remove('checked');
+        txnApprWrap.classList.add('visible'); update();
+      });
+      txnApprInp.addEventListener('input', update);
+      update();
+
+      return () => pvBox.textContent.trim();
+    }
+
+    function showModal(group, statusLabel, textarea) {
+      removeModal();
+
+      const overlay = mk('div'); overlay.id = 'th-ct-overlay';
+      const modal = mk('div'); modal.id = 'th-ct-modal';
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+      overlay.classList.add('show');
+
+      const header = mk('div'); header.id = 'th-ct-header';
+      const iconWrap = mk('div'); iconWrap.id = 'th-ct-header-icon';
+      iconWrap.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
+      const headerText = mk('div'); headerText.id = 'th-ct-header-text';
+      const h3 = mk('div'); h3.id = 'th-ct-title'; h3.textContent = 'Шаблонный комментарий';
+      const sub = mk('div'); sub.id = 'th-ct-subtitle'; sub.textContent = statusLabel || '';
+      headerText.appendChild(h3); headerText.appendChild(sub);
+      header.appendChild(iconWrap); header.appendChild(headerText);
+      modal.appendChild(header);
+
+      const body = mk('div'); body.id = 'th-ct-body';
+      modal.appendChild(body);
+
+      let getComment = () => null;
+      if (group.kind === 'options') getComment = buildOptions(group, body);
+      else if (group.kind === 'input') getComment = buildSingleInput(group, body);
+      else if (group.kind === 'antifraud') getComment = buildAntifraud(group, body);
+
+      const footer = mk('div'); footer.id = 'th-ct-footer';
+      const backBtn = mk('button'); backBtn.id = 'th-ct-back'; backBtn.type = 'button';
+      backBtn.textContent = '← Назад';
+      backBtn.addEventListener('click', removeModal);
+      footer.appendChild(backBtn);
+
+      const insertBtn = mk('button'); insertBtn.id = 'th-ct-insert'; insertBtn.type = 'button';
+      insertBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg> Вставить`;
+      insertBtn.addEventListener('click', () => {
+        const text = getComment();
+        if (text) appendComment(textarea, text);
+        removeModal();
+      });
+      footer.appendChild(insertBtn);
+
+      modal.appendChild(footer);
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) removeModal(); });
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && document.getElementById('th-ct-overlay')) removeModal();
+    });
+
+    // ── Кнопка над Comment (internal) ───────────────────────────────
+
+    function updateTriggerButton() {
+      const card = getOpenTicketCard();
+      if (!card) return;
+      const commentGroup = findGroupIn(card, CFG.commentField);
+      if (!commentGroup) return;
+      const textarea = commentGroup.querySelector('textarea');
+      if (!textarea) return;
+
+      let wrap = commentGroup.querySelector('.th-ct-trigger-wrap');
+      if (!wrap) {
+        wrap = mk('div', 'th-ct-trigger-wrap');
+        const titleEl = commentGroup.querySelector('.title');
+        if (titleEl && titleEl.nextSibling) commentGroup.insertBefore(wrap, titleEl.nextSibling);
+        else commentGroup.insertBefore(wrap, textarea);
+      }
+
+      const statusLabel = getSelectedStatus(card);
+      const group = findTemplateGroup(statusLabel);
+      const existingBtn = wrap.querySelector('.th-ct-trigger-btn');
+
+      if (group && !existingBtn) {
+        const btn = mk('button', 'th-ct-trigger-btn');
+        btn.type = 'button';
+        btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Добавить шаблонный комментарий`;
+        btn.addEventListener('click', (e) => {
+          e.preventDefault(); e.stopPropagation();
+          // Свежий поиск на момент клика, а не на момент вставки кнопки —
+          // статус мог смениться, пока форма была открыта.
+          const freshCard = getOpenTicketCard();
+          if (!freshCard) return;
+          const freshStatus = getSelectedStatus(freshCard);
+          const freshGroup = findTemplateGroup(freshStatus);
+          if (!freshGroup) return;
+          const freshCommentGroup = findGroupIn(freshCard, CFG.commentField);
+          const freshTextarea = freshCommentGroup && freshCommentGroup.querySelector('textarea');
+          if (!freshTextarea) return;
+          showModal(freshGroup, freshStatus, freshTextarea);
+        });
+        wrap.insertBefore(btn, wrap.firstChild);
+      } else if (!group && existingBtn) {
+        existingBtn.remove();
+      }
+    }
+
+    updateTriggerButton();
+    new MutationObserver(updateTriggerButton).observe(document.body, { childList: true, subtree: true });
+
+    log('Шаблонные комментарии для Change ticket включены');
+  }
+
+  // ==================================================================
   // ПАНЕЛЬ НАСТРОЕК: ВКЛЮЧЕНИЕ И ВЫКЛЮЧЕНИЕ ФУНКЦИЙ БЕЗ ПРАВКИ КОДА
   // ==================================================================
 
@@ -3134,6 +3775,7 @@
     messengerId: 'Автоподстановка Reddy ID',
     autoDateRange: 'Автоподстановка дат',
     ticketCopy: 'Копирование данных тикета',
+    commentTemplates: 'Шаблонные комментарии для Change ticket',
     fileButtons: 'Кнопки вместо ссылок на файлы',
     cellCopy: 'Копирование значения ячейки по клику',
   };
@@ -3394,6 +4036,7 @@
     if (isFeatureEnabled('messengerId')) initMessengerId();
     if (isFeatureEnabled('autoDateRange')) initAutoDateRange();
     if (isFeatureEnabled('ticketCopy')) initTicketCopy();
+    if (isFeatureEnabled('commentTemplates')) initCommentTemplates();
     if (isFeatureEnabled('fileButtons')) initFileButtons();
     if (isFeatureEnabled('cellCopy')) initCellCopy();
     log('Скрипт запущен на', window.location.pathname);
