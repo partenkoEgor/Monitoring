@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      2.6
-// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается в поле Amount by receipt; если взять нечего — тикет выносится в отдельный список для ручной проверки). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
+// @version      2.7
+// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -32,6 +32,10 @@
     blockingPopupTimeout: 5000,
     // Столько ошибок подряд — и прогон останавливается сам
     maxConsecutiveFailures: 3,
+    // Проверять после Apply, что подставленная сумма действительно сохранилась
+    // (см. verifyAmountSaved). Выключать стоит только для отладки: без этого
+    // тикет может закрыться со статусом, но без суммы, и никто не заметит.
+    verifyAmountSaved: true,
   };
 
   // ------------------------------------------------------------------
@@ -71,9 +75,10 @@
       // У части тикетов 239 в колонке Amount стоит 0. Раньше их просто
       // пропускали, и оператор доделывал руками: копировал сумму из колонки
       // Transaction Amount в поле "Amount by receipt" и менял статус. Теперь
-      // скрипт делает это сам. Если брать нечего (Transaction Amount пуст,
-      // не число или тоже 0) — тикет по-прежнему пропускается и уходит в
-      // список для ручной проверки.
+      // скрипт делает это сам, а после Apply проверяет, что сумма реально
+      // сохранилась (см. verifyAmountSaved). Если брать нечего (Transaction
+      // Amount пуст, не число или тоже 0) — тикет по-прежнему пропускается и
+      // уходит в список для ручной проверки.
       fillAmountFromTransaction: true,
     },
   ];
@@ -101,6 +106,7 @@
     'modal-title-unreadable': 'не удалось прочитать номер тикета в заголовке окна — ничего не меняли',
     'modal-ticket-mismatch': 'открылся ДРУГОЙ тикет — ничего не меняли',
     'no-amount-receipt-field': 'в окне нет поля Amount by receipt — сумму вписать некуда',
+    'amount-format-unclear': 'не понял формат суммы в Transaction Amount — не стал рисковать и вписывать',
     'amount-not-accepted': 'сайт не принял вписанную сумму (поле сбросилось) — ничего не меняли, проверь вручную',
     'no-status-field': 'в окне не появилось поле Status (сайт не отрисовал форму)',
     'no-multiselect-tags': 'поле Status непривычной вёрстки — скрипт его не понял',
@@ -403,11 +409,59 @@
   // Превращает текст денежной ячейки в число: убирает валютные символы,
   // пробелы и разделители тысяч. Возвращает null, если разобрать не вышло
   // (ячейка пустая или там не число).
+  // Приводит денежную строку к виду «-1234.56»: убирает валюту и пробелы всех
+  // видов (включая неразрывные) и разбирается с разделителями.
+  // Возвращает null, если разобрать не вышло.
+  //
+  // Разделители неоднозначны: «1,234» — это тысяча двести тридцать четыре или
+  // одна целая двести тридцать четыре тысячных? Правила:
+  //   • есть и точка, и запятая — десятичный тот, что ПОСЛЕДНИЙ, второй убираем
+  //     как разделитель тысяч (1.234,56 → 1234.56 и 1,234.56 → 1234.56);
+  //   • только запятая — десятичная, если после неё 1-2 цифры (1,50 → 1.50),
+  //     иначе разделитель тысяч (1,234 → 1234);
+  //   • только точка — трогать не надо, она уже десятичная.
+  function normalizeAmountString(raw) {
+    let s = String(raw == null ? '' : raw).replace(/[\s\u00A0\u202F\u2009]/g, '');
+    const negative = s.includes('-');
+    s = s.replace(/[^\d.,]/g, '');
+    if (s === '') return null;
+
+    const lastDot = s.lastIndexOf('.');
+    const lastComma = s.lastIndexOf(',');
+
+    if (lastDot !== -1 && lastComma !== -1) {
+      const decimalSep = lastDot > lastComma ? '.' : ',';
+      const thousandsSep = decimalSep === '.' ? ',' : '.';
+      s = s.split(thousandsSep).join('');
+      s = s.replace(decimalSep, '.');
+    } else if (lastComma !== -1) {
+      const afterComma = s.length - lastComma - 1;
+      s = afterComma > 0 && afterComma <= 2 ? s.replace(',', '.') : s.split(',').join('');
+    }
+
+    // На этом месте допустима ровно одна точка
+    if ((s.match(/\./g) || []).length > 1) return null;
+    if (s === '' || s === '.') return null;
+    if (Number.isNaN(Number(s))) return null;
+
+    return (negative ? '-' : '') + s;
+  }
+
+  // Число из денежной строки (0, если сумма 0), либо null, если распарсить
+  // не удалось (ячейка пустая или там не число).
   function parseAmountText(raw) {
-    const cleaned = raw.replace(/[^\d.,-]/g, '').replace(/,/g, '');
-    if (cleaned === '') return null;
-    const value = Number(cleaned);
-    return Number.isNaN(value) ? null : value;
+    const normalized = normalizeAmountString(raw);
+    return normalized === null ? null : Number(normalized);
+  }
+
+  // Совпадают ли две денежные строки ЧИСЛЕННО. Сравнивать строками нельзя:
+  // сайт вправе показать «1 500.00» там, где мы записали «1500.00», — это то
+  // же самое число, а не расхождение.
+  function sameAmount(a, b) {
+    const na = parseAmountText(a);
+    const nb = parseAmountText(b);
+    if (na === null || nb === null) return false;
+    return Math.abs(na - nb) < 0.005;
   }
 
   // Возвращает { raw, value } из колонки Amount, либо null, если колонка не
@@ -453,12 +507,16 @@
   }
 
   // Единственное место, где решается, в каком виде сумма попадёт в поле
-  // Amount by receipt. Сейчас — ровно как в колонке (так же, как если бы
-  // оператор скопировал ячейку мышью). Если окажется, что сайт не принимает
-  // строку с валютой или пробелами, менять нужно только эту функцию,
-  // например на `String(parseAmountText(raw))`.
+  // Amount by receipt. Вписываем чистое число: в 2.6 значение вставлялось
+  // текстом ячейки как есть (вместе с валютой и пробелом-разделителем), и
+  // часть тикетов закрывалась со статусом, но без суммы — сайт такую строку
+  // не сохранял, а на непустое поле не ругался.
+  //
+  // Возвращает строку для вставки либо null, если формат ячейки понять
+  // не удалось. Через Number намеренно НЕ гоняем: «1500.00» превратилось бы
+  // в «1500», а копейки лучше сохранить как есть.
   function formatAmountForReceipt(raw) {
-    return raw.trim();
+    return normalizeAmountString(raw);
   }
 
   function getEditLinkFromRow(row) {
@@ -520,6 +578,117 @@
   }
 
   // ------------------------------------------------------------------
+  // ПРОВЕРКА, ЧТО СУММА ДЕЙСТВИТЕЛЬНО СОХРАНИЛАСЬ.
+  //
+  // Зачем отдельная проверка. До 2.7 скрипт считал доказательством чтение
+  // input.value сразу после записи — но это тавтология: читается то же
+  // значение, которое сами и записали. На Apply уходит внутренняя модель Vue,
+  // и если она значение не подхватила (или бэкенд его не разобрал), тикет
+  // закрывался с новым статусом, но без суммы. Окно «Amount on receipt field
+  // must be filled in» при этом не появлялось: оно про ПУСТОЕ поле, а здесь
+  // поле было непустым — просто негодным.
+  //
+  // Сначала смотрим колонку Amount в строке: после сохранения там должна
+  // появиться сумма, и это не стоит ни одного лишнего окна. Если там всё ещё
+  // ноль (или таблица не перечиталась с сервера) — переоткрываем Edit и
+  // читаем поле напрямую.
+  //
+  // Возвращает { verdict, storedAmount, note }:
+  //   'saved'      — число совпало;
+  //   'not-saved'  — сумма не сохранилась или сохранилась другой;
+  //   'unverified' — проверить не удалось (строки нет, окно не открылось и т.п.).
+  // ------------------------------------------------------------------
+  async function verifyAmountSaved(ticketId, expectedAmount, workflow) {
+    let row;
+    try {
+      // Таблица после Apply обычно перечитывается — даём строке вернуться
+      row = await waitFor(() => findRowByTicketId(ticketId), 5000);
+    } catch (e) {
+      if (e instanceof StopSignal) throw e;
+      return { verdict: 'unverified', note: 'строка пропала из таблицы после сохранения' };
+    }
+
+    // Быстрый путь: сумма уже видна в списке — значит, сервер её принял
+    const rowAmount = getAmountFromRow(row);
+    if (rowAmount && sameAmount(rowAmount.raw, expectedAmount)) {
+      return { verdict: 'saved', storedAmount: rowAmount.raw, note: 'подтверждено по колонке Amount' };
+    }
+
+    // Путь сомнения: в списке по-прежнему ноль — но это может быть и просто
+    // неперечитанная таблица. Открываем тикет и смотрим само поле.
+    const editLink = getEditLinkFromRow(row);
+    if (!editLink) {
+      return { verdict: 'unverified', note: 'в строке нет кнопки Edit для перепроверки' };
+    }
+
+    fireClick(editLink);
+
+    try {
+      let modal;
+      try {
+        modal = await waitFor(() => getOpenModal());
+      } catch (e) {
+        if (e instanceof StopSignal) throw e;
+        return { verdict: 'unverified', note: 'окно не открылось для перепроверки' };
+      }
+
+      // Та же паранойя, что и в основном проходе: читать чужое окно нельзя,
+      // иначе можно объявить сумму сохранённой по данным другого тикета.
+      let modalTicketId;
+      try {
+        modalTicketId = await waitFor(() => getModalTicketId(modal));
+      } catch (e) {
+        if (e instanceof StopSignal) throw e;
+        return { verdict: 'unverified', note: 'не удалось прочитать номер тикета в окне проверки' };
+      }
+      if (modalTicketId !== extractTicketNumber(ticketId)) {
+        return {
+          verdict: 'unverified',
+          note: `при перепроверке открылся другой тикет (${modalTicketId})`,
+        };
+      }
+
+      let amountGroup;
+      try {
+        amountGroup = await waitFor(() => findFieldGroup(modal, 'Amount by receipt'));
+      } catch (e) {
+        if (e instanceof StopSignal) throw e;
+        return { verdict: 'unverified', note: 'в окне проверки нет поля Amount by receipt' };
+      }
+
+      const amountInput = amountGroup.querySelector(
+        'input.mx-input, input[type="text"]:not(.multiselect__input)'
+      );
+      const storedAmount = amountInput ? amountInput.value.trim() : '';
+
+      if (sameAmount(storedAmount, expectedAmount)) {
+        return { verdict: 'saved', storedAmount, note: 'подтверждено по полю в окне' };
+      }
+
+      return {
+        verdict: 'not-saved',
+        storedAmount,
+        note: storedAmount === '' ? 'поле пустое' : `в поле "${storedAmount}"`,
+      };
+    } finally {
+      // Окно проверки обязано закрыться при ЛЮБОМ исходе: незакрытая модалка
+      // роняет следующий тикет каскадом (stale-modal-before-edit), из-за
+      // которого транзакция уже уезжала в чужой тикет.
+      tryCancelModal();
+      try {
+        await waitForGone(() => getOpenModal(), 3000);
+      } catch (e) {
+        if (!(e instanceof StopSignal)) {
+          console.warn(
+            `[BulkApprove/${workflow.id}] Тикет ${ticketId}: окно проверки не закрылось — ` +
+            `перед следующим тикетом скрипт попробует закрыть его ещё раз.`
+          );
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------
   // Основная логика: обработка одного тикета
   // ------------------------------------------------------------------
   async function processTicket(row, index, total, workflow) {
@@ -559,7 +728,9 @@
       const amount = getAmountFromRow(row);
       if (amount && amount.value === 0) {
         const txAmount = getTransactionAmountFromRow(row);
-        if (!txAmount || txAmount.value === null || txAmount.value === 0) {
+
+        // Брать нечего: колонки нет, ячейка пустая или там ноль.
+        if (!txAmount || txAmount.raw === '' || txAmount.value === 0) {
           console.log(
             `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: Amount = 0, ` +
             `и в Transaction Amount нечего взять (${txAmount ? `"${txAmount.raw}"` : 'колонка не найдена'}) — ` +
@@ -567,10 +738,38 @@
           );
           return { ticketId, status: 'skipped', reason: 'zero-amount', externalStatus };
         }
+
         amountToFill = formatAmountForReceipt(txAmount.raw);
+
+        // В ячейке что-то есть, но это не разбирается как сумма («12.34.56»,
+        // «USD», «—»). Отделяем от «нечего взять» специально: пустая ячейка и
+        // нечитаемая — разные поводы, и вторая может означать, что на сайте
+        // поменялся формат колонки и скрипт пора чинить.
+        //
+        // Второе условие — страховка для денег: вписываем не то, что
+        // прочитали, а нормализованную строку, и обязаны убедиться, что она
+        // осталась тем же числом. Сейчас обе функции считают одинаково, так
+        // что сработать оно не должно; но formatAmountForReceipt — это
+        // задокументированная точка смены формата, и если её однажды изменят
+        // (округление, отбрасывание копеек), лучше не вписать ничего, чем
+        // записать не ту сумму.
+        if (amountToFill === null || txAmount.value === null || !sameAmount(amountToFill, txAmount.raw)) {
+          console.warn(
+            `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: не понял формат суммы ` +
+            `"${txAmount.raw}" в Transaction Amount — не рискую вписывать, нужна ручная проверка.`
+          );
+          return {
+            ticketId,
+            status: 'skipped',
+            reason: 'amount-format-unclear',
+            transactionAmountRaw: txAmount.raw,
+            externalStatus,
+          };
+        }
+
         console.log(
           `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: Amount = 0 — ` +
-          `впишу в Amount by receipt сумму из Transaction Amount: "${amountToFill}".`
+          `впишу в Amount by receipt сумму из Transaction Amount "${txAmount.raw}" как "${amountToFill}".`
         );
       }
     }
@@ -754,13 +953,22 @@
       }
 
       setInputValue(amountInput, amountToFill);
+      // Маски и валидаторы у полей ввода часто срабатывают именно по blur, а не
+      // по input: без него поле может выглядеть заполненным, а нормализоваться
+      // (или сброситься) только в момент Apply.
+      amountInput.blur();
+      amountInput.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
       await interruptibleSleep(CONFIG.stepDelay);
 
-      // Читаем значение обратно: Vue мог отклонить ввод или переформатировать
-      // его. Без этой проверки скрипт нажал бы Apply с пустым полем и получил
-      // от сайта окно «Amount on receipt field must be filled in».
+      // Читаем значение обратно: поле могло опустеть или в нём могло оказаться
+      // другое число. Сравниваем ЧИСЛЕННО — сайт вправе показать «1 500.00»
+      // там, где мы записали «1500.00», это то же самое, а не отказ.
+      //
+      // ВАЖНО: это НЕ доказательство того, что сумма сохранится. Мы читаем тот
+      // же input.value, который сами и записали, а на Apply уходит внутренняя
+      // модель Vue. Настоящая проверка — verifyAmountSaved, уже после Apply.
       const written = amountInput.value.trim();
-      if (written !== amountToFill) {
+      if (!sameAmount(written, amountToFill)) {
         console.warn(
           `[BulkApprove/${workflow.id}] Тикет ${ticketId}: сайт не принял сумму — вписывали "${amountToFill}", ` +
           `в поле оказалось "${written}". Статус не меняю.`
@@ -961,6 +1169,9 @@
     const results = [];
     let stoppedEarly = false;
     let consecutiveFailures = 0;
+    // Отдельный счётчик: тикет обработался успешно, но сумма не сохранилась.
+    // Это не «ошибка тикета», поэтому в consecutiveFailures не попадает.
+    let consecutiveUnsavedAmounts = 0;
 
     // Серия ошибок подряд означает, что сайт лёг (например, отвечает 529) или
     // изменилась вёрстка. Гнать в таком состоянии оставшуюся сотню тикетов
@@ -1036,6 +1247,56 @@
         results.push(result);
       }
 
+      // Сумму вписали — убеждаемся, что она сохранилась. Делаем это здесь, а
+      // не внутри processTicket: цикл уже умеет ждать перезагрузку таблицы и
+      // заново находить строку по номеру тикета.
+      if (CONFIG.verifyAmountSaved && result.status === 'success' && result.amountFilled) {
+        try {
+          const check = await verifyAmountSaved(ticketId, result.amountFilled, workflow);
+          // result лежит в results по ссылке — отчёт увидит эти поля
+          result.amountVerified = check.verdict;
+          result.storedAmount = check.storedAmount;
+          result.verifyNote = check.note;
+
+          if (check.verdict === 'saved') {
+            consecutiveUnsavedAmounts = 0;
+            console.log(
+              `[BulkApprove/${workflow.id}] Тикет ${ticketId}: сумма "${result.amountFilled}" сохранилась ` +
+              `(${check.note}).`
+            );
+          } else if (check.verdict === 'not-saved') {
+            console.error(
+              `[BulkApprove/${workflow.id}] Тикет ${ticketId}: СУММА НЕ СОХРАНИЛАСЬ — вписывали ` +
+              `"${result.amountFilled}", ${check.note}. Статус при этом уже изменён.`
+            );
+            consecutiveUnsavedAmounts++;
+            // Если виноват формат или вёрстка, не сохранится у всех подряд —
+            // гнать дальше и трогать деньги впустую вредно.
+            if (consecutiveUnsavedAmounts >= CONFIG.maxConsecutiveFailures) {
+              runAbortReason =
+                `Подряд у ${consecutiveUnsavedAmounts} тикетов сумма не сохранилась, хотя статус менялся. ` +
+                `Похоже, сайт перестал принимать сумму в том виде, в каком её вписывает скрипт. ` +
+                `Прогон остановлен. Перечисленные ниже тикеты нужно поправить вручную.`;
+              console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
+              stoppedEarly = true;
+              break;
+            }
+          } else {
+            console.warn(
+              `[BulkApprove/${workflow.id}] Тикет ${ticketId}: не удалось проверить сумму — ${check.note}.`
+            );
+          }
+        } catch (e) {
+          if (e instanceof StopSignal) {
+            stoppedEarly = true;
+            break;
+          }
+          console.error(`[BulkApprove/${workflow.id}] Ошибка при проверке суммы у тикета ${ticketId}:`, e);
+          result.amountVerified = 'unverified';
+          result.verifyNote = 'проверка завершилась ошибкой скрипта';
+        }
+      }
+
       if (result.status === 'failed') {
         if (registerFailure(result.reason)) {
           stoppedEarly = true;
@@ -1078,6 +1339,12 @@
     // явно, а не только в консоли: по этому списку сверяют, что сайт принял
     // сумму именно в том виде, в каком её вписали.
     const amountFilledResults = results.filter((r) => r.status === 'success' && r.amountFilled);
+    // Статус изменился, а сумма не сохранилась — самое опасное, что может
+    // случиться в этом прогоне: тикет выглядит обработанным, но денег в нём нет.
+    const amountNotSaved = amountFilledResults.filter((r) => r.amountVerified === 'not-saved');
+    const amountUnverified = amountFilledResults.filter((r) => r.amountVerified === 'unverified');
+    const amountConfirmed = amountFilledResults.filter((r) => r.amountVerified !== 'not-saved' && r.amountVerified !== 'unverified');
+    const formatUnclearSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'amount-format-unclear');
     const failed = results.filter((r) => r.status === 'failed');
     const popupCount = capturedPopups.length;
 
@@ -1134,17 +1401,48 @@
         : '';
 
     window.__bulkApproveAmountFilled = amountFilledResults;
+    window.__bulkApproveAmountNotSaved = amountNotSaved;
 
     const amountFilledListText =
-      amountFilledResults.length > 0
-        ? `\n\nВписана сумма из Transaction Amount (${amountFilledResults.length}):\n` +
-          amountFilledResults
+      amountConfirmed.length > 0
+        ? `\n\nВписана сумма из Transaction Amount (${amountConfirmed.length}):\n` +
+          amountConfirmed
             .slice(0, MAX_LISTED)
             .map((r) => `${r.ticketId} — ${r.amountFilled}`)
             .join('\n') +
-          (amountFilledResults.length > MAX_LISTED
-            ? `\n… и ещё ${amountFilledResults.length - MAX_LISTED} — полный список в консоли: window.__bulkApproveAmountFilled`
+          (amountConfirmed.length > MAX_LISTED
+            ? `\n… и ещё ${amountConfirmed.length - MAX_LISTED} — полный список в консоли: window.__bulkApproveAmountFilled`
             : '')
+        : '';
+
+    const amountNotSavedText =
+      amountNotSaved.length > 0
+        ? `\n\n⚠ СУММА НЕ СОХРАНИЛАСЬ (${amountNotSaved.length}) — статус УЖЕ изменён, поправь вручную:\n` +
+          amountNotSaved
+            .slice(0, MAX_LISTED)
+            .map((r) => `${r.ticketId} — вписывали "${r.amountFilled}", ${r.verifyNote || 'в тикете её нет'}`)
+            .join('\n') +
+          (amountNotSaved.length > MAX_LISTED
+            ? `\n… и ещё ${amountNotSaved.length - MAX_LISTED} — полный список в консоли: window.__bulkApproveAmountNotSaved`
+            : '') +
+          `\nЭти тикеты можно починить повторным прогоном: Amount в списке остался 0, External Status не менялся.`
+        : '';
+
+    const amountUnverifiedText =
+      amountUnverified.length > 0
+        ? `\n\nСумма вписана, но проверить не удалось (${amountUnverified.length}) — статус изменён, сумму стоит глянуть:\n` +
+          amountUnverified
+            .slice(0, MAX_LISTED)
+            .map((r) => `${r.ticketId} — вписывали "${r.amountFilled}" (${r.verifyNote || 'причина неизвестна'})`)
+            .join('\n')
+        : '';
+
+    const formatUnclearText =
+      formatUnclearSkips.length > 0
+        ? `\n\nПропущены: не понял формат суммы в Transaction Amount (${formatUnclearSkips.length}):\n` +
+          formatUnclearSkips
+            .map((r) => `${r.ticketId} — в колонке "${r.transactionAmountRaw}"`)
+            .join('\n')
         : '';
 
     // Разбивка ошибок по причинам, от частых к редким: одна цифра «Ошибок: 7»
@@ -1161,8 +1459,14 @@
     ];
     // Строка-уточнение к «Успешно» — должна идти сразу за ним, иначе читается
     // как уточнение к пропущенным.
-    if (amountFilledResults.length > 0) {
-      summaryLines.push(`  • из них с подставленной суммой: ${amountFilledResults.length}`);
+    if (amountConfirmed.length > 0) {
+      summaryLines.push(`  • из них с подставленной суммой: ${amountConfirmed.length}`);
+    }
+    if (amountNotSaved.length > 0) {
+      summaryLines.push(`  • ⚠ статус изменён, но сумма НЕ сохранилась: ${amountNotSaved.length}`);
+    }
+    if (amountUnverified.length > 0) {
+      summaryLines.push(`  • сумма вписана, но не проверена: ${amountUnverified.length}`);
     }
     summaryLines.push(`Пропущено (не тот External Status): ${wrongStatusSkips.length}`);
     if (zeroAmountSkips.length > 0) {
@@ -1170,6 +1474,9 @@
     }
     if (alreadyFilledSkips.length > 0) {
       summaryLines.push(`Пропущено (Amount by receipt уже заполнен): ${alreadyFilledSkips.length}`);
+    }
+    if (formatUnclearSkips.length > 0) {
+      summaryLines.push(`Пропущено (непонятный формат суммы): ${formatUnclearSkips.length}`);
     }
     summaryLines.push(`Ошибок: ${failed.length}`);
     failureBreakdown.forEach(([reason, count]) => {
@@ -1217,15 +1524,20 @@
         : `Остановлено пользователем.\n`
       : unprocessed.length > 0
         ? `Прогон завершён, но НЕ ВСЕ тикеты обработаны.\n`
-        : `Готово.\n`;
+        : amountNotSaved.length > 0
+          ? `Прогон завершён, но У ЧАСТИ ТИКЕТОВ НЕ СОХРАНИЛАСЬ СУММА.\n`
+          : `Готово.\n`;
 
     alert(
       header +
       summaryLines.join('\n') +
       popupsListText +
+      amountNotSavedText +
       amountFilledListText +
+      amountUnverifiedText +
       zeroAmountListText +
       alreadyFilledListText +
+      formatUnclearText +
       failedText +
       notReachedText +
       `\n\nПодробности — в консоли (F12).`
