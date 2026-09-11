@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      2.5
-// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)" (тикеты с Amount = 0 пропускаются и выносятся в отдельный список для ручной проверки). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
+// @version      2.6
+// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается в поле Amount by receipt; если взять нечего — тикет выносится в отдельный список для ручной проверки). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -68,10 +68,13 @@
         return t.includes('239') && t.includes('response to user');
       },
       targetStatusLabel: '239 Response to user (M)',
-      // У части тикетов 239 в колонке Amount стоит 0 — их нужно пропускать
-      // и вынести в отдельный список для ручной проверки, а не обрабатывать
-      // как обычно.
-      skipZeroAmount: true,
+      // У части тикетов 239 в колонке Amount стоит 0. Раньше их просто
+      // пропускали, и оператор доделывал руками: копировал сумму из колонки
+      // Transaction Amount в поле "Amount by receipt" и менял статус. Теперь
+      // скрипт делает это сам. Если брать нечего (Transaction Amount пуст,
+      // не число или тоже 0) — тикет по-прежнему пропускается и уходит в
+      // список для ручной проверки.
+      fillAmountFromTransaction: true,
     },
   ];
 
@@ -97,6 +100,8 @@
     'modal-not-shown': 'окно Edit не открылось',
     'modal-title-unreadable': 'не удалось прочитать номер тикета в заголовке окна — ничего не меняли',
     'modal-ticket-mismatch': 'открылся ДРУГОЙ тикет — ничего не меняли',
+    'no-amount-receipt-field': 'в окне нет поля Amount by receipt — сумму вписать некуда',
+    'amount-not-accepted': 'сайт не принял вписанную сумму (поле сбросилось) — ничего не меняли, проверь вручную',
     'no-status-field': 'в окне не появилось поле Status (сайт не отрисовал форму)',
     'no-multiselect-tags': 'поле Status непривычной вёрстки — скрипт его не понял',
     'dropdown-not-opened-or-no-match': 'не открылся список статусов или нужного статуса в нём нет',
@@ -285,6 +290,19 @@
     el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
   }
 
+  // Записывает значение в <input> так, чтобы Vue его заметил. Простое
+  // input.value = x реактивность не тронет: нужно звать нативный сеттер
+  // (иначе перехватчик Vue не сработает) и разослать input + change.
+  function setInputValue(input, value) {
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      'value'
+    ).set;
+    nativeInputValueSetter.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
   function getOpenModal() {
     // Второй modal_wrap (с role="dialog") — это тот, что реально показывается при Edit.
     const modals = document.querySelectorAll('.modal_wrap[role="dialog"]');
@@ -382,6 +400,16 @@
     return cell ? cell.textContent.trim() : '';
   }
 
+  // Превращает текст денежной ячейки в число: убирает валютные символы,
+  // пробелы и разделители тысяч. Возвращает null, если разобрать не вышло
+  // (ячейка пустая или там не число).
+  function parseAmountText(raw) {
+    const cleaned = raw.replace(/[^\d.,-]/g, '').replace(/,/g, '');
+    if (cleaned === '') return null;
+    const value = Number(cleaned);
+    return Number.isNaN(value) ? null : value;
+  }
+
   // Возвращает { raw, value } из колонки Amount, либо null, если колонка не
   // нашлась по названию (резервного номера для неё нет — колонка нужна не
   // всем workflow, поэтому лучше честно не знать сумму, чем читать не ту
@@ -393,10 +421,44 @@
     const cell = row.querySelector(`td:nth-child(${idx})`);
     if (!cell) return null;
     const raw = cell.textContent.trim();
-    // Убираем валютные символы, пробелы и разделители тысяч, чтобы разобрать число
-    const cleaned = raw.replace(/[^\d.,-]/g, '').replace(/,/g, '');
-    const value = cleaned === '' ? null : Number(cleaned);
-    return { raw, value: Number.isNaN(value) ? null : value };
+    return { raw, value: parseAmountText(raw) };
+  }
+
+  // Номер колонки Transaction Amount. Сначала точное совпадение названия,
+  // затем запасной поиск по подстроке — на случай, если колонка называется
+  // «Transaction amount, USD» и подобное. Подстрока требует ОБА слова, чтобы
+  // не перепутать её с простой колонкой Amount. Резервного номера нет
+  // намеренно: прочитать не ту денежную ячейку хуже, чем не прочитать ничего.
+  function getTransactionAmountColumnIndex() {
+    const exact = getColumnIndex('transaction amount');
+    if (exact) return exact;
+    if (!columnIndexMap) return null;
+    const key = Object.keys(columnIndexMap).find(
+      (name) => name.includes('transaction') && name.includes('amount')
+    );
+    return key ? columnIndexMap[key] : null;
+  }
+
+  // Возвращает { raw, value } из колонки Transaction Amount, либо null, если
+  // колонки нет. raw — текст ячейки как есть (именно он попадёт в поле
+  // Amount by receipt), value нужен только чтобы отличить «сумма есть» от
+  // «там пусто/ноль/не число».
+  function getTransactionAmountFromRow(row) {
+    const idx = getTransactionAmountColumnIndex();
+    if (!idx) return null;
+    const cell = row.querySelector(`td:nth-child(${idx})`);
+    if (!cell) return null;
+    const raw = cell.textContent.trim();
+    return { raw, value: parseAmountText(raw) };
+  }
+
+  // Единственное место, где решается, в каком виде сумма попадёт в поле
+  // Amount by receipt. Сейчас — ровно как в колонке (так же, как если бы
+  // оператор скопировал ячейку мышью). Если окажется, что сайт не принимает
+  // строку с валютой или пробелами, менять нужно только эту функцию,
+  // например на `String(parseAmountText(raw))`.
+  function formatAmountForReceipt(raw) {
+    return raw.trim();
   }
 
   function getEditLinkFromRow(row) {
@@ -487,13 +549,29 @@
       return { ticketId, status: 'skipped', reason: 'wrong-external-status', externalStatus };
     }
 
-    if (workflow.skipZeroAmount) {
+    // Тикеты с Amount = 0 раньше просто пропускались. Теперь решаем здесь,
+    // ЧТО именно впишем в поле Amount by receipt — но саму запись делаем
+    // позже, уже внутри открытого окна и только после проверки личности
+    // тикета. Если подставить нечего — ведём себя как раньше: не открываем
+    // тикет вообще и выносим его в список для ручной проверки.
+    let amountToFill = null;
+    if (workflow.fillAmountFromTransaction) {
       const amount = getAmountFromRow(row);
       if (amount && amount.value === 0) {
+        const txAmount = getTransactionAmountFromRow(row);
+        if (!txAmount || txAmount.value === null || txAmount.value === 0) {
+          console.log(
+            `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: Amount = 0, ` +
+            `и в Transaction Amount нечего взять (${txAmount ? `"${txAmount.raw}"` : 'колонка не найдена'}) — ` +
+            `пропускаю, нужна ручная проверка.`
+          );
+          return { ticketId, status: 'skipped', reason: 'zero-amount', externalStatus };
+        }
+        amountToFill = formatAmountForReceipt(txAmount.raw);
         console.log(
-          `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: Amount = 0 — пропускаю, нужна ручная проверка.`
+          `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: Amount = 0 — ` +
+          `впишу в Amount by receipt сумму из Transaction Amount: "${amountToFill}".`
         );
-        return { ticketId, status: 'skipped', reason: 'zero-amount', externalStatus };
       }
     }
 
@@ -618,6 +696,90 @@
 
     await interruptibleSleep(CONFIG.stepDelay);
 
+    // ------------------------------------------------------------------
+    // ПОДСТАНОВКА СУММЫ (только режим 239, только если Amount = 0).
+    // Делаем это ДО работы со Status и до Apply: личность тикета уже
+    // подтверждена, а если подстановка сорвётся — статус останется
+    // нетронутым, и тикет не окажется обработан наполовину.
+    // ------------------------------------------------------------------
+    let amountFilled = null;
+    if (amountToFill) {
+      let amountGroup;
+      try {
+        amountGroup = await waitFor(() => findFieldGroup(modal, 'Amount by receipt'));
+      } catch (e) {
+        if (e instanceof StopSignal) throw e;
+        console.warn(
+          `[BulkApprove/${workflow.id}] Тикет ${ticketId}: в окне нет поля Amount by receipt — вписать сумму некуда.`
+        );
+        return failTicket(ticketId, workflow, {
+          ticketId,
+          status: 'failed',
+          reason: 'no-amount-receipt-field',
+        });
+      }
+
+      // .multiselect__input исключаем: это поле поиска выпадающего списка,
+      // а не текстовый ввод (та же логика, что и в Team Helper).
+      const amountInput = amountGroup.querySelector(
+        'input.mx-input, input[type="text"]:not(.multiselect__input)'
+      );
+      if (!amountInput) {
+        console.warn(
+          `[BulkApprove/${workflow.id}] Тикет ${ticketId}: поле Amount by receipt найдено, но внутри нет текстового input.`
+        );
+        return failTicket(ticketId, workflow, {
+          ticketId,
+          status: 'failed',
+          reason: 'no-amount-receipt-field',
+        });
+      }
+
+      // Если сумма там уже стоит — НЕ перезаписываем. Amount = 0 в списке при
+      // заполненном Amount by receipt — это расхождение, которое должен
+      // посмотреть человек, а не молча затереть скрипт.
+      const existingAmount = amountInput.value.trim();
+      if (existingAmount !== '') {
+        console.warn(
+          `[BulkApprove/${workflow.id}] Тикет ${ticketId}: Amount by receipt уже заполнен ("${existingAmount}"), ` +
+          `хотя в списке Amount = 0. Ничего не меняю, статус не трогаю — нужна ручная проверка.`
+        );
+        return failTicket(ticketId, workflow, {
+          ticketId,
+          status: 'skipped',
+          reason: 'amount-already-filled',
+          existingAmount,
+          transactionAmount: amountToFill,
+        });
+      }
+
+      setInputValue(amountInput, amountToFill);
+      await interruptibleSleep(CONFIG.stepDelay);
+
+      // Читаем значение обратно: Vue мог отклонить ввод или переформатировать
+      // его. Без этой проверки скрипт нажал бы Apply с пустым полем и получил
+      // от сайта окно «Amount on receipt field must be filled in».
+      const written = amountInput.value.trim();
+      if (written !== amountToFill) {
+        console.warn(
+          `[BulkApprove/${workflow.id}] Тикет ${ticketId}: сайт не принял сумму — вписывали "${amountToFill}", ` +
+          `в поле оказалось "${written}". Статус не меняю.`
+        );
+        return failTicket(ticketId, workflow, {
+          ticketId,
+          status: 'failed',
+          reason: 'amount-not-accepted',
+          attemptedAmount: amountToFill,
+          actualAmount: written,
+        });
+      }
+
+      amountFilled = amountToFill;
+      console.log(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: в Amount by receipt вписано "${amountFilled}".`);
+    }
+
+    checkStop();
+
     // Находим поле Status. Форма внутри модалки может рендериться с задержкой
     // (особенно когда сайт тормозит), поэтому ЖДЁМ её появления, а не
     // проверяем один раз: одиночная проверка давала ложный "no-status-field"
@@ -656,12 +818,7 @@
     // Печатаем searchTerm workflow'а в поле поиска — так же, как это делает человек.
     // Это надёжнее, чем искать нужный текст в нераскрытом полном списке.
     if (multiselectInput) {
-      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype,
-        'value'
-      ).set;
-      nativeInputValueSetter.call(multiselectInput, workflow.searchTerm);
-      multiselectInput.dispatchEvent(new Event('input', { bubbles: true }));
+      setInputValue(multiselectInput, workflow.searchTerm);
     }
 
     let optionsList;
@@ -684,12 +841,7 @@
       );
       // Fallback: очищаем поиск и ищем по всему нераскрытому списку опций
       if (multiselectInput) {
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-          window.HTMLInputElement.prototype,
-          'value'
-        ).set;
-        nativeInputValueSetter.call(multiselectInput, '');
-        multiselectInput.dispatchEvent(new Event('input', { bubbles: true }));
+        setInputValue(multiselectInput, '');
         await interruptibleSleep(CONFIG.stepDelay);
       }
       try {
@@ -744,8 +896,13 @@
       return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'modal-not-closed' });
     }
 
-    console.log(`[BulkApprove/${workflow.id}] Тикет ${ticketId}: готово ✅`);
-    return { ticketId, status: 'success' };
+    console.log(
+      `[BulkApprove/${workflow.id}] Тикет ${ticketId}: готово ✅` +
+      (amountFilled ? ` (вписана сумма "${amountFilled}")` : '')
+    );
+    return amountFilled
+      ? { ticketId, status: 'success', amountFilled }
+      : { ticketId, status: 'success' };
   }
 
   // ------------------------------------------------------------------
@@ -754,11 +911,18 @@
   async function runBulkApprove(workflow) {
     refreshColumnIndexMap();
 
-    if (workflow.skipZeroAmount && !(columnIndexMap && columnIndexMap['amount'])) {
-      console.warn(
-        `[BulkApprove/${workflow.id}] Не найдена колонка Amount по названию — проверка на сумму 0 ` +
-        `не будет работать в этом прогоне, тикеты с нулевой суммой обработаются как обычно.`
-      );
+    if (workflow.fillAmountFromTransaction) {
+      if (!(columnIndexMap && columnIndexMap['amount'])) {
+        console.warn(
+          `[BulkApprove/${workflow.id}] Не найдена колонка Amount по названию — проверка на сумму 0 ` +
+          `не будет работать в этом прогоне, тикеты с нулевой суммой обработаются как обычно.`
+        );
+      } else if (!getTransactionAmountColumnIndex()) {
+        console.warn(
+          `[BulkApprove/${workflow.id}] Не найдена колонка Transaction Amount по названию — подставлять сумму ` +
+          `будет неоткуда, тикеты с Amount = 0 в этом прогоне просто пропустятся, как раньше.`
+        );
+      }
     }
 
     const rows = getTicketRows();
@@ -772,8 +936,10 @@
       `Будут обработаны только те, у кого External Status = "${workflow.requiredExternalStatus}"\n` +
       `(остальные — пропущены).\n` +
       `У подходящих будет выставлен статус "${workflow.targetStatusLabel}" и нажат Apply.` +
-      (workflow.skipZeroAmount
-        ? `\nТикеты с Amount = 0 тоже будут пропущены (отдельно отмечу в итоге для ручной проверки).`
+      (workflow.fillAmountFromTransaction
+        ? `\n\nВ тикетах с Amount = 0 сумма будет подставлена из колонки Transaction Amount\n` +
+          `в поле "Amount by receipt". Если брать нечего или поле уже заполнено —\n` +
+          `тикет пропускается и попадает в список для ручной проверки.`
         : '') +
       `\n\nПродолжить?`
     );
@@ -907,6 +1073,11 @@
     const successCount = results.filter((r) => r.status === 'success').length;
     const wrongStatusSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'wrong-external-status');
     const zeroAmountSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'zero-amount');
+    const alreadyFilledSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'amount-already-filled');
+    // Тикеты, где скрипт ИЗМЕНИЛ денежное поле. Такое обязано быть в отчёте
+    // явно, а не только в консоли: по этому списку сверяют, что сайт принял
+    // сумму именно в том виде, в каком её вписали.
+    const amountFilledResults = results.filter((r) => r.status === 'success' && r.amountFilled);
     const failed = results.filter((r) => r.status === 'failed');
     const popupCount = capturedPopups.length;
 
@@ -938,6 +1109,10 @@
       window.__bulkApproveCapturedPopups = capturedPopups;
     }
 
+    // Сколько тикетов показываем списком в окне, прежде чем отправить
+    // за остальными в консоль
+    const MAX_LISTED = 40;
+
     const popupsListText =
       popupCount > 0
         ? `\n\nТребуют ручной проверки на дубликаты (${popupCount}):\n` +
@@ -946,8 +1121,30 @@
 
     const zeroAmountListText =
       zeroAmountSkips.length > 0
-        ? `\n\nПропущены из-за Amount = 0, требуют ручной проверки (${zeroAmountSkips.length}):\n` +
+        ? `\n\nПропущены: Amount = 0, а в Transaction Amount нечего взять (${zeroAmountSkips.length}):\n` +
           zeroAmountSkips.map((r) => r.ticketId).join('\n')
+        : '';
+
+    const alreadyFilledListText =
+      alreadyFilledSkips.length > 0
+        ? `\n\nПропущены: Amount = 0, но поле Amount by receipt уже заполнено — статус НЕ меняли (${alreadyFilledSkips.length}):\n` +
+          alreadyFilledSkips
+            .map((r) => `${r.ticketId} — в окне "${r.existingAmount}", в списке "${r.transactionAmount}"`)
+            .join('\n')
+        : '';
+
+    window.__bulkApproveAmountFilled = amountFilledResults;
+
+    const amountFilledListText =
+      amountFilledResults.length > 0
+        ? `\n\nВписана сумма из Transaction Amount (${amountFilledResults.length}):\n` +
+          amountFilledResults
+            .slice(0, MAX_LISTED)
+            .map((r) => `${r.ticketId} — ${r.amountFilled}`)
+            .join('\n') +
+          (amountFilledResults.length > MAX_LISTED
+            ? `\n… и ещё ${amountFilledResults.length - MAX_LISTED} — полный список в консоли: window.__bulkApproveAmountFilled`
+            : '')
         : '';
 
     // Разбивка ошибок по причинам, от частых к редким: одна цифра «Ошибок: 7»
@@ -961,17 +1158,23 @@
     const summaryLines = [
       `Всего тикетов в списке: ${total}`,
       `Успешно: ${successCount}`,
-      `Пропущено (не тот External Status): ${wrongStatusSkips.length}`,
     ];
+    // Строка-уточнение к «Успешно» — должна идти сразу за ним, иначе читается
+    // как уточнение к пропущенным.
+    if (amountFilledResults.length > 0) {
+      summaryLines.push(`  • из них с подставленной суммой: ${amountFilledResults.length}`);
+    }
+    summaryLines.push(`Пропущено (не тот External Status): ${wrongStatusSkips.length}`);
     if (zeroAmountSkips.length > 0) {
-      summaryLines.push(`Пропущено (Amount = 0): ${zeroAmountSkips.length}`);
+      summaryLines.push(`Пропущено (Amount = 0, подставить нечего): ${zeroAmountSkips.length}`);
+    }
+    if (alreadyFilledSkips.length > 0) {
+      summaryLines.push(`Пропущено (Amount by receipt уже заполнен): ${alreadyFilledSkips.length}`);
     }
     summaryLines.push(`Ошибок: ${failed.length}`);
     failureBreakdown.forEach(([reason, count]) => {
       summaryLines.push(`  • ${describeReason(reason)}: ${count}`);
     });
-
-    const MAX_LISTED = 40;
 
     // Поимённый список упавших тикетов с причиной. Без него оператор видел
     // только счётчик и не знал, какие именно тикеты перезапускать.
@@ -1020,7 +1223,9 @@
       header +
       summaryLines.join('\n') +
       popupsListText +
+      amountFilledListText +
       zeroAmountListText +
+      alreadyFilledListText +
       failedText +
       notReachedText +
       `\n\nПодробности — в консоли (F12).`
