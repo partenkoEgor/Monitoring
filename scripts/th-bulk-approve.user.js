@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      2.7
-// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. Есть кнопка СТОП.
+// @version      2.8
+// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -697,7 +697,12 @@
     currentTicketId = ticketId; // чтобы пойманные попапы привязывались к этому тикету
     currentTransactionId = transactionId;
     try {
-      return await processTicketInner(row, ticketId, index, total, workflow);
+      // Transaction ID навешиваем здесь, в одной точке, а не в каждом из
+      // полутора десятков return'ов внутри processTicketInner. Он нужен для
+      // окна «скопировать в таблицу» в конце прогона.
+      const result = await processTicketInner(row, ticketId, index, total, workflow);
+      if (result && !result.transactionId) result.transactionId = transactionId;
+      return result;
     } finally {
       currentTicketId = null;
       currentTransactionId = null;
@@ -1528,7 +1533,7 @@
           ? `Прогон завершён, но У ЧАСТИ ТИКЕТОВ НЕ СОХРАНИЛАСЬ СУММА.\n`
           : `Готово.\n`;
 
-    alert(
+    const reportText =
       header +
       summaryLines.join('\n') +
       popupsListText +
@@ -1540,8 +1545,168 @@
       formatUnclearText +
       failedText +
       notReachedText +
-      `\n\nПодробности — в консоли (F12).`
-    );
+      `\n\nПодробности — в консоли (F12).`;
+
+    // Строки для вставки в таблицу учёта. Берём ТОЛЬКО подтверждённые:
+    // в таблицу должно попасть то, что реально лежит в тикетах, а не то,
+    // что скрипт пытался вписать. Непроверенные и несохранившиеся суммы
+    // остаются в тексте отчёта — их сначала нужно разобрать руками.
+    const copyRows = amountConfirmed.map((r) => ({
+      ticketId: r.ticketId,
+      transactionId: r.transactionId || '(нет данных)',
+      amount: r.amountFilled,
+    }));
+
+    window.__bulkApproveCopyRows = copyRows;
+
+    showReportWindow(reportText, copyRows);
+  }
+
+  // ------------------------------------------------------------------
+  // ИТОГОВОЕ ОКНО ОТЧЁТА.
+  //
+  // Раньше отчёт показывался через alert(): текст в нём нельзя выделить и
+  // скопировать, а суммы потом нужно фиксировать в своей таблице. Поэтому
+  // рисуем своё окно: сверху тот же текст отчёта (выделяемый), снизу —
+  // готовая таблица «Ticket ID / Transaction ID / Amount» через табуляцию,
+  // которая вставляется в Excel и Google Sheets по колонкам.
+  //
+  // Классы намеренно свои: окно не должно попадать ни под .modal_wrap
+  // (его ищет getOpenModal), ни под .swal2-popup (за ним следит swalObserver).
+  // ------------------------------------------------------------------
+  function showReportWindow(reportText, copyRows) {
+    // Если что-то пойдёт не так с вёрсткой — отчёт всё равно должен дойти
+    // до человека, поэтому любой сбой откатывается на обычный alert.
+    try {
+      const existing = document.querySelector('.bulk-approve-report-overlay');
+      if (existing) existing.remove();
+
+      const overlay = document.createElement('div');
+      overlay.className = 'bulk-approve-report-overlay';
+      overlay.style.cssText = [
+        'position:fixed', 'inset:0', 'z-index:2147483600',
+        'background:rgba(0,0,0,.5)', 'display:flex',
+        'align-items:center', 'justify-content:center', 'padding:20px',
+      ].join(';');
+
+      const panel = document.createElement('div');
+      panel.style.cssText = [
+        'background:#fff', 'color:#222', 'border-radius:8px',
+        'box-shadow:0 10px 40px rgba(0,0,0,.35)', 'max-width:820px',
+        'width:100%', 'max-height:90vh', 'display:flex',
+        'flex-direction:column', 'font-family:system-ui,Arial,sans-serif',
+        'font-size:14px', 'line-height:1.45',
+      ].join(';');
+
+      const body = document.createElement('div');
+      body.style.cssText = 'padding:18px 20px;overflow:auto;flex:1';
+
+      const report = document.createElement('pre');
+      report.className = 'bulk-approve-report-text';
+      report.textContent = reportText;
+      report.style.cssText = [
+        'margin:0', 'white-space:pre-wrap', 'word-break:break-word',
+        'font-family:inherit', 'font-size:14px', 'user-select:text',
+      ].join(';');
+      body.appendChild(report);
+
+      if (copyRows.length > 0) {
+        const tsv = copyRows
+          .map((r) => `${r.ticketId}\t${r.transactionId}\t${r.amount}`)
+          .join('\n');
+
+        const label = document.createElement('div');
+        label.textContent =
+          `Для таблицы (${copyRows.length}) — Ticket ID, Transaction ID, Amount:`;
+        label.style.cssText = 'margin:18px 0 6px;font-weight:600';
+        body.appendChild(label);
+
+        const area = document.createElement('textarea');
+        area.className = 'bulk-approve-report-copy';
+        area.readOnly = true;
+        area.value = tsv;
+        area.rows = Math.min(copyRows.length + 1, 12);
+        area.style.cssText = [
+          'width:100%', 'box-sizing:border-box', 'font-family:Consolas,monospace',
+          'font-size:13px', 'padding:8px', 'border:1px solid #ccc',
+          'border-radius:4px', 'resize:vertical', 'white-space:pre',
+        ].join(';');
+        area.addEventListener('focus', () => area.select());
+        body.appendChild(area);
+
+        const copyBtn = document.createElement('button');
+        copyBtn.textContent = 'Скопировать';
+        copyBtn.style.cssText = [
+          'margin-top:8px', 'padding:8px 16px', 'border:none',
+          'border-radius:4px', 'background:#2ABFCF', 'color:#fff',
+          'font-size:14px', 'cursor:pointer',
+        ].join(';');
+        copyBtn.addEventListener('click', async () => {
+          // Выделяем в любом случае: даже если запись в буфер не пройдёт,
+          // человек сможет нажать Ctrl+C сам.
+          area.focus();
+          area.select();
+          let ok = false;
+          try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              await navigator.clipboard.writeText(tsv);
+              ok = true;
+            }
+          } catch (e) {
+            ok = false;
+          }
+          if (!ok) {
+            try {
+              ok = document.execCommand('copy');
+            } catch (e) {
+              ok = false;
+            }
+          }
+          copyBtn.textContent = ok ? 'Скопировано ✓' : 'Выделено — нажми Ctrl+C';
+          copyBtn.style.background = ok ? '#3BA55D' : '#E0A030';
+          setTimeout(() => {
+            copyBtn.textContent = 'Скопировать';
+            copyBtn.style.background = '#2ABFCF';
+          }, 2500);
+        });
+        body.appendChild(copyBtn);
+      }
+
+      const footer = document.createElement('div');
+      footer.style.cssText =
+        'padding:12px 20px;border-top:1px solid #eee;text-align:right;flex-shrink:0';
+
+      const closeBtn = document.createElement('button');
+      closeBtn.textContent = 'Закрыть';
+      closeBtn.style.cssText = [
+        'padding:8px 20px', 'border:1px solid #bbb', 'border-radius:4px',
+        'background:#f5f5f5', 'font-size:14px', 'cursor:pointer',
+      ].join(';');
+      footer.appendChild(closeBtn);
+
+      const close = () => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') close();
+      };
+      closeBtn.addEventListener('click', close);
+      // Клик мимо панели закрывает, клик по самой панели — нет
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) close();
+      });
+      document.addEventListener('keydown', onKey);
+
+      panel.appendChild(body);
+      panel.appendChild(footer);
+      overlay.appendChild(panel);
+      document.body.appendChild(overlay);
+      closeBtn.focus();
+    } catch (e) {
+      console.error('[BulkApprove] Не удалось показать окно отчёта, показываю обычный alert:', e);
+      alert(reportText);
+    }
   }
 
   function requestStop() {
