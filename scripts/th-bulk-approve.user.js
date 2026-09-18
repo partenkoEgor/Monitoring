@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      2.8
-// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов с External Status "The money has not been sent, cancel it (M)" выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. Есть кнопка СТОП.
+// @version      2.9
+// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -48,9 +48,10 @@
       id: '225',
       buttonLabel: 'Bulk Approve (225)',
       buttonColor: '#2ABFCF',
-      // Обрабатывать тикет только если его External Status равен этому значению
-      // (без учёта регистра и лишних пробелов). Остальные тикеты пропускаются.
-      requiredExternalStatus: 'Approved (M)',
+      // Обрабатывать тикет только если его External Status есть в этом списке
+      // (без учёта регистра, лишних пробелов и числового кода в начале —
+      // см. normalizeExternalStatus). Остальные тикеты пропускаются.
+      requiredExternalStatuses: ['Approved (M)'],
       // Текст, который печатается в поле поиска статуса (как это делает человек)
       searchTerm: '225',
       // Текст, который должен встречаться в опции статуса (нечувствительно к регистру)
@@ -65,7 +66,26 @@
       id: '239',
       buttonLabel: 'Bulk Response (239)',
       buttonColor: '#8E6FCE',
-      requiredExternalStatus: 'The money has not been sent, cancel it (M)',
+      // Пул статусов намеренно широкий: в Response to user закрывают любой
+      // вывод, по которому транзакция отклонена, а причина отказа у каждого
+      // своя — отсюда и разные External Status. Что именно объединяет эти
+      // тикеты, проверяется отдельно, по колонке Transaction Status
+      // (см. requiredTransactionStatus).
+      requiredExternalStatuses: [
+        'The money has not been sent, cancel it (M)',
+        'Adjust the payout amount (M)',
+        '185 Limit reached on the recipient side (M)',
+        "191 Recipient's details are not correct (M)",
+        '199 Request statement for payout (M)',
+        '203 Sent (M)',
+        '238 Revision needed (M)',
+      ],
+      // Обязательное условие: транзакция должна быть отклонена. Один External
+      // Status этого не гарантирует — например «203 Sent (M)» стоит и у
+      // нормальных отправок, где закрывать тикет ответом пользователю нельзя.
+      // Если колонки Transaction Status на экране нет, прогон не начнётся:
+      // проверить условие нечем, а обрабатывать «на авось» тут слишком дорого.
+      requiredTransactionStatus: 'rejected',
       searchTerm: '239',
       statusMatch: (text) => {
         const t = text.trim().toLowerCase();
@@ -105,6 +125,9 @@
     'modal-not-shown': 'окно Edit не открылось',
     'modal-title-unreadable': 'не удалось прочитать номер тикета в заголовке окна — ничего не меняли',
     'modal-ticket-mismatch': 'открылся ДРУГОЙ тикет — ничего не меняли',
+    'transaction-not-rejected': 'транзакция не в статусе rejected — тикет не открывали',
+    'no-transaction-status-column':
+      'не удалось прочитать колонку Transaction Status — не с чем сверять, тикет не открывали',
     'no-amount-receipt-field': 'в окне нет поля Amount by receipt — сумму вписать некуда',
     'amount-format-unclear': 'не понял формат суммы в Transaction Amount — не стал рисковать и вписывать',
     'amount-not-accepted': 'сайт не принял вписанную сумму (поле сбросилось) — ничего не меняли, проверь вручную',
@@ -398,6 +421,66 @@
     const idx = getColumnIndex('external status', 8);
     const cell = row.querySelector(`td:nth-child(${idx})`);
     return cell ? cell.textContent.trim() : '';
+  }
+
+  // Приводит External Status к сравнимому виду: нижний регистр, схлопнутые
+  // пробелы (включая неразрывные) и БЕЗ числового кода в начале. Код
+  // отбрасывается намеренно: в фильтре статусы подписаны с номером
+  // («203 Sent (M)»), а в колонке таблицы тот же статус может выводиться и
+  // без него — сравнение «как есть» тогда молча не находило бы ни одного
+  // тикета. Потери точности тут нет: два статуса с одинаковым текстом и
+  // разными кодами по этой колонке всё равно не различить.
+  function normalizeExternalStatus(value) {
+    return String(value == null ? '' : value)
+      .toLowerCase()
+      .replace(/\s+/g, ' ')
+      .trim()
+      .replace(/^\d+\s+/, '');
+  }
+
+  function matchesRequiredExternalStatus(workflow, externalStatus) {
+    const actual = normalizeExternalStatus(externalStatus);
+    if (actual === '') return false;
+    return workflow.requiredExternalStatuses.some(
+      (required) => normalizeExternalStatus(required) === actual
+    );
+  }
+
+  // Номер колонки Transaction Status: точное название, затем поиск по
+  // подстроке (на случай «Transaction status (payout)» и подобного) —
+  // требуются ОБА слова, чтобы не подхватить External Status. Резервного
+  // номера нет намеренно: не прочитать статус безопаснее, чем прочитать не ту
+  // ячейку и решить, что транзакция отклонена.
+  function getTransactionStatusColumnIndex() {
+    const exact = getColumnIndex('transaction status');
+    if (exact) return exact;
+    if (!columnIndexMap) return null;
+    const key = Object.keys(columnIndexMap).find(
+      (name) => name.includes('transaction') && name.includes('status')
+    );
+    return key ? columnIndexMap[key] : null;
+  }
+
+  // Текст колонки Transaction Status, либо null, если колонки нет. null и
+  // пустая строка — разные вещи: первое значит «сверять не с чем», второе —
+  // «в ячейке ничего не написано»; и то и другое не даёт права обрабатывать
+  // тикет, но в отчёте это разные строки.
+  function getTransactionStatusFromRow(row) {
+    const idx = getTransactionStatusColumnIndex();
+    if (!idx) return null;
+    const cell = row.querySelector(`td:nth-child(${idx})`);
+    if (!cell) return null;
+    return cell.textContent.trim();
+  }
+
+  // Совпадает ли статус транзакции с требуемым. Сверяем по словам, а не
+  // строкой целиком: в колонке попадаются варианты с кодом и пометкой
+  // («Rejected», «3 Rejected», «Rejected (M)»).
+  function matchesTransactionStatus(actual, required) {
+    if (actual == null) return false;
+    const words = (v) => ` ${String(v).toLowerCase().replace(/[^a-z]+/g, ' ').trim()} `;
+    const want = words(required);
+    return want !== '  ' && words(actual).includes(want);
   }
 
   function getTransactionIdFromRow(row) {
@@ -712,15 +795,48 @@
   async function processTicketInner(row, ticketId, index, total, workflow) {
     const externalStatus = getExternalStatusFromRow(row);
 
-    const normalizedRequired = workflow.requiredExternalStatus.trim().toLowerCase();
-    const normalizedActual = externalStatus.trim().toLowerCase();
-
-    if (normalizedActual !== normalizedRequired) {
+    if (!matchesRequiredExternalStatus(workflow, externalStatus)) {
       console.log(
         `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: External Status = "${externalStatus}" ` +
-        `(нужно "${workflow.requiredExternalStatus}") — пропускаю.`
+        `(нужен один из: ${workflow.requiredExternalStatuses.join(' / ')}) — пропускаю.`
       );
       return { ticketId, status: 'skipped', reason: 'wrong-external-status', externalStatus };
+    }
+
+    // Статус транзакции — второе обязательное условие, и проверяется оно до
+    // открытия Edit: тикет с подходящим External Status, но не отклонённой
+    // транзакцией закрывать ответом пользователю нельзя, и трогать его вообще
+    // не надо. Не смогли прочитать — тоже не трогаем: «не знаю» здесь должно
+    // работать как «нет», иначе широкий пул статусов становится опасным.
+    if (workflow.requiredTransactionStatus) {
+      const txStatus = getTransactionStatusFromRow(row);
+
+      if (txStatus === null) {
+        console.warn(
+          `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: не нашёл колонку ` +
+          `Transaction Status — сверить статус транзакции нечем, пропускаю.`
+        );
+        return {
+          ticketId,
+          status: 'skipped',
+          reason: 'no-transaction-status-column',
+          externalStatus,
+        };
+      }
+
+      if (!matchesTransactionStatus(txStatus, workflow.requiredTransactionStatus)) {
+        console.log(
+          `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: Transaction Status = ` +
+          `"${txStatus}" (нужен "${workflow.requiredTransactionStatus}") — пропускаю.`
+        );
+        return {
+          ticketId,
+          status: 'skipped',
+          reason: 'transaction-not-rejected',
+          externalStatus,
+          transactionStatus: txStatus,
+        };
+      }
     }
 
     // Тикеты с Amount = 0 раньше просто пропускались. Теперь решаем здесь,
@@ -1138,6 +1254,19 @@
       }
     }
 
+    // Колонка Transaction Status для такого режима обязательна: без неё
+    // каждый тикет всё равно будет пропущен, так что честнее не начинать
+    // прогон, а сказать, чего не хватает.
+    if (workflow.requiredTransactionStatus && !getTransactionStatusColumnIndex()) {
+      alert(
+        'Не найдена колонка Transaction Status — прогон не начат.\n\n' +
+        `Режим «${workflow.buttonLabel}» берёт только тикеты, у которых транзакция в статусе ` +
+        `"${workflow.requiredTransactionStatus}", а сверить это без колонки нечем.\n\n` +
+        'Включи колонку Transaction Status в настройках таблицы и запусти снова.'
+      );
+      return;
+    }
+
     const rows = getTicketRows();
     if (rows.length === 0) {
       alert('Не найдено ни одного тикета на странице.');
@@ -1146,8 +1275,12 @@
 
     const confirmed = confirm(
       `Найдено тикетов на экране: ${rows.length}.\n` +
-      `Будут обработаны только те, у кого External Status = "${workflow.requiredExternalStatus}"\n` +
-      `(остальные — пропущены).\n` +
+      `Будут обработаны только те, у кого External Status — один из:\n` +
+      workflow.requiredExternalStatuses.map((name) => `  • ${name}`).join('\n') + `\n` +
+      (workflow.requiredTransactionStatus
+        ? `и при этом Transaction Status = "${workflow.requiredTransactionStatus}".\n`
+        : '') +
+      `Остальные — пропущены.\n` +
       `У подходящих будет выставлен статус "${workflow.targetStatusLabel}" и нажат Apply.` +
       (workflow.fillAmountFromTransaction
         ? `\n\nВ тикетах с Amount = 0 сумма будет подставлена из колонки Transaction Amount\n` +
@@ -1338,6 +1471,17 @@
 
     const successCount = results.filter((r) => r.status === 'success').length;
     const wrongStatusSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'wrong-external-status');
+    // Транзакция не отклонена — законная и самая частая причина пропуска в
+    // широком пуле статусов. Показываем не список тикетов (он был бы во всю
+    // страницу), а сводку по значениям колонки: по ней сразу видно, читается
+    // ли Transaction Status вообще, или скрипт просто не нашёл ни одного
+    // «rejected» и молча ничего не сделал.
+    const notRejectedSkips = results.filter(
+      (r) => r.status === 'skipped' && r.reason === 'transaction-not-rejected'
+    );
+    const noTxStatusSkips = results.filter(
+      (r) => r.status === 'skipped' && r.reason === 'no-transaction-status-column'
+    );
     const zeroAmountSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'zero-amount');
     const alreadyFilledSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'amount-already-filled');
     // Тикеты, где скрипт ИЗМЕНИЛ денежное поле. Такое обязано быть в отчёте
@@ -1389,6 +1533,27 @@
       popupCount > 0
         ? `\n\nТребуют ручной проверки на дубликаты (${popupCount}):\n` +
           capturedPopups.map((p) => `${p.ticketId} - ${p.transactionId}`).join('\n')
+        : '';
+
+    const notRejectedText =
+      notRejectedSkips.length > 0
+        ? `\n\nПропущены: транзакция не в статусе rejected (${notRejectedSkips.length}) — что стояло в колонке:\n` +
+          [
+            ...notRejectedSkips.reduce((acc, r) => {
+              const key = r.transactionStatus === '' ? '(пусто)' : r.transactionStatus;
+              return acc.set(key, (acc.get(key) || 0) + 1);
+            }, new Map()),
+          ]
+            .sort((a, b) => b[1] - a[1])
+            .map(([name, count]) => `  • ${name}: ${count}`)
+            .join('\n')
+        : '';
+
+    const noTxStatusText =
+      noTxStatusSkips.length > 0
+        ? `\n\n⚠ У ${noTxStatusSkips.length} тикетов не удалось прочитать колонку Transaction Status — ` +
+          `они пропущены. Похоже, набор колонок в таблице менялся во время прогона: ` +
+          `перезагрузи страницу и запусти заново.`
         : '';
 
     const zeroAmountListText =
@@ -1474,6 +1639,12 @@
       summaryLines.push(`  • сумма вписана, но не проверена: ${amountUnverified.length}`);
     }
     summaryLines.push(`Пропущено (не тот External Status): ${wrongStatusSkips.length}`);
+    if (notRejectedSkips.length > 0) {
+      summaryLines.push(`Пропущено (транзакция не rejected): ${notRejectedSkips.length}`);
+    }
+    if (noTxStatusSkips.length > 0) {
+      summaryLines.push(`Пропущено (не прочитал Transaction Status): ${noTxStatusSkips.length}`);
+    }
     if (zeroAmountSkips.length > 0) {
       summaryLines.push(`Пропущено (Amount = 0, подставить нечего): ${zeroAmountSkips.length}`);
     }
@@ -1540,6 +1711,8 @@
       amountNotSavedText +
       amountFilledListText +
       amountUnverifiedText +
+      noTxStatusText +
+      notRejectedText +
       zeroAmountListText +
       alreadyFilledListText +
       formatUnclearText +
