@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      2.9
-// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. Есть кнопка СТОП.
+// @version      2.10
+// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -36,6 +36,9 @@
     // (см. verifyAmountSaved). Выключать стоит только для отладки: без этого
     // тикет может закрыться со статусом, но без суммы, и никто не заметит.
     verifyAmountSaved: true,
+    // С какого возраста тикет считается зависшим (часы). Возраст берётся из
+    // колонки Processing Date и считается на момент обработки тикета.
+    staleAfterHours: 24,
   };
 
   // ------------------------------------------------------------------
@@ -483,6 +486,71 @@
     return want !== '  ' && words(actual).includes(want);
   }
 
+  // Номер колонки Processing Date: точное название, затем поиск по подстроке
+  // («Processing date (UTC)» и подобное). Резервного номера нет: это
+  // статистика, и лучше честно её не показать, чем посчитать по чужой
+  // колонке.
+  function getProcessingDateColumnIndex() {
+    const exact = getColumnIndex('processing date');
+    if (exact) return exact;
+    if (!columnIndexMap) return null;
+    const key = Object.keys(columnIndexMap).find(
+      (name) => name.includes('processing') && name.includes('date')
+    );
+    return key ? columnIndexMap[key] : null;
+  }
+
+  // Разбирает содержимое ячейки Processing Date в Date, либо возвращает null.
+  //
+  // Дата и время в ячейке стоят на разных строках, и в textContent между ними
+  // может не оказаться вообще ничего («2026-09-2214:45:59»), поэтому ищем
+  // регуляркой по цифрам, а не режем по пробелу. Время необязательно: если в
+  // ячейке только дата, считаем её началом суток.
+  //
+  // ВАЖНО: время считается по часам браузера. Если сайт однажды начнёт
+  // показывать эту колонку в другом часовом поясе, граница «24 часа» уедет
+  // на величину смещения — статистика останется осмысленной, но у тикетов
+  // возле самой границы отнесение может измениться.
+  function parseProcessingDate(raw) {
+    const m = String(raw == null ? '' : raw).match(
+      /(\d{4})-(\d{1,2})-(\d{1,2})(?:\D*(\d{1,2}):(\d{2})(?::(\d{2}))?)?/
+    );
+    if (!m) return null;
+
+    const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+    const [hours, minutes, seconds] = [Number(m[4] || 0), Number(m[5] || 0), Number(m[6] || 0)];
+
+    const date = new Date(year, month - 1, day, hours, minutes, seconds);
+    // Отсекаем несуществующие даты (13-й месяц, 31 февраля): конструктор Date
+    // молча их переносит, и «31.02» превратилось бы в 3 марта.
+    if (
+      date.getFullYear() !== year ||
+      date.getMonth() !== month - 1 ||
+      date.getDate() !== day ||
+      date.getHours() !== hours
+    ) {
+      return null;
+    }
+
+    return date;
+  }
+
+  // Возраст тикета в часах на момент вызова, либо null, если колонки нет или
+  // дату не удалось разобрать. Возвращает и сырой текст — он попадает в
+  // результат прогона, чтобы в консоли было видно, из чего считали.
+  function getProcessingAgeFromRow(row) {
+    const idx = getProcessingDateColumnIndex();
+    if (!idx) return null;
+    const cell = row.querySelector(`td:nth-child(${idx})`);
+    if (!cell) return null;
+
+    const raw = cell.textContent.trim();
+    const date = parseProcessingDate(raw);
+    if (!date) return { raw, ageHours: null };
+
+    return { raw, ageHours: (Date.now() - date.getTime()) / 3600000 };
+  }
+
   function getTransactionIdFromRow(row) {
     const idx = getColumnIndex('transaction id', 11);
     const cell = row.querySelector(`td:nth-child(${idx})`);
@@ -780,11 +848,18 @@
     currentTicketId = ticketId; // чтобы пойманные попапы привязывались к этому тикету
     currentTransactionId = transactionId;
     try {
-      // Transaction ID навешиваем здесь, в одной точке, а не в каждом из
-      // полутора десятков return'ов внутри processTicketInner. Он нужен для
-      // окна «скопировать в таблицу» в конце прогона.
+      // Transaction ID и возраст тикета навешиваем здесь, в одной точке, а не
+      // в каждом из полутора десятков return'ов внутри processTicketInner.
+      // Первый нужен для окна «скопировать в таблицу», второй — для сводки
+      // «свежих / зависших» в конце прогона. Возраст берём до обработки: это
+      // сколько тикет реально прождал, а не сколько прошло к концу прогона.
+      const processing = getProcessingAgeFromRow(row);
       const result = await processTicketInner(row, ticketId, index, total, workflow);
       if (result && !result.transactionId) result.transactionId = transactionId;
+      if (result && processing) {
+        result.processingDate = processing.raw;
+        result.ageHours = processing.ageHours;
+      }
       return result;
     } finally {
       currentTicketId = null;
@@ -1469,7 +1544,18 @@
     state.stopRequested = false;
     updateButtonsUI();
 
-    const successCount = results.filter((r) => r.status === 'success').length;
+    const successResults = results.filter((r) => r.status === 'success');
+    const successCount = successResults.length;
+    // Сколько из обработанных тикетов пролежали больше суток. Считаем по
+    // успешным: «обработано» — это то, что прогон реально закрыл. Возраст у
+    // каждого тикета зафиксирован в момент его обработки (см. processTicket).
+    const hasProcessingDateColumn = !!getProcessingDateColumnIndex();
+    const agedResults = successResults.filter((r) => typeof r.ageHours === 'number');
+    const staleResults = agedResults.filter((r) => r.ageHours >= CONFIG.staleAfterHours);
+    const freshCount = agedResults.length - staleResults.length;
+    // Дата в ячейке есть, но прочитать её не вышло — таких видно отдельно,
+    // иначе смена формата колонки тихо испортила бы статистику.
+    const noAgeCount = successResults.length - agedResults.length;
     const wrongStatusSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'wrong-external-status');
     // Транзакция не отклонена — законная и самая частая причина пропуска в
     // широком пуле статусов. Показываем не список тикетов (он был бы во всю
@@ -1638,6 +1724,21 @@
     if (amountUnverified.length > 0) {
       summaryLines.push(`  • сумма вписана, но не проверена: ${amountUnverified.length}`);
     }
+    if (!hasProcessingDateColumn) {
+      if (successCount > 0) {
+        summaryLines.push(`  • возраст не считали: на экране нет колонки Processing Date`);
+      }
+    } else {
+      if (agedResults.length > 0) {
+        summaryLines.push(`  • из них свежих (меньше ${CONFIG.staleAfterHours} ч): ${freshCount}`);
+        summaryLines.push(
+          `  • из них зависших (${CONFIG.staleAfterHours} ч и больше): ${staleResults.length}`
+        );
+      }
+      if (noAgeCount > 0) {
+        summaryLines.push(`  • из них с нечитаемой Processing Date: ${noAgeCount}`);
+      }
+    }
     summaryLines.push(`Пропущено (не тот External Status): ${wrongStatusSkips.length}`);
     if (notRejectedSkips.length > 0) {
       summaryLines.push(`Пропущено (транзакция не rejected): ${notRejectedSkips.length}`);
@@ -1730,6 +1831,9 @@
       amount: r.amountFilled,
     }));
 
+    // Разбор «кто именно завис» — из консоли:
+    // window.__bulkApproveStaleTickets.map(r => [r.ticketId, r.processingDate])
+    window.__bulkApproveStaleTickets = staleResults;
     window.__bulkApproveCopyRows = copyRows;
 
     showReportWindow(reportText, copyRows);
