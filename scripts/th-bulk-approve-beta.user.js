@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.4
+// @version      0.5
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -242,6 +242,8 @@
     'transaction-duplicate':
       'сайт сказал, что эта транзакция уже занята другим обращением — статус НЕ меняли, ' +
       'Apply НЕ нажимали, тикет нужно разобрать руками',
+    'unknown-popup':
+      'сайт показал незнакомое окно — статус НЕ меняли, Apply НЕ нажимали, прогон остановлен',
     'transaction-id-not-accepted':
       'сайт не принял вписанный Transaction ID (поле сбросилось) — статус не меняли',
     'transaction-load-not-started':
@@ -449,6 +451,27 @@
       /^ok$/i.test(confirmText);
 
     return { icon, title, content, confirmBtn, cancelBtn, hasCancel, isKnownSuccessDismiss };
+  }
+
+  // Известное окно сайта: «Обращение с этим номером транзакции уже создано: N».
+  // Иконка question, кнопка подтверждения подписана Copy (копирует номер в
+  // буфер обмена), рядом Cancel. Нажимать Copy нельзя: буфер нужен человеку
+  // для вставки списков, и затирать его посреди прогона мы не вправе.
+  // Безопасное закрытие здесь — именно Cancel, он просто закрывает окно.
+  const DUPLICATE_POPUP_PATTERNS = [
+    /номером\s+транзакции\s+уже\s+создано/i,
+    /транзакци[яю]\s+уже\s+использует/i,
+  ];
+
+  function isDuplicateTransactionPopup(info) {
+    const text = `${info.title} ${info.content}`;
+    return DUPLICATE_POPUP_PATTERNS.some((re) => re.test(text));
+  }
+
+  // Номер обращения, которое уже держит эту транзакцию
+  function extractOwnerTicketId(info) {
+    const match = `${info.title} ${info.content}`.match(/(\d{5,})/);
+    return match ? match[1] : null;
   }
 
   const swalObserver = new MutationObserver(() => {
@@ -1878,18 +1901,59 @@
         // напрямую и подложку обходит. Именно так на боевом прогоне тикет
         // закрылся с чужой транзакцией, пока вопрос сайта висел без ответа.
         //
-        // Окно НЕ трогаем: у него бывает кнопка отмены, и что именно делает
-        // каждая из кнопок, мы не знаем. Гадать там, где на другом конце
-        // деньги, нельзя — оставляем решение человеку и останавливаем прогон.
+        // Известное окно о дубле закрываем кнопкой Cancel и едем дальше:
+        // тикет пропускается, разбирать его будет человек. Любое ДРУГОЕ окно
+        // по-прежнему останавливает прогон — что делают его кнопки, мы не
+        // знаем, а гадать там, где на другом конце чей-то вывод, нельзя.
         const blocking = getOpenSwalPopup();
         if (blocking) {
           const info = classifySwalPopup(blocking);
           const popupText = info.title || info.content || info.icon;
+          const known = isDuplicateTransactionPopup(info);
+
+          if (known) {
+            const owner = extractOwnerTicketId(info);
+            console.warn(
+              `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: сайт говорит, что транзакция ` +
+              `"${transactionIdToFill}" уже занята` + (owner ? ` обращением ${owner}` : '') +
+              `. Статус НЕ меняю, Apply НЕ жму, окно закрываю кнопкой Cancel.`
+            );
+            if (info.cancelBtn) fireClick(info.cancelBtn);
+            try {
+              await waitForGone(() => getOpenSwalPopup(), CONFIG.blockingPopupTimeout);
+            } catch (e) {
+              if (e instanceof StopSignal) throw e;
+              // Закрыть не вышло — работать сквозь окно нельзя, встаём
+              runAbortReason =
+                `Тикет ${ticketId}: окно «${popupText}» не закрылось по Cancel. Прогон остановлен — ` +
+                `закрой его вручную и запусти заново.`;
+              console.error(`[BulkApproveBETA/${workflow.id}] ${runAbortReason}`);
+              const stuck = await failTicket(ticketId, workflow, {
+                ticketId,
+                status: 'skipped',
+                reason: 'transaction-duplicate',
+                attemptedTransactionId: transactionIdToFill,
+                popupText,
+                ownerTicketId: owner,
+              });
+              state.stopRequested = true;
+              return stuck;
+            }
+
+            return failTicket(ticketId, workflow, {
+              ticketId,
+              status: 'skipped',
+              reason: 'transaction-duplicate',
+              attemptedTransactionId: transactionIdToFill,
+              popupText,
+              ownerTicketId: owner,
+            });
+          }
+
           runAbortReason =
-            `Тикет ${ticketId}: после ввода Transaction ID "${transactionIdToFill}" сайт показал окно ` +
-            `«${popupText}». Статус НЕ менялся, Apply НЕ нажимался — тикет остался нетронутым. ` +
-            `Прогон остановлен: прочитай окно, реши по этому тикету вручную и запусти заново. ` +
-            `Тикет останется в списке необработанным.`;
+            `Тикет ${ticketId}: после ввода Transaction ID "${transactionIdToFill}" сайт показал ` +
+            `незнакомое окно «${popupText}». Статус НЕ менялся, Apply НЕ нажимался — тикет остался ` +
+            `нетронутым. Прогон остановлен: прочитай окно, реши по этому тикету вручную и запусти заново.`;
           console.error(`[BulkApproveBETA/${workflow.id}] ${runAbortReason}`);
           // Сначала закрываем окно Edit, и только потом просим остановку:
           // waitForGone внутри failTicket бросает StopSignal, если флаг уже
@@ -1897,7 +1961,7 @@
           const result = await failTicket(ticketId, workflow, {
             ticketId,
             status: 'skipped',
-            reason: 'transaction-duplicate',
+            reason: 'unknown-popup',
             attemptedTransactionId: transactionIdToFill,
             popupText,
           });
@@ -2830,7 +2894,10 @@
           `статус НЕ меняли, Apply НЕ нажимали, разберись вручную:\n` +
           duplicateSkips
             .slice(0, MAX_LISTED)
-            .map((r) => `${r.ticketId} — вписывали "${r.attemptedTransactionId}", сайт сказал: «${r.popupText}»`)
+            .map((r) =>
+              `${r.ticketId} — вписывали "${r.attemptedTransactionId}"` +
+              (r.ownerTicketId ? `, транзакция уже у обращения ${r.ownerTicketId}` : '') +
+              `. Сайт: «${r.popupText}»`)
             .join('\n')
         : '';
 
@@ -2971,6 +3038,12 @@
         `Пропущено (транзакция занята другим обращением): ${duplicateSkips.length}`
       );
     }
+    const unknownPopupSkips = results.filter(
+      (r) => r.status === 'skipped' && r.reason === 'unknown-popup'
+    );
+    if (unknownPopupSkips.length > 0) {
+      summaryLines.push(`Пропущено (незнакомое окно сайта): ${unknownPopupSkips.length}`);
+    }
     if (zeroAmountSkips.length > 0) {
       summaryLines.push(`Пропущено (Amount = 0, подставить нечего): ${zeroAmountSkips.length}`);
     }
@@ -3007,7 +3080,7 @@
     // чего-то не сделал.
     const namedSkipReasons = new Set([
       'wrong-external-status', 'transaction-not-rejected', 'no-transaction-status-column',
-      'not-in-list', 'transaction-id-mismatch', 'transaction-duplicate',
+      'not-in-list', 'transaction-id-mismatch', 'transaction-duplicate', 'unknown-popup',
       'zero-amount', 'amount-already-filled', 'amount-format-unclear',
     ]);
     const otherSkips = results.filter(
