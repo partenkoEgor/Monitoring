@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.2
-// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
+// @version      0.3
+// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -134,6 +134,11 @@
       // (без учёта регистра, лишних пробелов и числового кода в начале —
       // см. normalizeExternalStatus). Остальные тикеты пропускаются.
       requiredExternalStatuses: ['Approved (M)'],
+      // Перед прогоном спрашиваем список Ticket ID. Он НЕ обязателен: в
+      // окне есть «Запустить по экрану» — прежнее поведение этой кнопки.
+      // Со списком включается автопилот, и скрипт сам набирает тикеты в
+      // фильтр страницы пачками, как в режиме «по списку (225)».
+      allowTicketIdList: true,
       // Текст, который печатается в поле поиска статуса (как это делает человек)
       searchTerm: '225',
       // Текст, который должен встречаться в опции статуса (нечувствительно к регистру)
@@ -1513,15 +1518,34 @@
       }
     }
 
-    // Режим «по списку»: номер транзакции приходит не со страницы, а из
-    // списка, поданного оператором. Решаем здесь, что впишем, но саму запись
-    // делаем позже — внутри окна и только после проверки личности тикета.
+    // Отбор по списку. Он работает в обоих режимах со списком — и там, где
+    // в списке пары «тикет → транзакция», и там, где одни номера тикетов.
+    // Проверка стоит отдельно от подстановки номера специально: список сам
+    // по себе решает, БРАТЬ ли тикет, а что в него вписать — вопрос второй.
+    //
+    // С автопилотом на экране и так только тикеты из пачки, но список — это
+    // ещё и защита: если фильтр однажды вернёт не то, тикет не будет тронут
+    // даже при подходящем статусе.
+    if (currentListPairs && !currentListPairs.has(ticketId)) {
+      console.log(
+        `[BulkApproveBETA/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: в списке его нет — пропускаю.`
+      );
+      return { ticketId, status: 'skipped', reason: 'not-in-list', externalStatus };
+    }
+
+    // Номер транзакции приходит не со страницы, а из списка. Решаем здесь,
+    // что впишем, но саму запись делаем позже — внутри окна и только после
+    // проверки личности тикета.
     let transactionIdToFill = null;
     if (workflow.fillTransactionIdFromList) {
       const wanted = currentListPairs ? currentListPairs.get(ticketId) : null;
       if (!wanted) {
-        console.log(
-          `[BulkApproveBETA/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: в списке его нет — пропускаю.`
+        // Сюда можно попасть только если список есть, тикет в нём есть, а
+        // номера у него нет — для этого режима список разбирается парами,
+        // так что это означало бы сломанный разбор, а не обычный пропуск.
+        console.warn(
+          `[BulkApproveBETA/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: ` +
+          `в списке нет номера транзакции — пропускаю.`
         );
         return { ticketId, status: 'skipped', reason: 'not-in-list', externalStatus };
       }
@@ -2075,13 +2099,17 @@
   async function runBulkApprove(workflow) {
     refreshColumnIndexMap();
 
-    // Режим «по списку» начинается с вопроса: без списка делать нечего.
+    // Режимы со списком начинаются с вопроса. Для «по списку (225)» список
+    // обязателен — без номеров транзакций делать нечего. Для обычного 225 он
+    // необязателен: в окне есть «Запустить по экрану».
     currentListPairs = null;
     currentListState = null;
     let autopilot = false;
-    if (workflow.fillTransactionIdFromList) {
+    let askedInWindow = false;
+    if (workflow.fillTransactionIdFromList || workflow.allowTicketIdList) {
       const entered = await showTicketListWindow(workflow);
       if (!entered) return; // отмена — молча выходим, ничего не трогая
+      askedInWindow = true;
       currentListPairs = entered.pairs;
       currentListState = entered.state;
       autopilot = entered.autopilot;
@@ -2157,37 +2185,28 @@
       ? chunks.reduce((sum, c) => sum + c.length, 0)
       : getTicketRows().length;
 
-    const confirmed = confirm(
-      (autopilot
-        ? `АВТОПИЛОТ. Скрипт сам будет подставлять тикеты в фильтр страницы\n` +
-          `пачками по ${CONFIG.autopilotChunkSize} и нажимать Apply.\n` +
-          `Осталось из списка: ${queuedTotal}, это ${chunks.length} ` +
-          `${chunks.length === 1 ? 'пачка' : 'пачек'}.\n` +
-          `Текущая выдача на экране будет заменена — если там есть что-то\n` +
-          `нужное, сохрани это сейчас.\n\n`
-        : `Найдено тикетов на экране: ${queuedTotal}.\n`) +
-      `Будут обработаны только те, у кого External Status — один из:\n` +
-      workflow.requiredExternalStatuses.map((name) => `  • ${name}`).join('\n') + `\n` +
-      (workflow.requiredTransactionStatus
-        ? `и при этом Transaction Status = "${workflow.requiredTransactionStatus}".\n`
-        : '') +
-      `Остальные — пропущены.\n` +
-      `У подходящих будет выставлен статус "${workflow.targetStatusLabel}" и нажат Apply.` +
-      (workflow.fillTransactionIdFromList
-        ? `\n\nИз списка (${currentListPairs.size} пар) будут взяты только те тикеты,\n` +
-          (autopilot
-            ? `которые сайт покажет по фильтру. Тикет с УЖЕ заполненным и другим\n`
-            : `которые есть на этой странице. Тикет с УЖЕ заполненным и другим\n`) +
-          `Transaction ID пропускается — статус у него не меняется.`
-        : '') +
-      (workflow.fillAmountFromTransaction
-        ? `\n\nВ тикетах с Amount = 0 сумма будет подставлена из колонки Transaction Amount\n` +
-          `в поле "Amount by receipt". Если брать нечего или поле уже заполнено —\n` +
-          `тикет пропускается и попадает в список для ручной проверки.`
-        : '') +
-      `\n\nПродолжить?`
-    );
-    if (!confirmed) return;
+    // Окно ввода списка уже показало всё то же самое и имеет свои кнопки
+    // запуска — второй диалог подряд был бы лишним кликом на каждом прогоне.
+    // У режимов без окна (239) confirm остаётся единственной проверкой.
+    if (!askedInWindow) {
+      const confirmed = confirm(
+        `Найдено тикетов на экране: ${queuedTotal}.\n` +
+        `Будут обработаны только те, у кого External Status — один из:\n` +
+        workflow.requiredExternalStatuses.map((name) => `  • ${name}`).join('\n') + `\n` +
+        (workflow.requiredTransactionStatus
+          ? `и при этом Transaction Status = "${workflow.requiredTransactionStatus}".\n`
+          : '') +
+        `Остальные — пропущены.\n` +
+        `У подходящих будет выставлен статус "${workflow.targetStatusLabel}" и нажат Apply.` +
+        (workflow.fillAmountFromTransaction
+          ? `\n\nВ тикетах с Amount = 0 сумма будет подставлена из колонки Transaction Amount\n` +
+            `в поле "Amount by receipt". Если брать нечего или поле уже заполнено —\n` +
+            `тикет пропускается и попадает в список для ручной проверки.`
+          : '') +
+        `\n\nПродолжить?`
+      );
+      if (!confirmed) return;
+    }
 
     capturedPopups.length = 0; // отчёт по попапам — только за этот прогон
     runAbortReason = null;
@@ -2643,7 +2662,7 @@
       const seen = new Set(results.map((r) => r.ticketId));
       listNotOnPage = [...currentListPairs.keys()].filter((id) => !seen.has(id)).length;
 
-      writeListStorage({
+      writeListStorage(listStorageKey(workflow), {
         savedAt: Date.now(),
         text: currentListState.text,
         done: [...done],
@@ -3047,9 +3066,22 @@
   // Оператор приносит его из своей таблицы двумя колонками. Для скрипта это
   // единственный источник номеров транзакций в режиме «по списку».
   // ------------------------------------------------------------------
-  const LIST_STORAGE_KEY = 'th-bulk-approve:tx-list:v1-beta';
+  // У каждого режима своя память: список пар для «по списку (225)» и список
+  // одних Ticket ID для обычного 225 — разные вещи, и путать их счётчики
+  // обработанного нельзя.
+  const LIST_STORAGE_KEYS = {
+    pairs: 'th-bulk-approve:tx-list:v1-beta',
+    ids: 'th-bulk-approve:ticket-list:v1-beta',
+  };
 
-  // Пары текущего прогона. Живёт только пока идёт прогон.
+  function listStorageKey(workflow) {
+    return workflow.fillTransactionIdFromList ? LIST_STORAGE_KEYS.pairs : LIST_STORAGE_KEYS.ids;
+  }
+
+  // Список текущего прогона: Map «Ticket ID → Transaction ID». В режиме, где
+  // номеров транзакций нет, значением стоит null — сам список при этом
+  // продолжает работать отбором, и вся остальная механика (память между
+  // прогонами, счётчики, остаток) не знает о разнице.
   let currentListPairs = null;
   let currentListState = null;
 
@@ -3126,6 +3158,55 @@
     return { pairs, badLines, duplicateTickets, duplicateTransactions };
   }
 
+  // Разбирает список ОДНИХ Ticket ID — по номеру в строке. Возвращает то же,
+  // что и разбор пар, чтобы окно ввода и прогон не различали эти два случая.
+  //
+  // Строго один столбец: так решено сознательно. Список сюда попадает из
+  // выгрузки, и лишняя колонка обычно значит, что скопировали не тот кусок
+  // таблицы, — молча взять из неё первое число было бы худшим из исходов.
+  function parseTicketIdList(text) {
+    const pairs = new Map();
+    const badLines = [];
+    let duplicates = 0;
+
+    String(text == null ? '' : text)
+      .split(/\r?\n/)
+      .forEach((raw, idx) => {
+        const lineNo = idx + 1;
+        const line = raw.trim();
+        if (line === '') return;
+
+        if (/[\t;,]/.test(line) || /\s/.test(line)) {
+          badLines.push({
+            line: lineNo,
+            text: line,
+            why: 'в строке больше одного значения — нужен только Ticket ID',
+          });
+          return;
+        }
+        if (!/^\d+$/.test(line)) {
+          badLines.push({ line: lineNo, text: line, why: 'не похоже на Ticket ID' });
+          return;
+        }
+
+        if (pairs.has(line)) {
+          duplicates++;
+          return;
+        }
+        // null вместо номера транзакции: в этом режиме его просто нет
+        pairs.set(line, null);
+      });
+
+    return { pairs, badLines, duplicateTickets: [], duplicateTransactions: [], duplicates };
+  }
+
+  // Разбор списка для конкретного режима — одна точка выбора на весь скрипт.
+  function parseListForWorkflow(workflow, text) {
+    return workflow.fillTransactionIdFromList
+      ? parseTicketTransactionList(text)
+      : parseTicketIdList(text);
+  }
+
   // Отпечаток набора пар: по нему понимаем, тот же это список или новый.
   function listFingerprint(pairs) {
     return [...pairs.entries()]
@@ -3137,9 +3218,9 @@
   // localStorage может быть недоступен (приватное окно, запрет на сайте) —
   // любое обращение оборачиваем, память между прогонами это удобство, а не
   // условие работы.
-  function readListStorage() {
+  function readListStorage(key) {
     try {
-      const raw = window.localStorage.getItem(LIST_STORAGE_KEY);
+      const raw = window.localStorage.getItem(key);
       if (!raw) return null;
       const data = JSON.parse(raw);
       if (!data || typeof data !== 'object') return null;
@@ -3154,9 +3235,9 @@
     }
   }
 
-  function writeListStorage(data) {
+  function writeListStorage(key, data) {
     try {
-      window.localStorage.setItem(LIST_STORAGE_KEY, JSON.stringify(data));
+      window.localStorage.setItem(key, JSON.stringify(data));
     } catch (e) {
       console.warn(
         '[BulkApproveBETA] Не удалось сохранить список — память между прогонами в этом браузере не работает.',
@@ -3165,15 +3246,29 @@
     }
   }
 
-  function clearListStorage() {
+  function clearListStorage(key) {
     try {
-      window.localStorage.removeItem(LIST_STORAGE_KEY);
+      window.localStorage.removeItem(key);
     } catch (e) {
       /* см. readListStorage */
     }
   }
 
   // Окно ввода списка. Возвращает { pairs, state } либо null (отмена).
+  // Окно ввода списка. Обслуживает два режима сразу:
+  //
+  //   • «по списку (225)» — список пар «Ticket ID → Transaction ID», без
+  //     него режим бессмысленен, поэтому запуск только по списку;
+  //   • обычный 225 — список одних Ticket ID, и он НЕ обязателен: рядом
+  //     стоит кнопка «Запустить по экрану», которая даёт прежнее поведение.
+  //
+  // Это же окно заменяет прежний confirm(): в нём и так написано, сколько
+  // тикетов на экране и что с ними будет. Два диалога подряд ради одного и
+  // того же вопроса — лишний клик на каждом ежедневном прогоне.
+  //
+  // Возвращает { pairs, state, autopilot } — запуск по списку,
+  //            { pairs: null, state: null, autopilot: false } — по экрану,
+  //            null — отмена.
   function showTicketListWindow(workflow) {
     return new Promise((resolve) => {
       let settled = false;
@@ -3189,7 +3284,11 @@
       };
 
       try {
-        const saved = readListStorage();
+        const needsPairs = !!workflow.fillTransactionIdFromList;
+        const canRunByScreen = !needsPairs;
+        const storageKey = listStorageKey(workflow);
+        const saved = readListStorage(storageKey);
+        const rowsOnScreen = getTicketRows().length;
 
         overlay = document.createElement('div');
         // Классы намеренно НЕ .modal_wrap и НЕ .swal2-popup: иначе скрипт
@@ -3218,18 +3317,35 @@
         title.style.cssText = 'font-weight:600;font-size:16px;margin-bottom:4px';
         body.appendChild(title);
 
+        // Что вообще произойдёт — раньше это был текст confirm()
+        const plan = document.createElement('div');
+        plan.style.cssText = 'color:#444;margin-bottom:12px;white-space:pre-wrap';
+        plan.textContent = [
+          `На экране сейчас тикетов: ${rowsOnScreen}.`,
+          'Будут обработаны только те, у кого External Status — один из:',
+          ...workflow.requiredExternalStatuses.map((name) => `  • ${name}`),
+          `Остальные пропускаются. У подходящих будет выставлен статус ` +
+            `"${workflow.targetStatusLabel}" и нажат Apply.`,
+        ].join('\n');
+        body.appendChild(plan);
+
         const hint = document.createElement('div');
-        hint.textContent =
-          'Вставь список: Ticket ID и Transaction ID через табуляцию, по паре в строке. ' +
-          'Можно вставить весь список целиком — скрипт возьмёт только те тикеты, ' +
-          'которые сейчас на странице.';
+        hint.textContent = needsPairs
+          ? 'Вставь список: Ticket ID и Transaction ID через табуляцию, по паре в строке. ' +
+            'Можно вставить весь список целиком — скрипт возьмёт только те тикеты, ' +
+            'которые сейчас на странице (или наберёт их сам, если включён автопилот).'
+          : 'Вставь список Ticket ID — по одному номеру в строке, без других колонок. ' +
+            'Скрипт обработает только эти тикеты. Если список не нужен, нажми ' +
+            '«Запустить по экрану» — тогда всё как раньше.';
         hint.style.cssText = 'color:#555;margin-bottom:12px';
         body.appendChild(hint);
 
         const area = document.createElement('textarea');
         area.value = saved ? saved.text : '';
         area.rows = 12;
-        area.placeholder = '22708318\t23658907281\n22707583\t23658797989';
+        area.placeholder = needsPairs
+          ? '22708318\t23658907281\n22707583\t23658797989'
+          : '22708318\n22707583';
         area.style.cssText = [
           'width:100%', 'box-sizing:border-box', 'font-family:Consolas,monospace',
           'font-size:13px', 'padding:8px', 'border:1px solid #ccc',
@@ -3276,7 +3392,7 @@
         const footer = document.createElement('div');
         footer.style.cssText =
           'padding:12px 20px;border-top:1px solid #eee;display:flex;gap:8px;' +
-          'justify-content:flex-end;flex-shrink:0';
+          'justify-content:flex-end;flex-shrink:0;flex-wrap:wrap';
 
         const resetBtn = document.createElement('button');
         resetBtn.textContent = 'Начать заново';
@@ -3293,8 +3409,19 @@
           'background:#f5f5f5', 'font-size:14px', 'cursor:pointer',
         ].join(';');
 
+        // Прежнее поведение обычного 225: взять то, что оператор уже вывел
+        // на экран сам. Отдельной кнопкой, а не пустым списком, — чтобы
+        // «запустить без списка» нельзя было сделать случайно.
+        const screenBtn = document.createElement('button');
+        screenBtn.className = 'bulk-approve-beta-run-screen';
+        screenBtn.textContent = `Запустить по экрану (${rowsOnScreen})`;
+        screenBtn.style.cssText = [
+          'padding:8px 20px', 'border:1px solid #2ABFCF', 'border-radius:4px',
+          'background:#fff', 'color:#1a8d99', 'font-size:14px', 'cursor:pointer',
+        ].join(';');
+
         const runBtn = document.createElement('button');
-        runBtn.textContent = 'Запустить';
+        runBtn.textContent = 'Запустить по списку';
         runBtn.style.cssText = [
           'padding:8px 20px', 'border:none', 'border-radius:4px',
           'background:#2ABFCF', 'color:#fff', 'font-size:14px', 'cursor:pointer',
@@ -3302,6 +3429,7 @@
 
         footer.appendChild(resetBtn);
         footer.appendChild(cancelBtn);
+        if (canRunByScreen) footer.appendChild(screenBtn);
         footer.appendChild(runBtn);
 
         let parsed = null;
@@ -3310,16 +3438,25 @@
         // смысл только для него, и от этого же зависит, сколько тикетов
         // реально осталось прогнать.
         const savedFingerprintOf = (p) =>
-          saved ? listFingerprint(parseTicketTransactionList(saved.text).pairs) === listFingerprint(p) : false;
+          saved
+            ? listFingerprint(parseListForWorkflow(workflow, saved.text).pairs) ===
+              listFingerprint(p)
+            : false;
 
         const refresh = () => {
-          parsed = parseTicketTransactionList(area.value);
+          parsed = parseListForWorkflow(workflow, area.value);
           const lines = [];
           const sameAsSaved = savedFingerprintOf(parsed.pairs);
           const doneIds = new Set(sameAsSaved ? saved.done : []);
           const remainingCount = [...parsed.pairs.keys()].filter((id) => !doneIds.has(id)).length;
 
-          lines.push(`Распознано пар: ${parsed.pairs.size}`);
+          lines.push(needsPairs
+            ? `Распознано пар: ${parsed.pairs.size}`
+            : `Распознано номеров: ${parsed.pairs.size}`);
+
+          if (parsed.duplicates > 0) {
+            lines.push(`Повторов в списке: ${parsed.duplicates} — схлопнул.`);
+          }
 
           if (saved && saved.done.length > 0) {
             if (sameAsSaved) {
@@ -3380,6 +3517,11 @@
           runBtn.disabled = blocked;
           runBtn.style.opacity = blocked ? '0.5' : '1';
           runBtn.style.cursor = blocked ? 'default' : 'pointer';
+
+          // По экрану запускать нечего, если экран пуст
+          screenBtn.disabled = rowsOnScreen === 0;
+          screenBtn.style.opacity = rowsOnScreen === 0 ? '0.5' : '1';
+          screenBtn.style.cursor = rowsOnScreen === 0 ? 'default' : 'pointer';
         };
 
         area.addEventListener('input', refresh);
@@ -3387,11 +3529,15 @@
         refresh();
 
         resetBtn.addEventListener('click', () => {
-          clearListStorage();
+          clearListStorage(storageKey);
           area.value = '';
           refresh();
         });
         cancelBtn.addEventListener('click', () => finish(null));
+        screenBtn.addEventListener('click', () => {
+          if (screenBtn.disabled) return;
+          finish({ pairs: null, state: null, autopilot: false });
+        });
         runBtn.addEventListener('click', () => {
           if (runBtn.disabled) return;
           const text = area.value;
@@ -3403,8 +3549,12 @@
             done: keep ? saved.done.slice() : [],
             needsAttention: keep ? saved.needsAttention.slice() : [],
           };
-          writeListStorage(state);
-          finish({ pairs: parsed.pairs, state, autopilot: autoBox.checked && !autoBox.disabled });
+          writeListStorage(storageKey, state);
+          finish({
+            pairs: parsed.pairs,
+            state,
+            autopilot: autoBox.checked && !autoBox.disabled,
+          });
         });
 
         onKey = (e) => {
