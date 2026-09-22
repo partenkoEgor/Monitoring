@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.3
+// @version      0.4
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -237,6 +237,11 @@
     'transaction-id-mismatch':
       'Transaction ID уже заполнен, и не тем номером, что в списке — ничего не меняли, нужна ручная проверка',
     'no-transaction-id-field': 'в окне нет поля Transaction ID — вписать некуда',
+    'popup-before-apply':
+      'перед Apply на экране висело окно сайта — Apply не нажимали, тикет не тронут',
+    'transaction-duplicate':
+      'сайт сказал, что эта транзакция уже занята другим обращением — статус НЕ меняли, ' +
+      'Apply НЕ нажимали, тикет нужно разобрать руками',
     'transaction-id-not-accepted':
       'сайт не принял вписанный Transaction ID (поле сбросилось) — статус не меняли',
     'transaction-load-not-started':
@@ -1863,6 +1868,42 @@
         console.log(
           `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: в Transaction ID вписано "${transactionIdToFill}".`
         );
+
+        // ПРОВЕРКА НА ДУБЛЬ ТРАНЗАКЦИИ.
+        //
+        // Первая волна запросов — это и есть проверка сайта «занята ли
+        // транзакция другим обращением». Если занята, сайт показывает окно,
+        // и дальше идти нельзя: у SweetAlert2 модальная подложка, живой
+        // человек сквозь неё не кликнул бы, а fireClick рассылает события
+        // напрямую и подложку обходит. Именно так на боевом прогоне тикет
+        // закрылся с чужой транзакцией, пока вопрос сайта висел без ответа.
+        //
+        // Окно НЕ трогаем: у него бывает кнопка отмены, и что именно делает
+        // каждая из кнопок, мы не знаем. Гадать там, где на другом конце
+        // деньги, нельзя — оставляем решение человеку и останавливаем прогон.
+        const blocking = getOpenSwalPopup();
+        if (blocking) {
+          const info = classifySwalPopup(blocking);
+          const popupText = info.title || info.content || info.icon;
+          runAbortReason =
+            `Тикет ${ticketId}: после ввода Transaction ID "${transactionIdToFill}" сайт показал окно ` +
+            `«${popupText}». Статус НЕ менялся, Apply НЕ нажимался — тикет остался нетронутым. ` +
+            `Прогон остановлен: прочитай окно, реши по этому тикету вручную и запусти заново. ` +
+            `Тикет останется в списке необработанным.`;
+          console.error(`[BulkApproveBETA/${workflow.id}] ${runAbortReason}`);
+          // Сначала закрываем окно Edit, и только потом просим остановку:
+          // waitForGone внутри failTicket бросает StopSignal, если флаг уже
+          // поднят, и результат этого тикета не дошёл бы до отчёта.
+          const result = await failTicket(ticketId, workflow, {
+            ticketId,
+            status: 'skipped',
+            reason: 'transaction-duplicate',
+            attemptedTransactionId: transactionIdToFill,
+            popupText,
+          });
+          state.stopRequested = true;
+          return result;
+        }
       }
 
       transactionIdFilled = transactionIdToFill;
@@ -2060,6 +2101,30 @@
     if (!applyBtn) {
       console.warn(`[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: не найдена кнопка Apply.`);
       return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'no-apply-button' });
+    }
+
+    // Последняя проверка перед необратимым действием: не висит ли на экране
+    // окно сайта. Подложка SweetAlert2 останавливает человека, но не
+    // fireClick, поэтому «нажать Apply сквозь вопрос сайта» технически
+    // возможно — и однажды уже случилось. Здесь это стоит одного запроса
+    // к DOM, а цена пропуска — закрытый тикет с чужой транзакцией.
+    const blockingBeforeApply = getOpenSwalPopup();
+    if (blockingBeforeApply) {
+      const info = classifySwalPopup(blockingBeforeApply);
+      const popupText = info.title || info.content || info.icon;
+      runAbortReason =
+        `Тикет ${ticketId}: перед нажатием Apply на экране висит окно сайта «${popupText}». ` +
+        `Apply НЕ нажимался. Прогон остановлен — разберись с этим тикетом вручную и запусти заново.`;
+      console.error(`[BulkApproveBETA/${workflow.id}] ${runAbortReason}`);
+      // Порядок важен — см. комментарий у проверки на дубль транзакции
+      const result = await failTicket(ticketId, workflow, {
+        ticketId,
+        status: 'skipped',
+        reason: 'popup-before-apply',
+        popupText,
+      });
+      state.stopRequested = true;
+      return result;
     }
 
     setProgress({ action: 'жму Apply' });
@@ -2591,6 +2656,11 @@
     );
     // Режим «по списку»
     const notInListSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'not-in-list');
+    // Сайт сказал, что транзакция уже занята. Самый дорогой исход прогона:
+    // именно здесь чужая транзакция однажды уехала не в тот тикет.
+    const duplicateSkips = results.filter(
+      (r) => r.status === 'skipped' && r.reason === 'transaction-duplicate'
+    );
     const txMismatchSkips = results.filter(
       (r) => r.status === 'skipped' && r.reason === 'transaction-id-mismatch'
     );
@@ -2754,6 +2824,16 @@
             .join('\n')
         : '';
 
+    const duplicateText =
+      duplicateSkips.length > 0
+        ? `\n\n⚠ ТРАНЗАКЦИЯ ЗАНЯТА ДРУГИМ ОБРАЩЕНИЕМ (${duplicateSkips.length}) — ` +
+          `статус НЕ меняли, Apply НЕ нажимали, разберись вручную:\n` +
+          duplicateSkips
+            .slice(0, MAX_LISTED)
+            .map((r) => `${r.ticketId} — вписывали "${r.attemptedTransactionId}", сайт сказал: «${r.popupText}»`)
+            .join('\n')
+        : '';
+
     const txMismatchText =
       txMismatchSkips.length > 0
         ? `\n\nПропущены: в тикете уже стоит ДРУГОЙ Transaction ID (${txMismatchSkips.length}) — статус НЕ меняли:\n` +
@@ -2886,6 +2966,11 @@
         `Пропущено (Transaction ID уже заполнен и отличается): ${txMismatchSkips.length}`
       );
     }
+    if (duplicateSkips.length > 0) {
+      summaryLines.push(
+        `Пропущено (транзакция занята другим обращением): ${duplicateSkips.length}`
+      );
+    }
     if (zeroAmountSkips.length > 0) {
       summaryLines.push(`Пропущено (Amount = 0, подставить нечего): ${zeroAmountSkips.length}`);
     }
@@ -2915,6 +3000,28 @@
         `Обработано из списка всего: ${listDoneTotal} из ${currentListPairs.size}, ` +
         `осталось ${listRemaining.length}`
       );
+    }
+    // Все причины пропуска, у которых есть своя строка выше. Новая причина,
+    // не попавшая сюда, раньше просто исчезала бы из сводки — теперь она
+    // выводится общей строкой ниже. Отчёт не должен молчать о том, что скрипт
+    // чего-то не сделал.
+    const namedSkipReasons = new Set([
+      'wrong-external-status', 'transaction-not-rejected', 'no-transaction-status-column',
+      'not-in-list', 'transaction-id-mismatch', 'transaction-duplicate',
+      'zero-amount', 'amount-already-filled', 'amount-format-unclear',
+    ]);
+    const otherSkips = results.filter(
+      (r) => r.status === 'skipped' && !namedSkipReasons.has(r.reason)
+    );
+    if (otherSkips.length > 0) {
+      const counts = new Map();
+      otherSkips.forEach((r) => counts.set(r.reason, (counts.get(r.reason) || 0) + 1));
+      summaryLines.push(`Пропущено по другим причинам: ${otherSkips.length}`);
+      [...counts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .forEach(([reason, count]) => {
+          summaryLines.push(`  • ${describeReason(reason)}: ${count}`);
+        });
     }
     summaryLines.push(`Ошибок: ${failed.length}`);
     failureBreakdown.forEach(([reason, count]) => {
@@ -2972,6 +3079,7 @@
       header +
       summaryLines.join('\n') +
       popupsListText +
+      duplicateText +
       txNotSavedText +
       txFilledListText +
       txUnverifiedText +
