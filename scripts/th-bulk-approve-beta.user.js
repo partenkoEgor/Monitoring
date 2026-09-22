@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.1
-// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Есть кнопка СТОП.
+// @version      0.2
+// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -88,6 +88,29 @@
     transactionLoadTimeout: 20000,
     // Как часто перепроверять журнал, пока ждём
     transactionLoadPollInterval: 150,
+
+    // ── Автопилот: скрипт сам набирает пачки тикетов в фильтр ─────────
+    // Ровно столько тикетов умещается на одну страницу выдачи. Больше —
+    // и сайт включает пагинацию, а ею пользоваться нельзя: страницы
+    // нестабильны, и прогон по ним молча терял бы тикеты.
+    autopilotChunkSize: 100,
+    // Сколько ждать, пока таблица перестроится после Apply
+    autopilotTableTimeout: 40000,
+    // Не раньше этого от нажатия Apply. Vue сносит старую таблицу не
+    // мгновенно, и без этой паузы мы приняли бы ещё не тронутую выдачу
+    // предыдущей пачки за новую.
+    autopilotTableSettleMin: 1500,
+    // Столько состав таблицы не должен меняться, чтобы считать её готовой
+    autopilotTableQuietPeriod: 1000,
+    // Пустая выдача — законный исход (в пачке нет ни одного живого тикета),
+    // но отличить её от «ещё грузится» можно только временем
+    autopilotEmptyConfirm: 8000,
+    // Столько пустых пачек подряд — и прогон останавливается. Триста
+    // тикетов подряд, которых сайт не показал, — это сломанный фильтр,
+    // а не совпадение.
+    autopilotMaxEmptyChunks: 3,
+    // Пауза между пачками
+    autopilotBetweenChunksDelay: 1500,
   };
 
   // ------------------------------------------------------------------
@@ -228,6 +251,20 @@
     exception: 'непредвиденная ошибка скрипта (подробности в консоли)',
   };
 
+  // Закрыт ли тикет из списка. Один предикат на живой счётчик в панели и на
+  // итоговый отчёт: две копии этого условия однажды разойдутся, и человек
+  // увидит в панели одно число, а в отчёте другое.
+  //
+  // «Вписали, но не проверили» закрытым НЕ считается: непроверенный тикет
+  // должен остаться в списке и попасть под следующий прогон.
+  function isListTicketClosed(result) {
+    return (
+      result.status === 'success' &&
+      result.txVerified !== 'not-saved' &&
+      result.txVerified !== 'unverified'
+    );
+  }
+
   function describeReason(reason) {
     return REASON_LABELS[reason] || `неизвестная причина: ${reason}`;
   }
@@ -334,6 +371,14 @@
     // у которого URL не прочитался; такие просто не считаются отслеживаемыми
     // и не должны ронять ожидание.
     return url !== '' && url.toLowerCase().includes(String(needle).toLowerCase());
+  }
+
+  // Сколько запросов, начатых после отметки, ещё не завершились. В отличие
+  // от trackedRequestsSince здесь не важно, куда запрос шёл: за выдачей
+  // таблицы сайт ходит с пустым URL (проверено на боевой странице), и
+  // опознать этот запрос по адресу невозможно — считаем любые.
+  function requestsInFlightSince(mark) {
+    return requestLog.entries.filter((e) => e.id > mark && e.finishedAt === null).length;
   }
 
   function trackedRequestsSince(mark) {
@@ -578,17 +623,36 @@
     el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
   }
 
-  // Записывает значение в <input> так, чтобы Vue его заметил. Простое
+  // Записывает значение в поле ввода так, чтобы Vue его заметил. Простое
   // input.value = x реактивность не тронет: нужно звать нативный сеттер
   // (иначе перехватчик Vue не сработает) и разослать input + change.
+  //
+  // Прототип выбирается по тегу не для красоты: сеттер HTMLInputElement,
+  // позванный на <textarea>, падает с "Illegal invocation". Поле фильтра
+  // «Ticket ID» на странице — именно textarea.
   function setInputValue(input, value) {
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype,
-      'value'
-    ).set;
-    nativeInputValueSetter.call(input, value);
+    const proto =
+      input.tagName === 'TEXTAREA'
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+    const nativeValueSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+    nativeValueSetter.call(input, value);
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // Виден ли элемент. Намеренно НЕ через offsetParent: блок быстрых
+  // фильтров прячется через style="display: none" на родителе, и проверять
+  // надо именно цепочку родителей.
+  function isElementVisible(el) {
+    if (!el) return false;
+    let node = el;
+    while (node && node.nodeType === 1) {
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      node = node.parentElement;
+    }
+    return true;
   }
 
   function getOpenModal() {
@@ -966,6 +1030,221 @@
   }
 
   // Находит .input-group внутри модалки, где <span class="title"> точно равен label
+  // ------------------------------------------------------------------
+  // АВТОПИЛОТ: скрипт сам подставляет тикеты в фильтр сайта пачками.
+  //
+  // Раньше режим «по списку» работал только с тем, что оператор уже вывел
+  // на экран: вставил сотню номеров в поиск, нажал Apply, запустил прогон,
+  // дождался, вставил следующую сотню. На списке в пятьсот тикетов это пять
+  // ручных заходов, между которыми прогон стоит и ждёт человека.
+  //
+  // Здесь тот же цикл делает скрипт. Пачка — ровно autopilotChunkSize: это
+  // предел одной страницы выдачи, а пагинацией пользоваться нельзя
+  // (страницы нестабильны, прогон по ним терял бы тикеты молча).
+  // ------------------------------------------------------------------
+
+  // Поле фильтра «Ticket ID» — textarea, номера в нём разделяются переводом
+  // строки. Сначала ищем внутри формы фильтров, потом по всей странице:
+  // форма может называться иначе, а плейсхолдер у поля уникален.
+  function getTicketIdFilterInput() {
+    return (
+      document.querySelector('#filter_form textarea[placeholder="Ticket ID"]') ||
+      document.querySelector('textarea[placeholder="Ticket ID"]')
+    );
+  }
+
+  function getFilterApplyButton() {
+    return (
+      document.querySelector('#filter_form .btn-block button[type="submit"]') ||
+      document.querySelector('#filter_form button[type="submit"]')
+    );
+  }
+
+  // Кнопка, раскрывающая блок быстрых фильтров. Ищем по подписи, а не по
+  // порядковому номеру: рядом стоят ещё «Filters» и «Column settings».
+  function getQuickFiltersToggle() {
+    return Array.from(document.querySelectorAll('button.btn-settings-columns')).find((b) =>
+      /quick\s*filters/i.test(b.textContent || '')
+    );
+  }
+
+  // Чего не хватает для автопилота. Пустой массив — всё на месте.
+  function autopilotMissingControls() {
+    const missing = [];
+    if (!getTicketIdFilterInput()) missing.push('поле фильтра «Ticket ID»');
+    if (!getFilterApplyButton()) missing.push('кнопка Apply у фильтров');
+    return missing;
+  }
+
+  function chunkArray(items, size) {
+    const out = [];
+    for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+    return out;
+  }
+
+  // Состав таблицы одной строкой — по нему видно, перестроилась она или нет.
+  // Берём текст ячеек, а не номера тикетов: номер читается через карту
+  // колонок, которая на момент перестройки может быть ещё старой.
+  function tableSignature() {
+    return getTicketRows()
+      .map((row) => row.textContent.replace(/\s+/g, ' ').trim())
+      .join('§');
+  }
+
+  // Ждёт, пока сайт перестроит таблицу после Apply.
+  //
+  // Ориентируемся на состав таблицы, а не на запросы: запрос за выдачей
+  // уходит с пустым URL (проверено на боевой странице), и отличить его от
+  // любого другого нечем.
+  //
+  // Возвращает { ok: true, empty } либо { ok: false, reason }.
+  async function waitForTableAfterApply(mark, clickedAt) {
+    const hardDeadline = clickedAt + CONFIG.autopilotTableTimeout;
+    let lastSignature = null;
+    let stableSince = 0;
+
+    for (;;) {
+      checkStop();
+
+      const now = Date.now();
+      const signature = tableSignature();
+      const rowCount = getTicketRows().length;
+
+      if (signature !== lastSignature) {
+        lastSignature = signature;
+        stableSince = now;
+      }
+
+      const settledLongEnough = now - clickedAt >= CONFIG.autopilotTableSettleMin;
+      // Пустая таблица и «таблица ещё грузится» выглядят на экране одинаково,
+      // поэтому пустой выдаче нужен свой, более длинный срок И отсутствие
+      // незакрытых запросов. Ошибиться здесь не страшно — тикеты такой пачки
+      // остаются в памяти списка и попадут в следующий прогон, — но обидно,
+      // и лишняя проверка стоит дёшево.
+      const quietLongEnough =
+        now - stableSince >=
+        (rowCount === 0 ? CONFIG.autopilotEmptyConfirm : CONFIG.autopilotTableQuietPeriod);
+      const nothingPending = rowCount > 0 || requestsInFlightSince(mark) === 0;
+
+      if (settledLongEnough && quietLongEnough && nothingPending) {
+        return { ok: true, empty: rowCount === 0 };
+      }
+      if (now >= hardDeadline) return { ok: false, reason: 'table-timeout' };
+
+      await interruptibleSleep(200);
+    }
+  }
+
+  // Подставляет пачку номеров в фильтр и дожидается новой выдачи.
+  //
+  // Возвращает { ok: true, ticketIds } либо { ok: false, reason, detail },
+  // где reason — код для сообщения об остановке прогона.
+  async function applyTicketIdFilter(ticketIds, workflow) {
+    const log = `[BulkApproveBETA/${workflow.id}]`;
+
+    const area = getTicketIdFilterInput();
+    if (!area) return { ok: false, reason: 'no-filter-input' };
+
+    const applyBtn = getFilterApplyButton();
+    if (!applyBtn) return { ok: false, reason: 'no-apply-button' };
+
+    // Блок быстрых фильтров может быть свёрнут. Поле при этом в DOM есть, но
+    // скрыто — писать в скрытое поле сайт, скорее всего, примет, однако
+    // проверить это нечем, а разворачивать блок дёшево.
+    if (!isElementVisible(area)) {
+      const toggle = getQuickFiltersToggle();
+      if (!toggle) return { ok: false, reason: 'quick-filters-collapsed' };
+      console.log(`${log} Блок быстрых фильтров свёрнут — раскрываю.`);
+      fireClick(toggle);
+      try {
+        await waitFor(() => isElementVisible(getTicketIdFilterInput()), 5000);
+      } catch (e) {
+        if (e instanceof StopSignal) throw e;
+        return { ok: false, reason: 'quick-filters-collapsed' };
+      }
+    }
+
+    const text = ticketIds.join('\n');
+    setInputValue(area, text);
+
+    // Читаем обратно. Это не тавтология из 2.7: там мы проверяли собственную
+    // запись в поле, значение которого потом всё равно уходило из Vue-модели.
+    // Здесь поле — вход фильтра, и если сайт его подрезал (маска, лимит
+    // длины), то в выдачу уедет не тот набор тикетов, а узнать об этом после
+    // Apply будет уже неоткуда.
+    const readBack = String(area.value == null ? '' : area.value);
+    const missing = ticketIds.filter((id) => !readBack.includes(id));
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        reason: 'filter-value-rejected',
+        detail: `в поле не оказалось ${missing.length} из ${ticketIds.length} номеров`,
+      };
+    }
+
+    console.log(`${log} Подставил в фильтр ${ticketIds.length} тикетов, жму Apply.`);
+    const mark = requestLogMark();
+    const clickedAt = Date.now();
+    fireClick(applyBtn);
+
+    const waited = await waitForTableAfterApply(mark, clickedAt);
+    if (!waited.ok) return { ok: false, reason: waited.reason };
+
+    // Набор колонок после перестройки теоретически тот же, но карта колонок
+    // снималась до Apply и с тех пор пережила полное пересоздание таблицы.
+    // Перечитать её дешевле, чем однажды прочитать номер тикета из чужой
+    // колонки.
+    refreshColumnIndexMap();
+
+    if (waited.empty) {
+      console.warn(`${log} По этой пачке сайт не показал ни одного тикета.`);
+      return { ok: true, ticketIds: [] };
+    }
+
+    const shown = getTicketRows().map((row) => getTicketIdFromRow(row));
+    const asked = new Set(ticketIds);
+    const strangers = shown.filter((id) => !asked.has(id));
+
+    // Главная страховка автопилота. Если в выдаче есть хоть один тикет, о
+    // котором мы не спрашивали, значит фильтр не применился — и мы сейчас
+    // собираемся обрабатывать чужую выборку. Такое должно останавливать
+    // прогон, а не пролезать в отчёт строкой статистики.
+    if (strangers.length > 0) {
+      return {
+        ok: false,
+        reason: 'filter-not-applied',
+        detail:
+          `в выдаче ${strangers.length} тикетов, которых не было в пачке ` +
+          `(например ${strangers.slice(0, 3).join(', ')})`,
+      };
+    }
+
+    console.log(`${log} Сайт показал ${shown.length} тикетов из ${ticketIds.length} запрошенных.`);
+    return { ok: true, ticketIds: shown };
+  }
+
+  // Формулировки для остановок автопилота. Держим рядом с кодами, которые
+  // возвращает applyTicketIdFilter.
+  function describeAutopilotFailure(reason, detail) {
+    const tail = detail ? ` (${detail})` : '';
+    switch (reason) {
+      case 'no-filter-input':
+        return 'на странице не нашлось поле фильтра «Ticket ID» — подставить пачку некуда';
+      case 'no-apply-button':
+        return 'на странице не нашлась кнопка Apply у фильтров — применить пачку нечем';
+      case 'quick-filters-collapsed':
+        return 'блок быстрых фильтров свёрнут, и раскрыть его не удалось';
+      case 'filter-value-rejected':
+        return `сайт не принял список номеров в поле фильтра${tail}`;
+      case 'table-timeout':
+        return `таблица не перестроилась за ${CONFIG.autopilotTableTimeout / 1000} с после Apply`;
+      case 'filter-not-applied':
+        return `фильтр не применился${tail} — обрабатывать эту выдачу нельзя`;
+      default:
+        return `не удалось подставить пачку (${reason})`;
+    }
+  }
+
   function findFieldGroup(modal, label) {
     const groups = modal.querySelectorAll('.form-add .input-group');
     for (const g of groups) {
@@ -1799,11 +2078,13 @@
     // Режим «по списку» начинается с вопроса: без списка делать нечего.
     currentListPairs = null;
     currentListState = null;
+    let autopilot = false;
     if (workflow.fillTransactionIdFromList) {
       const entered = await showTicketListWindow(workflow);
       if (!entered) return; // отмена — молча выходим, ничего не трогая
       currentListPairs = entered.pairs;
       currentListState = entered.state;
+      autopilot = entered.autopilot;
     }
 
     if (workflow.fillAmountFromTransaction) {
@@ -1833,14 +2114,58 @@
       return;
     }
 
-    const rows = getTicketRows();
-    if (rows.length === 0) {
-      alert('Не найдено ни одного тикета на странице.');
-      return;
+    // Что именно прогоняем.
+    //
+    // Автопилот: пачки набираются из списка, и что сейчас на экране —
+    // неважно, эту выдачу он всё равно заменит своей.
+    // Без автопилота: одна «пачка» — это то, что оператор уже вывел сам;
+    // фильтр страницы скрипт не трогает.
+    const listDone = new Set(currentListState ? currentListState.done : []);
+    let chunks;
+
+    if (autopilot) {
+      const missing = autopilotMissingControls();
+      if (missing.length > 0) {
+        alert(
+          'Автопилот включён, но на странице нет того, чем он работает:\n' +
+          missing.map((m) => `  • ${m}`).join('\n') +
+          '\n\nПрогон не начат. Разверни блок Quick filters и запусти снова, ' +
+          'либо сними галочку «Автопилот» и выведи тикеты в поиск сам.'
+        );
+        return;
+      }
+
+      const remaining = [...currentListPairs.keys()].filter((id) => !listDone.has(id));
+      if (remaining.length === 0) {
+        alert(
+          `Из списка (${currentListPairs.size}) уже обработано всё. ` +
+          'Если список нужно прогнать заново — нажми «Начать заново» в окне ввода.'
+        );
+        return;
+      }
+      chunks = chunkArray(remaining, CONFIG.autopilotChunkSize);
+    } else {
+      const rows = getTicketRows();
+      if (rows.length === 0) {
+        alert('Не найдено ни одного тикета на странице.');
+        return;
+      }
+      chunks = [null]; // null — «бери то, что уже на экране»
     }
 
+    const queuedTotal = autopilot
+      ? chunks.reduce((sum, c) => sum + c.length, 0)
+      : getTicketRows().length;
+
     const confirmed = confirm(
-      `Найдено тикетов на экране: ${rows.length}.\n` +
+      (autopilot
+        ? `АВТОПИЛОТ. Скрипт сам будет подставлять тикеты в фильтр страницы\n` +
+          `пачками по ${CONFIG.autopilotChunkSize} и нажимать Apply.\n` +
+          `Осталось из списка: ${queuedTotal}, это ${chunks.length} ` +
+          `${chunks.length === 1 ? 'пачка' : 'пачек'}.\n` +
+          `Текущая выдача на экране будет заменена — если там есть что-то\n` +
+          `нужное, сохрани это сейчас.\n\n`
+        : `Найдено тикетов на экране: ${queuedTotal}.\n`) +
       `Будут обработаны только те, у кого External Status — один из:\n` +
       workflow.requiredExternalStatuses.map((name) => `  • ${name}`).join('\n') + `\n` +
       (workflow.requiredTransactionStatus
@@ -1850,7 +2175,9 @@
       `У подходящих будет выставлен статус "${workflow.targetStatusLabel}" и нажат Apply.` +
       (workflow.fillTransactionIdFromList
         ? `\n\nИз списка (${currentListPairs.size} пар) будут взяты только те тикеты,\n` +
-          `которые есть на этой странице. Тикет с УЖЕ заполненным и другим\n` +
+          (autopilot
+            ? `которые сайт покажет по фильтру. Тикет с УЖЕ заполненным и другим\n`
+            : `которые есть на этой странице. Тикет с УЖЕ заполненным и другим\n`) +
           `Transaction ID пропускается — статус у него не меняется.`
         : '') +
       (workflow.fillAmountFromTransaction
@@ -1869,29 +2196,30 @@
     state.stopRequested = false;
     updateButtonsUI();
 
-    // Список тикетов фиксируем по номерам, а не по позициям строк: таблица
-    // перерисовывается прямо во время прогона, и обращение по индексу молча
-    // подсовывало бы не тот тикет либо навсегда пропускало один из них.
-    const plannedTicketIds = rows.map((r) => getTicketIdFromRow(r));
-    const total = plannedTicketIds.length;
+    // Все тикеты, которые прогон собирался посмотреть — накапливаются по
+    // пачкам. По ним в конце считается, до кого прогон не дошёл.
+    const plannedTicketIds = [];
 
-    // Сквозной счётчик по списку — сколько из него уже закрыто за все прогоны
-    const listDone = new Set(currentListState ? currentListState.done : []);
-    const listLine = currentListPairs
-      ? `из списка: ${listDone.size} из ${currentListPairs.size}`
-      : '';
+    // Сквозной счётчик по списку: сколько из него закрыто за все прогоны,
+    // включая текущий. Обновляется по ходу, чтобы панель показывала живое
+    // число, а не то, что было на старте.
+    const listClosedIds = new Set(listDone);
+
+    const listLineNow = () =>
+      currentListPairs ? `из списка: ${listClosedIds.size} из ${currentListPairs.size}` : '';
 
     setProgress({
       visible: true,
       title: workflow.buttonLabel,
       index: 0,
-      total,
+      total: 0,
       ticketId: '',
       ok: 0,
       skipped: 0,
       failed: 0,
       action: 'начинаю',
-      listLine,
+      listLine: listLineNow(),
+      chunkLine: autopilot ? `Пачка 0 из ${chunks.length}` : '',
     });
 
     const results = [];
@@ -1915,197 +2243,295 @@
       return true;
     };
 
-    for (let i = 0; i < total; i++) {
+    // Пустая выдача сама по себе законна: в пачке может не оказаться ни
+    // одного живого тикета. Но три пустых пачки подряд — это триста тикетов,
+    // которых сайт не показал, и это уже не совпадение.
+    let consecutiveEmptyChunks = 0;
+    let emptyChunks = 0;
+    let chunksDone = 0;
+
+    for (let chunkNo = 0; chunkNo < chunks.length; chunkNo++) {
       if (state.stopRequested) {
         stoppedEarly = true;
         break;
       }
 
-      const ticketId = plannedTicketIds[i];
-      setProgress({ index: i + 1, ticketId, action: 'открываю Edit' });
+      if (autopilot) {
+        const chunk = chunks[chunkNo];
+        setProgress({
+          chunkLine: `Пачка ${chunkNo + 1} из ${chunks.length}`,
+          index: 0,
+          total: chunk.length,
+          ticketId: '',
+          action: `подставляю ${chunk.length} тикетов в фильтр`,
+        });
 
-      // Пустая таблица — это НЕ «тикеты кончились», а её перезагрузка. Раньше
-      // скрипт в этот момент молча пролистывал весь остаток списка и рапортовал
-      // «Готово», хотя не посмотрел почти ни одного тикета.
-      if (getTicketRows().length === 0) {
-        console.warn(
-          `[BulkApproveBETA/${workflow.id}] Таблица пуста (идёт перезагрузка?) — жду, пока она вернётся...`
-        );
+        let applied;
         try {
-          await waitFor(() => getTicketRows().length > 0, CONFIG.tableReloadTimeout);
+          applied = await applyTicketIdFilter(chunk, workflow);
         } catch (e) {
           if (e instanceof StopSignal) {
             stoppedEarly = true;
             break;
           }
+          throw e;
+        }
+
+        if (!applied.ok) {
           runAbortReason =
-            `Таблица тикетов пропала со страницы и не вернулась за ${CONFIG.tableReloadTimeout / 1000} с. ` +
-            `Прогон остановлен: продолжать вслепую нельзя. Обнови страницу и запусти заново.`;
+            `Пачка ${chunkNo + 1} из ${chunks.length}: ` +
+            `${describeAutopilotFailure(applied.reason, applied.detail)}. ` +
+            `Прогон остановлен — обработанное до этого момента сохранено, ` +
+            `оставшиеся тикеты можно забрать из блока для копирования ниже.`;
           console.error(`[BulkApproveBETA/${workflow.id}] ${runAbortReason}`);
           stoppedEarly = true;
           break;
         }
-      }
 
-      const row = findRowByTicketId(ticketId);
-      if (!row) {
-        console.warn(
-          `[BulkApproveBETA/${workflow.id}] (${i + 1}/${total}) Тикет ${ticketId}: строки больше нет в таблице — НЕ обработан.`
-        );
-        results.push({ ticketId, status: 'failed', reason: 'row-disappeared' });
-        if (registerFailure('row-disappeared')) {
-          stoppedEarly = true;
-          break;
-        }
-        continue;
-      }
+        chunksDone++;
 
-      let result;
-      try {
-        result = await processTicket(row, i, total, workflow);
-        results.push(result);
-      } catch (e) {
-        if (e instanceof StopSignal) {
-          console.log(`[BulkApproveBETA/${workflow.id}] Получен сигнал СТОП — прерываю выполнение.`);
-          tryCancelModal();
-          stoppedEarly = true;
-          break;
-        }
-        console.error(`[BulkApproveBETA/${workflow.id}] Необработанная ошибка на тикете ${ticketId}:`, e);
-        result = { ticketId, status: 'failed', reason: 'exception' };
-        results.push(result);
-      }
-
-      if (result) {
-        setProgress({
-          ok: results.filter((r) => r.status === 'success').length,
-          skipped: results.filter((r) => r.status === 'skipped').length,
-          failed: results.filter((r) => r.status === 'failed').length,
-          action: '',
-        });
-      }
-
-      // Сумму вписали — убеждаемся, что она сохранилась. Делаем это здесь, а
-      // не внутри processTicket: цикл уже умеет ждать перезагрузку таблицы и
-      // заново находить строку по номеру тикета.
-      if (CONFIG.verifyAmountSaved && result.status === 'success' && result.amountFilled) {
-        try {
-          const check = await verifyAmountSaved(ticketId, result.amountFilled, workflow);
-          // result лежит в results по ссылке — отчёт увидит эти поля
-          result.amountVerified = check.verdict;
-          result.storedAmount = check.stored;
-          result.verifyNote = check.note;
-
-          if (check.verdict === 'saved') {
-            consecutiveUnsavedAmounts = 0;
-            console.log(
-              `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: сумма "${result.amountFilled}" сохранилась ` +
-              `(${check.note}).`
-            );
-          } else if (check.verdict === 'not-saved') {
-            console.error(
-              `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: СУММА НЕ СОХРАНИЛАСЬ — вписывали ` +
-              `"${result.amountFilled}", ${check.note}. Статус при этом уже изменён.`
-            );
-            consecutiveUnsavedAmounts++;
-            // Если виноват формат или вёрстка, не сохранится у всех подряд —
-            // гнать дальше и трогать деньги впустую вредно.
-            if (consecutiveUnsavedAmounts >= CONFIG.maxConsecutiveFailures) {
-              runAbortReason =
-                `Подряд у ${consecutiveUnsavedAmounts} тикетов сумма не сохранилась, хотя статус менялся. ` +
-                `Похоже, сайт перестал принимать сумму в том виде, в каком её вписывает скрипт. ` +
-                `Прогон остановлен. Перечисленные ниже тикеты нужно поправить вручную.`;
-              console.error(`[BulkApproveBETA/${workflow.id}] ${runAbortReason}`);
-              stoppedEarly = true;
-              break;
-            }
-          } else {
-            console.warn(
-              `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: не удалось проверить сумму — ${check.note}.`
-            );
-          }
-        } catch (e) {
-          if (e instanceof StopSignal) {
+        if (applied.ticketIds.length === 0) {
+          emptyChunks++;
+          consecutiveEmptyChunks++;
+          if (consecutiveEmptyChunks >= CONFIG.autopilotMaxEmptyChunks) {
+            runAbortReason =
+              `Подряд ${consecutiveEmptyChunks} пачек по ${CONFIG.autopilotChunkSize} тикетов ` +
+              `сайт вернул пустыми. Похоже, фильтр не отбирает тикеты так, как мы рассчитываем ` +
+              `(например, на странице стоит ещё один фильтр, под который они не подходят). ` +
+              `Прогон остановлен, чтобы не листать остаток списка впустую.`;
+            console.error(`[BulkApproveBETA/${workflow.id}] ${runAbortReason}`);
             stoppedEarly = true;
             break;
           }
-          console.error(`[BulkApproveBETA/${workflow.id}] Ошибка при проверке суммы у тикета ${ticketId}:`, e);
-          result.amountVerified = 'unverified';
-          result.verifyNote = 'проверка завершилась ошибкой скрипта';
+          continue;
         }
+        consecutiveEmptyChunks = 0;
+      } else {
+        chunksDone++;
       }
 
-      // То же самое для номера транзакции. Причина ровно та же, что была у
-      // сумм в 2.7: статус может сохраниться, а значение — нет, и без
-      // проверки после Apply этого никто не заметит.
-      if (CONFIG.verifyAmountSaved && result.status === 'success' && result.transactionIdFilled) {
-        setProgress({ action: 'проверяю, сохранился ли Transaction ID' });
-        try {
-          const check = await verifyTransactionIdSaved(ticketId, result.transactionIdFilled, workflow);
-          result.txVerified = check.verdict;
-          result.storedTransactionId = check.stored;
-          result.txVerifyNote = check.note;
+      // Состав страницы фиксируем по номерам, а не по позициям строк: таблица
+      // перерисовывается прямо во время прогона, и обращение по индексу молча
+      // подсовывало бы не тот тикет либо навсегда пропускало один из них.
+      const pageTicketIds = getTicketRows().map((r) => getTicketIdFromRow(r));
+      plannedTicketIds.push(...pageTicketIds);
+      const total = pageTicketIds.length;
+      setProgress({ total, action: '' });
 
-          if (check.verdict === 'saved') {
-            consecutiveUnsavedAmounts = 0;
-            console.log(
-              `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: Transaction ID ` +
-              `"${result.transactionIdFilled}" сохранился (${check.note}).`
-            );
-          } else if (check.verdict === 'not-saved') {
-            console.error(
-              `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: TRANSACTION ID НЕ СОХРАНИЛСЯ — ` +
-              `вписывали "${result.transactionIdFilled}", ${check.note}. Статус при этом уже изменён.`
-            );
-            consecutiveUnsavedAmounts++;
-            if (consecutiveUnsavedAmounts >= CONFIG.maxConsecutiveFailures) {
-              runAbortReason =
-                `Подряд у ${consecutiveUnsavedAmounts} тикетов не сохранился Transaction ID, хотя статус менялся. ` +
-                `Похоже, сайт перестал принимать номер в том виде, в каком его вписывает скрипт. ` +
-                `Прогон остановлен. Перечисленные ниже тикеты нужно поправить вручную.`;
-              console.error(`[BulkApproveBETA/${workflow.id}] ${runAbortReason}`);
-              stoppedEarly = true;
-              break;
-            }
-          } else {
-            console.warn(
-              `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: не удалось проверить Transaction ID — ${check.note}.`
-            );
-          }
-        } catch (e) {
-          if (e instanceof StopSignal) {
-            stoppedEarly = true;
-            break;
-          }
-          console.error(
-            `[BulkApproveBETA/${workflow.id}] Ошибка при проверке Transaction ID у тикета ${ticketId}:`, e
+      for (let i = 0; i < total; i++) {
+        if (state.stopRequested) {
+          stoppedEarly = true;
+          break;
+        }
+
+        const ticketId = pageTicketIds[i];
+        setProgress({ index: i + 1, ticketId, action: 'открываю Edit' });
+
+        // Пустая таблица — это НЕ «тикеты кончились», а её перезагрузка. Раньше
+        // скрипт в этот момент молча пролистывал весь остаток списка и рапортовал
+        // «Готово», хотя не посмотрел почти ни одного тикета.
+        if (getTicketRows().length === 0) {
+          console.warn(
+            `[BulkApproveBETA/${workflow.id}] Таблица пуста (идёт перезагрузка?) — жду, пока она вернётся...`
           );
-          result.txVerified = 'unverified';
-          result.txVerifyNote = 'проверка завершилась ошибкой скрипта';
+          try {
+            await waitFor(() => getTicketRows().length > 0, CONFIG.tableReloadTimeout);
+          } catch (e) {
+            if (e instanceof StopSignal) {
+              stoppedEarly = true;
+              break;
+            }
+            runAbortReason =
+              `Таблица тикетов пропала со страницы и не вернулась за ${CONFIG.tableReloadTimeout / 1000} с. ` +
+              `Прогон остановлен: продолжать вслепую нельзя. Обнови страницу и запусти заново.`;
+            console.error(`[BulkApproveBETA/${workflow.id}] ${runAbortReason}`);
+            stoppedEarly = true;
+            break;
+          }
         }
-      }
 
-      if (result.status === 'failed') {
-        if (registerFailure(result.reason)) {
+        const row = findRowByTicketId(ticketId);
+        if (!row) {
+          console.warn(
+            `[BulkApproveBETA/${workflow.id}] (${i + 1}/${total}) Тикет ${ticketId}: строки больше нет в таблице — НЕ обработан.`
+          );
+          results.push({ ticketId, status: 'failed', reason: 'row-disappeared' });
+          if (registerFailure('row-disappeared')) {
+            stoppedEarly = true;
+            break;
+          }
+          continue;
+        }
+
+        let result;
+        try {
+          result = await processTicket(row, i, total, workflow);
+          results.push(result);
+        } catch (e) {
+          if (e instanceof StopSignal) {
+            console.log(`[BulkApproveBETA/${workflow.id}] Получен сигнал СТОП — прерываю выполнение.`);
+            tryCancelModal();
+            stoppedEarly = true;
+            break;
+          }
+          console.error(`[BulkApproveBETA/${workflow.id}] Необработанная ошибка на тикете ${ticketId}:`, e);
+          result = { ticketId, status: 'failed', reason: 'exception' };
+          results.push(result);
+        }
+
+        if (result) {
+          setProgress({
+            ok: results.filter((r) => r.status === 'success').length,
+            skipped: results.filter((r) => r.status === 'skipped').length,
+            failed: results.filter((r) => r.status === 'failed').length,
+            action: '',
+          });
+        }
+
+        // Сумму вписали — убеждаемся, что она сохранилась. Делаем это здесь, а
+        // не внутри processTicket: цикл уже умеет ждать перезагрузку таблицы и
+        // заново находить строку по номеру тикета.
+        if (CONFIG.verifyAmountSaved && result.status === 'success' && result.amountFilled) {
+          try {
+            const check = await verifyAmountSaved(ticketId, result.amountFilled, workflow);
+            // result лежит в results по ссылке — отчёт увидит эти поля
+            result.amountVerified = check.verdict;
+            result.storedAmount = check.stored;
+            result.verifyNote = check.note;
+
+            if (check.verdict === 'saved') {
+              consecutiveUnsavedAmounts = 0;
+              console.log(
+                `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: сумма "${result.amountFilled}" сохранилась ` +
+                `(${check.note}).`
+              );
+            } else if (check.verdict === 'not-saved') {
+              console.error(
+                `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: СУММА НЕ СОХРАНИЛАСЬ — вписывали ` +
+                `"${result.amountFilled}", ${check.note}. Статус при этом уже изменён.`
+              );
+              consecutiveUnsavedAmounts++;
+              // Если виноват формат или вёрстка, не сохранится у всех подряд —
+              // гнать дальше и трогать деньги впустую вредно.
+              if (consecutiveUnsavedAmounts >= CONFIG.maxConsecutiveFailures) {
+                runAbortReason =
+                  `Подряд у ${consecutiveUnsavedAmounts} тикетов сумма не сохранилась, хотя статус менялся. ` +
+                  `Похоже, сайт перестал принимать сумму в том виде, в каком её вписывает скрипт. ` +
+                  `Прогон остановлен. Перечисленные ниже тикеты нужно поправить вручную.`;
+                console.error(`[BulkApproveBETA/${workflow.id}] ${runAbortReason}`);
+                stoppedEarly = true;
+                break;
+              }
+            } else {
+              console.warn(
+                `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: не удалось проверить сумму — ${check.note}.`
+              );
+            }
+          } catch (e) {
+            if (e instanceof StopSignal) {
+              stoppedEarly = true;
+              break;
+            }
+            console.error(`[BulkApproveBETA/${workflow.id}] Ошибка при проверке суммы у тикета ${ticketId}:`, e);
+            result.amountVerified = 'unverified';
+            result.verifyNote = 'проверка завершилась ошибкой скрипта';
+          }
+        }
+
+        // То же самое для номера транзакции. Причина ровно та же, что была у
+        // сумм в 2.7: статус может сохраниться, а значение — нет, и без
+        // проверки после Apply этого никто не заметит.
+        if (CONFIG.verifyAmountSaved && result.status === 'success' && result.transactionIdFilled) {
+          setProgress({ action: 'проверяю, сохранился ли Transaction ID' });
+          try {
+            const check = await verifyTransactionIdSaved(ticketId, result.transactionIdFilled, workflow);
+            result.txVerified = check.verdict;
+            result.storedTransactionId = check.stored;
+            result.txVerifyNote = check.note;
+
+            if (check.verdict === 'saved') {
+              consecutiveUnsavedAmounts = 0;
+              console.log(
+                `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: Transaction ID ` +
+                `"${result.transactionIdFilled}" сохранился (${check.note}).`
+              );
+            } else if (check.verdict === 'not-saved') {
+              console.error(
+                `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: TRANSACTION ID НЕ СОХРАНИЛСЯ — ` +
+                `вписывали "${result.transactionIdFilled}", ${check.note}. Статус при этом уже изменён.`
+              );
+              consecutiveUnsavedAmounts++;
+              if (consecutiveUnsavedAmounts >= CONFIG.maxConsecutiveFailures) {
+                runAbortReason =
+                  `Подряд у ${consecutiveUnsavedAmounts} тикетов не сохранился Transaction ID, хотя статус менялся. ` +
+                  `Похоже, сайт перестал принимать номер в том виде, в каком его вписывает скрипт. ` +
+                  `Прогон остановлен. Перечисленные ниже тикеты нужно поправить вручную.`;
+                console.error(`[BulkApproveBETA/${workflow.id}] ${runAbortReason}`);
+                stoppedEarly = true;
+                break;
+              }
+            } else {
+              console.warn(
+                `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: не удалось проверить Transaction ID — ${check.note}.`
+              );
+            }
+          } catch (e) {
+            if (e instanceof StopSignal) {
+              stoppedEarly = true;
+              break;
+            }
+            console.error(
+              `[BulkApproveBETA/${workflow.id}] Ошибка при проверке Transaction ID у тикета ${ticketId}:`, e
+            );
+            result.txVerified = 'unverified';
+            result.txVerifyNote = 'проверка завершилась ошибкой скрипта';
+          }
+        }
+
+        if (result.status === 'failed') {
+          if (registerFailure(result.reason)) {
+            stoppedEarly = true;
+            break;
+          }
+        } else if (result.status === 'success') {
+          consecutiveFailures = 0;
+        }
+
+        // Прогон мог остановить сам себя изнутри (не тот тикет в модалке,
+        // залипшая модалка, чужое окно на экране)
+        if (state.stopRequested) {
           stoppedEarly = true;
           break;
         }
-      } else if (result.status === 'success') {
-        consecutiveFailures = 0;
+
+        // Живой счётчик по списку. Предикат один на счётчик и на отчёт —
+        // иначе панель и итог однажды разойдутся, и верить будет нечему.
+        if (currentListPairs && currentListPairs.has(result.ticketId)) {
+          if (isListTicketClosed(result)) listClosedIds.add(result.ticketId);
+          setProgress({ listLine: listLineNow() });
+        }
+
+        const wasSkipped = result.status === 'skipped';
+
+        if (i < total - 1 && !wasSkipped) {
+          try {
+            await interruptibleSleep(CONFIG.betweenTicketsDelay);
+          } catch (e) {
+            if (e instanceof StopSignal) {
+              stoppedEarly = true;
+              break;
+            }
+          }
+        }
       }
 
-      // Прогон мог остановить сам себя изнутри (не тот тикет в модалке,
-      // залипшая модалка, чужое окно на экране)
-      if (state.stopRequested) {
-        stoppedEarly = true;
-        break;
-      }
+      // Прогон мог остановиться внутри пачки — тогда остальные пачки не трогаем
+      if (stoppedEarly) break;
 
-      const wasSkipped = result.status === 'skipped';
-
-      if (i < total - 1 && !wasSkipped) {
+      if (autopilot && chunkNo < chunks.length - 1) {
+        setProgress({ action: 'перехожу к следующей пачке' });
         try {
-          await interruptibleSleep(CONFIG.betweenTicketsDelay);
+          await interruptibleSleep(CONFIG.autopilotBetweenChunksDelay);
         } catch (e) {
           if (e instanceof StopSignal) {
             stoppedEarly = true;
@@ -2185,7 +2611,9 @@
     let listNotOnPage = 0;
     let listDoneTotal = 0;
     if (currentListPairs && currentListState) {
-      const done = new Set(currentListState.done);
+      // listClosedIds уже собран по ходу прогона тем же предикатом, которым
+      // считалась панель — второй раз то же самое не пересчитываем.
+      const done = listClosedIds;
       const attention = new Map(
         currentListState.needsAttention.map((a) => [String(a.ticketId), a])
       );
@@ -2194,10 +2622,7 @@
         // Строки со страницы, которых нет в списке, нас не касаются
         if (!currentListPairs.has(r.ticketId)) return;
 
-        const closed =
-          r.status === 'success' && r.txVerified !== 'not-saved' && r.txVerified !== 'unverified';
-        if (closed) {
-          done.add(r.ticketId);
+        if (isListTicketClosed(r)) {
           attention.delete(r.ticketId);
           return;
         }
@@ -2387,7 +2812,9 @@
     const failureBreakdown = [...failureCounts.entries()].sort((a, b) => b[1] - a[1]);
 
     const summaryLines = [
-      `Всего тикетов в списке: ${total}`,
+      autopilot
+        ? `Всего тикетов из списка показал сайт: ${plannedTicketIds.length} (запрошено ${queuedTotal})`
+        : `Всего тикетов в списке: ${plannedTicketIds.length}`,
       `Успешно: ${successCount}`,
     ];
     // Строка-уточнение к «Успешно» — должна идти сразу за ним, иначе читается
@@ -2449,12 +2876,21 @@
     if (formatUnclearSkips.length > 0) {
       summaryLines.push(`Пропущено (непонятный формат суммы): ${formatUnclearSkips.length}`);
     }
+    if (autopilot) {
+      summaryLines.push(
+        `Пачек по ${CONFIG.autopilotChunkSize}: обработано ${chunksDone} из ${chunks.length}` +
+        (emptyChunks > 0 ? `, из них пустых ${emptyChunks}` : '')
+      );
+    }
     if (currentListPairs) {
       // Формулировка намеренно нейтральная: при работе пачками это норма,
       // а не ошибка, и пугать этой строкой нельзя.
       summaryLines.push(
-        `Из вашего списка не было на этой странице: ${listNotOnPage} — ` +
-        `это нормально, если гоните список по частям`
+        autopilot
+          ? `Сайт не показал по фильтру: ${listNotOnPage} — ` +
+            `обычно это уже закрытые или удалённые тикеты`
+          : `Из вашего списка не было на этой странице: ${listNotOnPage} — ` +
+            `это нормально, если гоните список по частям`
       );
       summaryLines.push(
         `Обработано из списка всего: ${listDoneTotal} из ${currentListPairs.size}, ` +
@@ -2531,6 +2967,10 @@
       formatUnclearText +
       failedText +
       notReachedText +
+      (autopilot
+        ? `\n\nВ поле фильтра «Ticket ID» осталась последняя пачка — таблица на экране ` +
+          `показывает именно её. Очисти поле и нажми Apply, чтобы вернуть обычную выдачу.`
+        : '') +
       `\n\nПодробности — в консоли (F12).`;
 
     // Строки для вставки в таблицу учёта. Берём ТОЛЬКО подтверждённые:
@@ -2556,7 +2996,10 @@
     if (currentListPairs) {
       if (listRemaining.length > 0) {
         copyBlocks.push({
-          label: `Оставшиеся Ticket ID (${listRemaining.length}) — вставить в поиск для следующей пачки:`,
+          label: autopilot
+            ? `Не закрыты (${listRemaining.length}) — останутся в памяти списка ` +
+              `и попадут в следующий прогон:`
+            : `Оставшиеся Ticket ID (${listRemaining.length}) — вставить в поиск для следующей пачки:`,
           text: listRemaining.join('\n'),
         });
       }
@@ -2794,6 +3237,38 @@
         ].join(';');
         body.appendChild(area);
 
+        // Автопилот. Включён по умолчанию: ради него этот режим и делался,
+        // а ручная работа пачками остаётся запасным путём — например, если
+        // оператору нужно прогнать только то, что он уже отобрал на экране
+        // своими фильтрами.
+        const missingControls = autopilotMissingControls();
+
+        const autoRow = document.createElement('label');
+        autoRow.style.cssText =
+          'display:flex;gap:8px;align-items:flex-start;margin-top:12px;cursor:pointer';
+
+        const autoBox = document.createElement('input');
+        autoBox.type = 'checkbox';
+        autoBox.className = 'bulk-approve-beta-autopilot';
+        autoBox.checked = missingControls.length === 0;
+        autoBox.disabled = missingControls.length > 0;
+        autoBox.style.cssText = 'margin-top:3px;flex-shrink:0';
+
+        const autoText = document.createElement('div');
+        autoText.style.cssText = 'color:#333';
+        autoText.textContent =
+          missingControls.length > 0
+            ? `Автопилот недоступен: на странице нет ${missingControls.join(' и ')}. ` +
+              'Разверни блок Quick filters и открой это окно заново. Сейчас будут ' +
+              'обработаны только тикеты, которые уже на экране.'
+            : `Автопилот: подставлять тикеты из списка в фильтр страницы пачками ` +
+              `по ${CONFIG.autopilotChunkSize} и нажимать Apply самому. ` +
+              `Текущая выдача на экране будет заменена.`;
+
+        autoRow.appendChild(autoBox);
+        autoRow.appendChild(autoText);
+        body.appendChild(autoRow);
+
         const status = document.createElement('div');
         status.style.cssText = 'margin-top:10px;white-space:pre-wrap';
         body.appendChild(status);
@@ -2831,26 +3306,39 @@
 
         let parsed = null;
 
+        // Тот же список, что лежит в памяти? Счётчики обработанного имеют
+        // смысл только для него, и от этого же зависит, сколько тикетов
+        // реально осталось прогнать.
+        const savedFingerprintOf = (p) =>
+          saved ? listFingerprint(parseTicketTransactionList(saved.text).pairs) === listFingerprint(p) : false;
+
         const refresh = () => {
           parsed = parseTicketTransactionList(area.value);
           const lines = [];
+          const sameAsSaved = savedFingerprintOf(parsed.pairs);
+          const doneIds = new Set(sameAsSaved ? saved.done : []);
+          const remainingCount = [...parsed.pairs.keys()].filter((id) => !doneIds.has(id)).length;
 
           lines.push(`Распознано пар: ${parsed.pairs.size}`);
 
           if (saved && saved.done.length > 0) {
-            const fresh = listFingerprint(parsed.pairs);
-            const savedFingerprint = listFingerprint(
-              parseTicketTransactionList(saved.text).pairs
-            );
-            if (fresh === savedFingerprint) {
+            if (sameAsSaved) {
               lines.push(
                 `В памяти: обработано ${saved.done.length}, ` +
                 `с проблемами ${saved.needsAttention.length}, ` +
-                `осталось ${Math.max(parsed.pairs.size - saved.done.length, 0)}`
+                `осталось ${remainingCount}`
               );
             } else {
               lines.push('Список изменился — счётчики обработанного сброшены.');
             }
+          }
+
+          if (autoBox.checked && remainingCount > 0) {
+            const chunkCount = Math.ceil(remainingCount / CONFIG.autopilotChunkSize);
+            lines.push(
+              `Автопилот прогонит ${remainingCount} ` +
+              `${chunkCount === 1 ? 'тикет(ов) одной пачкой' : `тикетов за ${chunkCount} пачек`}.`
+            );
           }
 
           if (parsed.badLines.length > 0) {
@@ -2895,6 +3383,7 @@
         };
 
         area.addEventListener('input', refresh);
+        autoBox.addEventListener('change', refresh);
         refresh();
 
         resetBtn.addEventListener('click', () => {
@@ -2906,12 +3395,8 @@
         runBtn.addEventListener('click', () => {
           if (runBtn.disabled) return;
           const text = area.value;
-          const fingerprint = listFingerprint(parsed.pairs);
-          const savedFingerprint = saved
-            ? listFingerprint(parseTicketTransactionList(saved.text).pairs)
-            : null;
           // Счётчики имеют смысл только для того же самого списка
-          const keep = savedFingerprint !== null && savedFingerprint === fingerprint;
+          const keep = savedFingerprintOf(parsed.pairs);
           const state = {
             savedAt: Date.now(),
             text,
@@ -2919,7 +3404,7 @@
             needsAttention: keep ? saved.needsAttention.slice() : [],
           };
           writeListStorage(state);
-          finish({ pairs: parsed.pairs, state });
+          finish({ pairs: parsed.pairs, state, autopilot: autoBox.checked && !autoBox.disabled });
         });
 
         onKey = (e) => {
@@ -2963,6 +3448,7 @@
     failed: 0,
     action: '',
     listLine: '',
+    chunkLine: '',
   };
   let progressBox = null;
 
@@ -2993,6 +3479,7 @@
       progressBox.style.display = 'block';
 
       const lines = [progressState.title];
+      if (progressState.chunkLine) lines.push(progressState.chunkLine);
       lines.push(
         `Тикет ${progressState.index} из ${progressState.total}` +
         (progressState.ticketId ? ` · ${progressState.ticketId}` : '')
@@ -3175,7 +3662,7 @@
 
     stopBtn.disabled = !state.isRunning || state.stopRequested;
     stopBtn.style.display = state.isRunning ? 'inline-block' : 'none';
-    stopBtn.textContent = state.stopRequested ? 'Останавливаю...' : 'СТОП';
+    stopBtn.textContent = state.stopRequested ? 'Останавливаю...' : 'СТОП (BETA)';
   }
 
   function addTriggerButtons() {
