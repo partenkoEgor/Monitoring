@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.5
+// @version      0.6
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -3202,6 +3202,21 @@
             : `Оставшиеся Ticket ID (${listRemaining.length}) — вставить в поиск для следующей пачки:`,
           text: listRemaining.join('\n'),
         });
+      }
+      // Дубли — отдельным блоком и ровно парой «тикет → транзакция»: по нему
+      // проходят руками, поэтому он должен вставляться в таблицу как есть,
+      // без причины третьей колонкой. Номер чужого обращения по каждому из
+      // них есть в тексте отчёта выше.
+      if (duplicateSkips.length > 0) {
+        copyBlocks.push({
+          label:
+            `Транзакция занята другим обращением (${duplicateSkips.length}) — ` +
+            `разобрать вручную; Ticket ID, Transaction ID:`,
+          text: duplicateSkips
+            .map((r) => `${r.ticketId}\t${r.attemptedTransactionId}`)
+            .join('\n'),
+        });
+        window.__bulkApproveDuplicates = duplicateSkips;
       }
       if (listNeedsAttention.length > 0) {
         copyBlocks.push({
