@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.8
+// @version      0.9
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -239,6 +239,8 @@
     'no-transaction-id-field': 'в окне нет поля Transaction ID — вписать некуда',
     'popup-before-apply':
       'перед Apply на экране висело окно сайта — Apply не нажимали, тикет не тронут',
+    'transaction-duplicate-known':
+      'в прошлом прогоне сайт сказал, что транзакция занята другим обращением — тикет не открывали',
     'transaction-duplicate':
       'сайт сказал, что эта транзакция уже занята другим обращением — статус НЕ меняли, ' +
       'Apply НЕ нажимали, тикет нужно разобрать руками',
@@ -1572,6 +1574,27 @@
       return { ticketId, status: 'skipped', reason: 'not-in-list', externalStatus };
     }
 
+    // Дубль из прошлых прогонов. Автопилот таких и не запрашивает, но без
+    // автопилота тикет может оказаться на экране, если оператор вывел его
+    // сам, — и тогда его тоже не трогаем.
+    if (currentListDuplicates && currentListDuplicates.has(ticketId)) {
+      const known = currentListDuplicates.get(ticketId);
+      console.log(
+        `[BulkApproveBETA/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: в прошлом прогоне сайт ` +
+        `сказал, что транзакция занята` + (known.ownerTicketId ? ` обращением ${known.ownerTicketId}` : '') +
+        ` — не открываю.`
+      );
+      return {
+        ticketId,
+        status: 'skipped',
+        reason: 'transaction-duplicate-known',
+        attemptedTransactionId: known.transactionId,
+        ownerTicketId: known.ownerTicketId,
+        popupText: known.popupText,
+        externalStatus,
+      };
+    }
+
     // Номер транзакции приходит не со страницы, а из списка. Решаем здесь,
     // что впишем, но саму запись делаем позже — внутри окна и только после
     // проверки личности тикета.
@@ -2250,6 +2273,7 @@
     // необязателен: в окне есть «Запустить по экрану».
     currentListPairs = null;
     currentListState = null;
+    currentListDuplicates = null;
     let autopilot = false;
     let askedInWindow = false;
     if (workflow.fillTransactionIdFromList || workflow.allowTicketIdList) {
@@ -2258,6 +2282,9 @@
       askedInWindow = true;
       currentListPairs = entered.pairs;
       currentListState = entered.state;
+      currentListDuplicates = new Map(
+        (entered.state ? entered.state.duplicates : []).map((d) => [d.ticketId, d])
+      );
       autopilot = entered.autopilot;
     }
 
@@ -2309,12 +2336,31 @@
         return;
       }
 
-      const remaining = [...currentListPairs.keys()].filter((id) => !listDone.has(id));
+      // Отложенные дубли в пачки не идут: сайт на них уже ответил
+      const remaining = [...currentListPairs.keys()].filter(
+        (id) => !listDone.has(id) && !currentListDuplicates.has(id)
+      );
       if (remaining.length === 0) {
-        alert(
-          `Из списка (${currentListPairs.size}) уже обработано всё. ` +
-          'Если список нужно прогнать заново — нажми «Начать заново» в окне ввода.'
+        const parked = [...currentListDuplicates.values()];
+        if (parked.length === 0) {
+          alert(
+            `Из списка (${currentListPairs.size}) уже обработано всё. ` +
+            'Если список нужно прогнать заново — нажми «Начать заново» в окне ввода.'
+          );
+          return;
+        }
+        // Прогонять нечего, но человеку всё ещё нужен список дублей — отдаём
+        // его тем же окном отчёта, а не alert'ом, из которого не скопировать.
+        showReportWindow(
+          `Прогонять нечего.\n` +
+          `Из списка (${currentListPairs.size}) обработано всё, кроме ${parked.length} ` +
+          `тикетов, у которых транзакция занята другим обращением. Они отложены и ` +
+          `повторно не прогоняются.\n\n` +
+          `Если какие-то из них уже поправлены руками и их нужно прогнать снова — ` +
+          `нажми «Начать заново» в окне ввода списка.`,
+          [duplicateCopyBlock(parked)]
         );
+        window.__bulkApproveDuplicates = parked;
         return;
       }
       chunks = chunkArray(remaining, CONFIG.autopilotChunkSize);
@@ -2748,6 +2794,9 @@
     const notInListSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'not-in-list');
     // Сайт сказал, что транзакция уже занята. Самый дорогой исход прогона:
     // именно здесь чужая транзакция однажды уехала не в тот тикет.
+    const knownDuplicateSkips = results.filter(
+      (r) => r.status === 'skipped' && r.reason === 'transaction-duplicate-known'
+    );
     const duplicateSkips = results.filter(
       (r) => r.status === 'skipped' && r.reason === 'transaction-duplicate'
     );
@@ -2789,6 +2838,9 @@
     let listNeedsAttention = [];
     let listNotOnPage = 0;
     let listDoneTotal = 0;
+    // Все дубли списка — из прошлых прогонов и из этого. Без списка (режимы
+    // без памяти) — только этого прогона.
+    let listDuplicatesAll = duplicateSkips.map((r) => duplicateRecord(r, true));
     if (currentListPairs && currentListState) {
       // listClosedIds уже собран по ходу прогона тем же предикатом, которым
       // считалась панель — второй раз то же самое не пересчитываем.
@@ -2815,7 +2867,24 @@
         });
       });
 
-      listRemaining = [...currentListPairs.keys()].filter((id) => !done.has(id));
+      // Дубли копятся: старые из памяти плюс новые этого прогона. Новый
+      // перекрывает старый — у него свежий текст окна.
+      const allDuplicates = new Map(
+        [...(currentListDuplicates || new Map()).values()].map((d) => [
+          d.ticketId,
+          { ...d, fromThisRun: false },
+        ])
+      );
+      duplicateSkips.forEach((r) => allDuplicates.set(r.ticketId, duplicateRecord(r, true)));
+      listDuplicatesAll = [...allDuplicates.values()];
+
+      // У дублей свой блок и свой раздел — в «прогнать заново» им не место:
+      // прогонять их заново как раз не надо.
+      allDuplicates.forEach((_, id) => attention.delete(id));
+
+      listRemaining = [...currentListPairs.keys()].filter(
+        (id) => !done.has(id) && !allDuplicates.has(id)
+      );
       listNeedsAttention = [...attention.values()];
       listDoneTotal = done.size;
 
@@ -2835,6 +2904,7 @@
         text: currentListState.text,
         done: [...done],
         needsAttention: listNeedsAttention,
+        duplicates: listDuplicatesAll.map(({ fromThisRun, ...d }) => d),
       });
     }
 
@@ -2956,16 +3026,22 @@
           )
         : '';
 
+    // Раздел показывает ВСЕ дубли списка, накопленные за прогоны: по нему
+    // проходят руками, и собирать его по кускам из старых отчётов нельзя.
+    const newDuplicatesCount = listDuplicatesAll.filter((d) => d.fromThisRun).length;
     const duplicateText =
-      duplicateSkips.length > 0
-        ? `\n\n⚠ ТРАНЗАКЦИЯ ЗАНЯТА ДРУГИМ ОБРАЩЕНИЕМ (${duplicateSkips.length}) — ` +
-          `статус НЕ меняли, Apply НЕ нажимали, разберись вручную:\n` +
+      listDuplicatesAll.length > 0
+        ? `\n\n⚠ ТРАНЗАКЦИЯ ЗАНЯТА ДРУГИМ ОБРАЩЕНИЕМ (${listDuplicatesAll.length}` +
+          (listDuplicatesAll.length !== newDuplicatesCount
+            ? `; новых в этом прогоне ${newDuplicatesCount}, остальные из прошлых`
+            : '') +
+          `) — статус НЕ меняли, Apply НЕ нажимали, повторно не прогоняются, разберись вручную:\n` +
           listWithTail(
-            duplicateSkips,
-            (r) =>
-              `${r.ticketId} — вписывали "${r.attemptedTransactionId}"` +
-              (r.ownerTicketId ? `, транзакция уже у обращения ${r.ownerTicketId}` : '') +
-              `. Сайт: «${r.popupText}»`,
+            listDuplicatesAll,
+            (d) =>
+              `${d.ticketId} — вписывали "${d.transactionId}"` +
+              (d.ownerTicketId ? `, транзакция уже у обращения ${d.ownerTicketId}` : '') +
+              (d.fromThisRun ? '' : ' (из прошлого прогона)'),
             'в блоке для копирования ниже (там все) и в консоли: window.__bulkApproveDuplicates'
           )
         : '';
@@ -3111,6 +3187,11 @@
         `Пропущено (транзакция занята другим обращением): ${duplicateSkips.length}`
       );
     }
+    if (knownDuplicateSkips.length > 0) {
+      summaryLines.push(
+        `Пропущено (дубль из прошлых прогонов, не открывали): ${knownDuplicateSkips.length}`
+      );
+    }
     const unknownPopupSkips = results.filter(
       (r) => r.status === 'skipped' && r.reason === 'unknown-popup'
     );
@@ -3144,6 +3225,9 @@
       );
       summaryLines.push(
         `Обработано из списка всего: ${listDoneTotal} из ${currentListPairs.size}, ` +
+        (listDuplicatesAll.length > 0
+          ? `отложено дублей ${listDuplicatesAll.length}, `
+          : '') +
         `осталось ${listRemaining.length}`
       );
     }
@@ -3154,6 +3238,7 @@
     const namedSkipReasons = new Set([
       'wrong-external-status', 'transaction-not-rejected', 'no-transaction-status-column',
       'not-in-list', 'transaction-id-mismatch', 'transaction-duplicate', 'unknown-popup',
+      'transaction-duplicate-known',
       'zero-amount', 'amount-already-filled', 'amount-format-unclear',
     ]);
     const otherSkips = results.filter(
@@ -3280,16 +3365,9 @@
       // проходят руками, поэтому он должен вставляться в таблицу как есть,
       // без причины третьей колонкой. Номер чужого обращения по каждому из
       // них есть в тексте отчёта выше.
-      if (duplicateSkips.length > 0) {
-        copyBlocks.push({
-          label:
-            `Транзакция занята другим обращением (${duplicateSkips.length}) — ` +
-            `разобрать вручную; Ticket ID, Transaction ID:`,
-          text: duplicateSkips
-            .map((r) => `${r.ticketId}\t${r.attemptedTransactionId}`)
-            .join('\n'),
-        });
-        window.__bulkApproveDuplicates = duplicateSkips;
+      if (listDuplicatesAll.length > 0) {
+        copyBlocks.push(duplicateCopyBlock(listDuplicatesAll));
+        window.__bulkApproveDuplicates = listDuplicatesAll;
       }
       if (listNeedsAttention.length > 0) {
         copyBlocks.push({
@@ -3353,6 +3431,34 @@
   // прогонами, счётчики, остаток) не знает о разнице.
   let currentListPairs = null;
   let currentListState = null;
+  // Тикеты, на которых сайт сказал «транзакция уже занята другим
+  // обращением» — за все прогоны этого списка. Map ticketId → запись.
+  // Повторно такие тикеты не открываются: ответ сайта от повторной попытки
+  // не изменится, а каждая стоит секунд десять и одно лишнее окно.
+  let currentListDuplicates = null;
+
+  // Запись о дубле в том виде, в каком она лежит в памяти списка
+  function duplicateRecord(r, fromThisRun) {
+    return {
+      ticketId: String(r.ticketId),
+      transactionId: r.attemptedTransactionId || r.transactionId || '',
+      ownerTicketId: r.ownerTicketId || null,
+      popupText: r.popupText || '',
+      at: r.at || Date.now(),
+      fromThisRun: !!fromThisRun,
+    };
+  }
+
+  // Блок для копирования: ровно пара «тикет → транзакция», по ней проходят
+  // руками, поэтому она должна вставляться в таблицу как есть.
+  function duplicateCopyBlock(records) {
+    return {
+      label:
+        `Транзакция занята другим обращением (${records.length}) — ` +
+        `разобрать вручную; Ticket ID, Transaction ID:`,
+      text: records.map((d) => `${d.ticketId}\t${d.transactionId}`).join('\n'),
+    };
+  }
 
   // Разбирает вставленный текст. Возвращает пары и ВСЕ найденные претензии:
   // окно ввода покажет их человеку и не даст запуститься, пока они есть.
@@ -3498,6 +3604,11 @@
         text: typeof data.text === 'string' ? data.text : '',
         done: Array.isArray(data.done) ? data.done.map(String) : [],
         needsAttention: Array.isArray(data.needsAttention) ? data.needsAttention : [],
+        duplicates: Array.isArray(data.duplicates)
+          ? data.duplicates
+              .filter((d) => d && d.ticketId)
+              .map((d) => ({ ...d, ticketId: String(d.ticketId) }))
+          : [],
       };
     } catch (e) {
       return null;
@@ -3665,7 +3776,7 @@
 
         const resetBtn = document.createElement('button');
         resetBtn.textContent = 'Начать заново';
-        resetBtn.title = 'Забыть сохранённый список и счётчики обработанного';
+        resetBtn.title = 'Забыть сохранённый список, счётчики обработанного и отложенные дубли';
         resetBtn.style.cssText = [
           'padding:8px 16px', 'border:1px solid #bbb', 'border-radius:4px',
           'background:#f5f5f5', 'font-size:14px', 'cursor:pointer', 'margin-right:auto',
@@ -3717,7 +3828,11 @@
           const lines = [];
           const sameAsSaved = savedFingerprintOf(parsed.pairs);
           const doneIds = new Set(sameAsSaved ? saved.done : []);
-          const remainingCount = [...parsed.pairs.keys()].filter((id) => !doneIds.has(id)).length;
+          // Отложенные дубли повторно не прогоняются — в «осталось» их нет
+          const parkedIds = new Set(sameAsSaved ? saved.duplicates.map((d) => d.ticketId) : []);
+          const remainingCount = [...parsed.pairs.keys()].filter(
+            (id) => !doneIds.has(id) && !parkedIds.has(id)
+          ).length;
 
           lines.push(needsPairs
             ? `Распознано пар: ${parsed.pairs.size}`
@@ -3727,11 +3842,14 @@
             lines.push(`Повторов в списке: ${parsed.duplicates} — схлопнул.`);
           }
 
-          if (saved && saved.done.length > 0) {
+          if (saved && (saved.done.length > 0 || saved.duplicates.length > 0)) {
             if (sameAsSaved) {
               lines.push(
                 `В памяти: обработано ${saved.done.length}, ` +
                 `с проблемами ${saved.needsAttention.length}, ` +
+                (saved.duplicates.length > 0
+                  ? `отложено дублей ${saved.duplicates.length} (повторно не прогоняются), `
+                  : '') +
                 `осталось ${remainingCount}`
               );
             } else {
@@ -3817,6 +3935,7 @@
             text,
             done: keep ? saved.done.slice() : [],
             needsAttention: keep ? saved.needsAttention.slice() : [],
+            duplicates: keep ? saved.duplicates.slice() : [],
           };
           writeListStorage(storageKey, state);
           finish({
