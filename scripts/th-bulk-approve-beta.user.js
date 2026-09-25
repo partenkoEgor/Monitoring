@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.7
+// @version      0.8
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -1814,6 +1814,12 @@
         });
       }
 
+      // Пока вписываем номер, окна сайта относятся именно к нему. Без этого
+      // в отчёте у пойманного окна стояло «(нет данных)»: currentTransactionId
+      // читается из колонки таблицы, а она у таких тикетов пустая — номер как
+      // раз и вписываем.
+      if (transactionIdToFill) currentTransactionId = transactionIdToFill;
+
       const txInput = txGroup.querySelector(
         'input.mx-input, input[type="text"]:not(.multiselect__input)'
       );
@@ -2359,6 +2365,14 @@
     // пачкам. По ним в конце считается, до кого прогон не дошёл.
     const plannedTicketIds = [];
 
+    // Тикеты, которые мы РЕАЛЬНО запросили у сайта — то есть из пачек,
+    // которые успели примениться. Считать «сайт не показал» по всему списку
+    // нельзя: туда попали бы и закрытые в прошлые прогоны, и те, до чьей
+    // пачки прогон не дошёл, — и цифра говорила бы о сайте то, чего он не
+    // делал. Ровно так один отчёт и заявил «не показал 710» после одной
+    // применённой пачки на сотню.
+    const requestedTicketIds = [];
+
     // Сквозной счётчик по списку: сколько из него закрыто за все прогоны,
     // включая текущий. Обновляется по ходу, чтобы панель показывала живое
     // число, а не то, что было на старте.
@@ -2448,6 +2462,7 @@
         }
 
         chunksDone++;
+        requestedTicketIds.push(...chunk);
 
         if (applied.ticketIds.length === 0) {
           emptyChunks++;
@@ -2804,8 +2819,16 @@
       listNeedsAttention = [...attention.values()];
       listDoneTotal = done.size;
 
-      const seen = new Set(results.map((r) => r.ticketId));
-      listNotOnPage = [...currentListPairs.keys()].filter((id) => !seen.has(id)).length;
+      // «Сайт не показал» — это запрошенное минус показанное, и только оно.
+      // В ручном режиме запроса не было: там сравниваем список с экраном,
+      // как и раньше.
+      if (autopilot) {
+        const shownSet = new Set(plannedTicketIds);
+        listNotOnPage = requestedTicketIds.filter((id) => !shownSet.has(id)).length;
+      } else {
+        const seen = new Set(plannedTicketIds);
+        listNotOnPage = [...currentListPairs.keys()].filter((id) => !seen.has(id)).length;
+      }
 
       writeListStorage(listStorageKey(workflow), {
         savedAt: Date.now(),
@@ -2841,10 +2864,42 @@
     // за остальными в консоль
     const MAX_LISTED = 40;
 
+    // Обрезанный список ОБЯЗАН сказать, что он обрезан. Иначе заголовок
+    // говорит «(60)», под ним лежит сорок строк, и человек уходит работать с
+    // неполными данными, ничего не заподозрив. Ровно это и случилось с
+    // разделом про дубли, когда хвост забыли приписать руками.
+    const listWithTail = (items, render, where) => {
+      const shown = items.slice(0, MAX_LISTED).map(render).join('\n');
+      if (items.length <= MAX_LISTED) return shown;
+      return (
+        shown +
+        `\n… и ещё ${items.length - MAX_LISTED}` +
+        (where ? ` — полный список ${where}` : '')
+      );
+    };
+
+    // Тикеты, которые скрипт уже разобрал как дубли, в общий список
+    // «требуют ручной проверки» не попадают: у них есть свой раздел с
+    // номером чужого обращения и свой блок для копирования, и повторять их
+    // здесь значило бы показывать одно и то же двумя разными способами.
+    // Фильтруем ПО ТИКЕТУ, а не по тексту окна: если прогон остановили
+    // раньше, чем скрипт успел вынести вердикт, окно так и останется
+    // единственным следом, и прятать его нельзя.
+    const duplicateTicketIds = new Set(duplicateSkips.map((r) => r.ticketId));
+    const popupsForReview = capturedPopups.filter((p) => !duplicateTicketIds.has(p.ticketId));
+
     const popupsListText =
-      popupCount > 0
-        ? `\n\nТребуют ручной проверки на дубликаты (${popupCount}):\n` +
-          capturedPopups.map((p) => `${p.ticketId} - ${p.transactionId}`).join('\n')
+      popupsForReview.length > 0
+        ? `\n\nТребуют ручной проверки на дубликаты (${popupsForReview.length}` +
+          (popupsForReview.length !== popupCount
+            ? `; ещё ${popupCount - popupsForReview.length} окон относятся к тикетам из раздела про занятые транзакции`
+            : '') +
+          `):\n` +
+          listWithTail(
+            popupsForReview,
+            (p) => `${p.ticketId} - ${p.transactionId}`,
+            'в консоли: window.__bulkApproveCapturedPopups'
+          )
         : '';
 
     const notRejectedText =
@@ -2884,41 +2939,45 @@
     const txNotSavedText =
       txNotSaved.length > 0
         ? `\n\n⚠ TRANSACTION ID НЕ СОХРАНИЛСЯ (${txNotSaved.length}) — статус УЖЕ изменён, поправь вручную:\n` +
-          txNotSaved
-            .slice(0, MAX_LISTED)
-            .map((r) => `${r.ticketId} — вписывали "${r.transactionIdFilled}", ${r.txVerifyNote || 'в тикете его нет'}`)
-            .join('\n')
+          listWithTail(
+            txNotSaved,
+            (r) => `${r.ticketId} — вписывали "${r.transactionIdFilled}", ${r.txVerifyNote || 'в тикете его нет'}`,
+            'в консоли: window.__bulkApproveLastResults'
+          )
         : '';
 
     const txUnverifiedText =
       txUnverified.length > 0
         ? `\n\nTransaction ID вписан, но проверить не удалось (${txUnverified.length}):\n` +
-          txUnverified
-            .slice(0, MAX_LISTED)
-            .map((r) => `${r.ticketId} — вписывали "${r.transactionIdFilled}" (${r.txVerifyNote || 'причина неизвестна'})`)
-            .join('\n')
+          listWithTail(
+            txUnverified,
+            (r) => `${r.ticketId} — вписывали "${r.transactionIdFilled}" (${r.txVerifyNote || 'причина неизвестна'})`,
+            'в консоли: window.__bulkApproveLastResults'
+          )
         : '';
 
     const duplicateText =
       duplicateSkips.length > 0
         ? `\n\n⚠ ТРАНЗАКЦИЯ ЗАНЯТА ДРУГИМ ОБРАЩЕНИЕМ (${duplicateSkips.length}) — ` +
           `статус НЕ меняли, Apply НЕ нажимали, разберись вручную:\n` +
-          duplicateSkips
-            .slice(0, MAX_LISTED)
-            .map((r) =>
+          listWithTail(
+            duplicateSkips,
+            (r) =>
               `${r.ticketId} — вписывали "${r.attemptedTransactionId}"` +
               (r.ownerTicketId ? `, транзакция уже у обращения ${r.ownerTicketId}` : '') +
-              `. Сайт: «${r.popupText}»`)
-            .join('\n')
+              `. Сайт: «${r.popupText}»`,
+            'в блоке для копирования ниже (там все) и в консоли: window.__bulkApproveDuplicates'
+          )
         : '';
 
     const txMismatchText =
       txMismatchSkips.length > 0
         ? `\n\nПропущены: в тикете уже стоит ДРУГОЙ Transaction ID (${txMismatchSkips.length}) — статус НЕ меняли:\n` +
-          txMismatchSkips
-            .slice(0, MAX_LISTED)
-            .map((r) => `${r.ticketId} — в тикете "${r.existingTransactionId}", в списке "${r.wantedTransactionId}" (видно по: ${r.detectedIn})`)
-            .join('\n')
+          listWithTail(
+            txMismatchSkips,
+            (r) => `${r.ticketId} — в тикете "${r.existingTransactionId}", в списке "${r.wantedTransactionId}" (видно по: ${r.detectedIn})`,
+            'в консоли: window.__bulkApproveLastResults'
+          )
         : '';
 
     const zeroAmountListText =
@@ -2966,10 +3025,11 @@
     const amountUnverifiedText =
       amountUnverified.length > 0
         ? `\n\nСумма вписана, но проверить не удалось (${amountUnverified.length}) — статус изменён, сумму стоит глянуть:\n` +
-          amountUnverified
-            .slice(0, MAX_LISTED)
-            .map((r) => `${r.ticketId} — вписывали "${r.amountFilled}" (${r.verifyNote || 'причина неизвестна'})`)
-            .join('\n')
+          listWithTail(
+            amountUnverified,
+            (r) => `${r.ticketId} — вписывали "${r.amountFilled}" (${r.verifyNote || 'причина неизвестна'})`,
+            'в консоли: window.__bulkApproveLastResults'
+          )
         : '';
 
     const formatUnclearText =
@@ -2990,7 +3050,9 @@
 
     const summaryLines = [
       autopilot
-        ? `Всего тикетов из списка показал сайт: ${plannedTicketIds.length} (запрошено ${queuedTotal})`
+        ? `Всего тикетов из списка показал сайт: ${plannedTicketIds.length} ` +
+          `(запрошено в применённых пачках: ${requestedTicketIds.length}, ` +
+          `всего в очереди на этот прогон: ${queuedTotal})`
         : `Всего тикетов в списке: ${plannedTicketIds.length}`,
       `Успешно: ${successCount}`,
     ];
