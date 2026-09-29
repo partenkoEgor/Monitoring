@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.9
+// @version      0.10
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -2274,6 +2274,7 @@
     currentListPairs = null;
     currentListState = null;
     currentListDuplicates = null;
+    currentListDropped = null;
     let autopilot = false;
     let askedInWindow = false;
     if (workflow.fillTransactionIdFromList || workflow.allowTicketIdList) {
@@ -2282,6 +2283,9 @@
       askedInWindow = true;
       currentListPairs = entered.pairs;
       currentListState = entered.state;
+      currentListDropped = new Map(
+        (entered.state ? entered.state.dropped : []).map((d) => [d.ticketId, d])
+      );
       currentListDuplicates = new Map(
         (entered.state ? entered.state.duplicates : []).map((d) => [d.ticketId, d])
       );
@@ -2336,16 +2340,20 @@
         return;
       }
 
-      // Отложенные дубли в пачки не идут: сайт на них уже ответил
+      // В пачки не идут отложенные дубли (сайт на них уже ответил) и
+      // выбывшие тикеты (их статус сменился, пока шла обработка списка)
       const remaining = [...currentListPairs.keys()].filter(
-        (id) => !listDone.has(id) && !currentListDuplicates.has(id)
+        (id) => !listDone.has(id) && !currentListDuplicates.has(id) && !currentListDropped.has(id)
       );
       if (remaining.length === 0) {
         const parked = [...currentListDuplicates.values()];
         if (parked.length === 0) {
           alert(
-            `Из списка (${currentListPairs.size}) уже обработано всё. ` +
-            'Если список нужно прогнать заново — нажми «Начать заново» в окне ввода.'
+            `Из списка (${currentListPairs.size}) уже обработано всё` +
+            (currentListDropped.size > 0
+              ? ` (из них ${currentListDropped.size} выбыли — у них сменился External Status)`
+              : '') +
+            '. Если список нужно прогнать заново — нажми «Начать заново» в окне ввода.'
           );
           return;
         }
@@ -2841,6 +2849,8 @@
     // Все дубли списка — из прошлых прогонов и из этого. Без списка (режимы
     // без памяти) — только этого прогона.
     let listDuplicatesAll = duplicateSkips.map((r) => duplicateRecord(r, true));
+    let listDroppedAll = [];
+    let listDroppedNew = 0;
     if (currentListPairs && currentListState) {
       // listClosedIds уже собран по ходу прогона тем же предикатом, которым
       // считалась панель — второй раз то же самое не пересчитываем.
@@ -2876,14 +2886,37 @@
         ])
       );
       duplicateSkips.forEach((r) => allDuplicates.set(r.ticketId, duplicateRecord(r, true)));
+
+      // Выбывшие: старые из памяти плюс те, у кого статус оказался чужим в
+      // этом прогоне. Закрытый в этом прогоне из выбывших уходит — это
+      // возможно без автопилота, когда тикет вернулся в нужный статус и
+      // оператор сам вывел его на экран.
+      const allDropped = new Map(
+        [...(currentListDropped || new Map()).values()].map((d) => [d.ticketId, d])
+      );
+      results.forEach((r) => {
+        if (r.status !== 'skipped' || r.reason !== 'wrong-external-status') return;
+        if (!currentListPairs.has(r.ticketId)) return;
+        if (!allDropped.has(r.ticketId)) listDroppedNew++;
+        allDropped.set(r.ticketId, {
+          ticketId: r.ticketId,
+          externalStatus: r.externalStatus || '',
+          at: Date.now(),
+        });
+      });
+      done.forEach((id) => allDropped.delete(id));
+      // Выбывший тикет больше не интересен — и как дубль тоже
+      allDropped.forEach((_, id) => allDuplicates.delete(id));
+      listDroppedAll = [...allDropped.values()];
       listDuplicatesAll = [...allDuplicates.values()];
 
       // У дублей свой блок и свой раздел — в «прогнать заново» им не место:
-      // прогонять их заново как раз не надо.
+      // прогонять их заново как раз не надо. Выбывшим тоже: они больше не наши.
       allDuplicates.forEach((_, id) => attention.delete(id));
+      allDropped.forEach((_, id) => attention.delete(id));
 
       listRemaining = [...currentListPairs.keys()].filter(
-        (id) => !done.has(id) && !allDuplicates.has(id)
+        (id) => !done.has(id) && !allDuplicates.has(id) && !allDropped.has(id)
       );
       listNeedsAttention = [...attention.values()];
       listDoneTotal = done.size;
@@ -2905,6 +2938,7 @@
         done: [...done],
         needsAttention: listNeedsAttention,
         duplicates: listDuplicatesAll.map(({ fromThisRun, ...d }) => d),
+        dropped: listDroppedAll,
       });
     }
 
@@ -3168,6 +3202,23 @@
       }
     }
     summaryLines.push(`Пропущено (не тот External Status): ${wrongStatusSkips.length}`);
+    // Что именно там стояло. «Не тот статус» без самого статуса не отвечает
+    // на единственный вопрос, который после этого возникает: тикет уже
+    // кто-то закрыл или он ушёл куда-то ещё.
+    if (wrongStatusSkips.length > 0) {
+      const byStatus = [
+        ...wrongStatusSkips.reduce((acc, r) => {
+          const key = r.externalStatus === '' || r.externalStatus == null ? '(пусто)' : r.externalStatus;
+          return acc.set(key, (acc.get(key) || 0) + 1);
+        }, new Map()),
+      ].sort((a, b) => b[1] - a[1]);
+      const TOP = 6;
+      byStatus.slice(0, TOP).forEach(([name, count]) => summaryLines.push(`  • ${name}: ${count}`));
+      if (byStatus.length > TOP) {
+        const rest = byStatus.slice(TOP).reduce((sum, [, count]) => sum + count, 0);
+        summaryLines.push(`  • прочие (${byStatus.length - TOP} статусов): ${rest}`);
+      }
+    }
     if (notRejectedSkips.length > 0) {
       summaryLines.push(`Пропущено (транзакция не rejected): ${notRejectedSkips.length}`);
     }
@@ -3228,8 +3279,16 @@
         (listDuplicatesAll.length > 0
           ? `отложено дублей ${listDuplicatesAll.length}, `
           : '') +
+        (listDroppedAll.length > 0
+          ? `выбыло (сменился статус) ${listDroppedAll.length}, `
+          : '') +
         `осталось ${listRemaining.length}`
       );
+      if (listDroppedNew > 0) {
+        summaryLines.push(
+          `  • выбыли в этом прогоне: ${listDroppedNew} — следующие прогоны этого списка их не запрашивают`
+        );
+      }
     }
     // Все причины пропуска, у которых есть своя строка выше. Новая причина,
     // не попавшая сюда, раньше просто исчезала бы из сводки — теперь она
@@ -3436,6 +3495,13 @@
   // Повторно такие тикеты не открываются: ответ сайта от повторной попытки
   // не изменится, а каждая стоит секунд десять и одно лишнее окно.
   let currentListDuplicates = null;
+  // Тикеты, выбывшие из списка: их External Status уже не тот, что нужен
+  // режиму. Список собирают из выгрузки тикетов в нужном статусе, а
+  // обработка идёт часами — за это время тикет может уйти к кому-то другому.
+  // Такой тикет больше не интересен: следующие прогоны этого списка его не
+  // запрашивают. Вернётся в нужный статус — попадёт в новую выгрузку, а с
+  // новым списком память начинается заново.
+  let currentListDropped = null;
 
   // Запись о дубле в том виде, в каком она лежит в памяти списка
   function duplicateRecord(r, fromThisRun) {
@@ -3604,6 +3670,11 @@
         text: typeof data.text === 'string' ? data.text : '',
         done: Array.isArray(data.done) ? data.done.map(String) : [],
         needsAttention: Array.isArray(data.needsAttention) ? data.needsAttention : [],
+        dropped: Array.isArray(data.dropped)
+          ? data.dropped
+              .filter((d) => d && d.ticketId)
+              .map((d) => ({ ...d, ticketId: String(d.ticketId) }))
+          : [],
         duplicates: Array.isArray(data.duplicates)
           ? data.duplicates
               .filter((d) => d && d.ticketId)
@@ -3776,7 +3847,7 @@
 
         const resetBtn = document.createElement('button');
         resetBtn.textContent = 'Начать заново';
-        resetBtn.title = 'Забыть сохранённый список, счётчики обработанного и отложенные дубли';
+        resetBtn.title = 'Забыть сохранённый список, счётчики, отложенные дубли и выбывшие тикеты';
         resetBtn.style.cssText = [
           'padding:8px 16px', 'border:1px solid #bbb', 'border-radius:4px',
           'background:#f5f5f5', 'font-size:14px', 'cursor:pointer', 'margin-right:auto',
@@ -3829,7 +3900,11 @@
           const sameAsSaved = savedFingerprintOf(parsed.pairs);
           const doneIds = new Set(sameAsSaved ? saved.done : []);
           // Отложенные дубли повторно не прогоняются — в «осталось» их нет
-          const parkedIds = new Set(sameAsSaved ? saved.duplicates.map((d) => d.ticketId) : []);
+          const parkedIds = new Set(
+            sameAsSaved
+              ? [...saved.duplicates, ...saved.dropped].map((d) => d.ticketId)
+              : []
+          );
           const remainingCount = [...parsed.pairs.keys()].filter(
             (id) => !doneIds.has(id) && !parkedIds.has(id)
           ).length;
@@ -3842,13 +3917,16 @@
             lines.push(`Повторов в списке: ${parsed.duplicates} — схлопнул.`);
           }
 
-          if (saved && (saved.done.length > 0 || saved.duplicates.length > 0)) {
+          if (saved && (saved.done.length > 0 || saved.duplicates.length > 0 || saved.dropped.length > 0)) {
             if (sameAsSaved) {
               lines.push(
                 `В памяти: обработано ${saved.done.length}, ` +
                 `с проблемами ${saved.needsAttention.length}, ` +
                 (saved.duplicates.length > 0
                   ? `отложено дублей ${saved.duplicates.length} (повторно не прогоняются), `
+                  : '') +
+                (saved.dropped.length > 0
+                  ? `выбыло (сменился статус) ${saved.dropped.length}, `
                   : '') +
                 `осталось ${remainingCount}`
               );
@@ -3936,6 +4014,7 @@
             done: keep ? saved.done.slice() : [],
             needsAttention: keep ? saved.needsAttention.slice() : [],
             duplicates: keep ? saved.duplicates.slice() : [],
+            dropped: keep ? saved.dropped.slice() : [],
           };
           writeListStorage(storageKey, state);
           finish({
