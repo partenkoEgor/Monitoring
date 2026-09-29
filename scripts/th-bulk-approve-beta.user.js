@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.10
+// @version      0.11
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -235,7 +235,8 @@
     'wrong-external-status': 'External Status тикета не подходит для этого режима — не трогали',
     'not-in-list': 'тикета нет в поданном списке — не трогали',
     'transaction-id-mismatch':
-      'Transaction ID уже заполнен, и не тем номером, что в списке — ничего не меняли, нужна ручная проверка',
+      'Transaction ID уже заполнен, и не тем номером, что в списке — ничего не меняли, нужна ручная проверка ' +
+      '(если номер в тикете неверный — прогони список с галочкой «Переписывать Transaction ID»)',
     'no-transaction-id-field': 'в окне нет поля Transaction ID — вписать некуда',
     'popup-before-apply':
       'перед Apply на экране висело окно сайта — Apply не нажимали, тикет не тронут',
@@ -422,6 +423,9 @@
   const capturedPopups = []; // { ticketId, transactionId, icon, title, content, hadCancel, timestamp }
   let currentTicketId = null; // тикет, который обрабатывается прямо сейчас (для привязки логов)
   let currentTransactionId = null; // Transaction ID этого же тикета
+  // Номер, который стоял в тикете до того, как его переписали по галочке
+  // «Переписывать Transaction ID». null — ничего не переписывали.
+  let currentReplacedTransactionId = null;
 
   function normalizeOk(text) {
     return text
@@ -1492,6 +1496,7 @@
     const transactionId = getTransactionIdFromRow(row);
     currentTicketId = ticketId; // чтобы пойманные попапы привязывались к этому тикету
     currentTransactionId = transactionId;
+    currentReplacedTransactionId = null;
     try {
       // Transaction ID и возраст тикета навешиваем здесь, в одной точке, а не
       // в каждом из полутора десятков return'ов внутри processTicketInner.
@@ -1501,6 +1506,12 @@
       const processing = getProcessingAgeFromRow(row);
       const result = await processTicketInner(row, ticketId, index, total, workflow);
       if (result && !result.transactionId) result.transactionId = transactionId;
+      // Замену старого номера помечаем у ЛЮБОГО исхода, а не только у
+      // успеха: если после замены что-то сорвалось, окно закрылось без Apply
+      // и в тикете остался старый номер — человеку это надо видеть.
+      if (result && currentReplacedTransactionId) {
+        result.replacedTransactionId = currentReplacedTransactionId;
+      }
       if (result && processing) {
         result.processingDate = processing.raw;
         result.ageHours = processing.ageHours;
@@ -1509,6 +1520,7 @@
     } finally {
       currentTicketId = null;
       currentTransactionId = null;
+      currentReplacedTransactionId = null;
     }
   }
 
@@ -1617,7 +1629,14 @@
       // с чужим номером транзакции даже не открываем: перезаписывать чужую
       // транзакцию нельзя, а разбираться с этим должен человек.
       const rowTx = getTransactionIdByName(row);
-      if (rowTx !== null && rowTx !== '' && rowTx !== wanted) {
+      if (rowTx !== null && rowTx !== '' && rowTx !== wanted && currentOverwriteTx) {
+        // С галочкой не пропускаем, но и не переписываем здесь: замена
+        // случится только в окне Edit, после проверки личности тикета.
+        console.log(
+          `[BulkApproveBETA/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: в тикете ` +
+          `"${rowTx}", в списке "${wanted}" — галочка «Переписывать» включена, открываю.`
+        );
+      } else if (rowTx !== null && rowTx !== '' && rowTx !== wanted) {
         console.warn(
           `[BulkApproveBETA/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: в списке стоит ` +
           `"${wanted}", а в тикете уже "${rowTx}" — ничего не меняю, нужна ручная проверка.`
@@ -1860,7 +1879,9 @@
       }
 
       const existingTx = txInput.value.trim();
-      if (existingTx !== '' && existingTx !== transactionIdToFill) {
+      const replacingTx =
+        existingTx !== '' && existingTx !== transactionIdToFill && currentOverwriteTx;
+      if (existingTx !== '' && existingTx !== transactionIdToFill && !replacingTx) {
         console.warn(
           `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: в окне уже стоит "${existingTx}", ` +
           `а в списке "${transactionIdToFill}" — ничего не меняю, статус не трогаю.`
@@ -1885,6 +1906,13 @@
       } else {
         // Отметку журнала снимаем ДО ввода: всё, что уйдёт после неё,
         // относится к нашей вставке, а не к тому, что висело раньше.
+        if (replacingTx) {
+          console.warn(
+            `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: переписываю Transaction ID — ` +
+            `было "${existingTx}", вписываю "${transactionIdToFill}" (галочка «Переписывать»).`
+          );
+          currentReplacedTransactionId = existingTx;
+        }
         const mark = requestLogMark();
         const inputAt = Date.now();
         setInputValue(txInput, transactionIdToFill);
@@ -2252,7 +2280,8 @@
     console.log(
       `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: готово ✅` +
       (amountFilled ? ` (вписана сумма "${amountFilled}")` : '') +
-      (transactionIdFilled ? ` (вписан Transaction ID "${transactionIdFilled}")` : '')
+      (transactionIdFilled ? ` (вписан Transaction ID "${transactionIdFilled}")` : '') +
+      (currentReplacedTransactionId ? ` (вместо "${currentReplacedTransactionId}")` : '')
     );
 
     const success = { ticketId, status: 'success' };
@@ -2275,6 +2304,7 @@
     currentListState = null;
     currentListDuplicates = null;
     currentListDropped = null;
+    currentOverwriteTx = false;
     let autopilot = false;
     let askedInWindow = false;
     if (workflow.fillTransactionIdFromList || workflow.allowTicketIdList) {
@@ -2290,6 +2320,13 @@
         (entered.state ? entered.state.duplicates : []).map((d) => [d.ticketId, d])
       );
       autopilot = entered.autopilot;
+      currentOverwriteTx = !!entered.overwriteTx;
+      if (currentOverwriteTx) {
+        console.warn(
+          `[BulkApproveBETA/${workflow.id}] Включена галочка «Переписывать Transaction ID»: ` +
+          `номер из списка заменит любой другой номер в тикете.`
+        );
+      }
     }
 
     if (workflow.fillAmountFromTransaction) {
@@ -2812,6 +2849,14 @@
       (r) => r.status === 'skipped' && r.reason === 'transaction-id-mismatch'
     );
     const txFilledResults = results.filter((r) => r.status === 'success' && r.transactionIdFilled);
+    // Галочка «Переписывать Transaction ID»: где старый номер заменили и
+    // тикет закрыли, и где замена началась, но тикет скрипт так и не закрыл.
+    // Дубли сюда не входят: у них свой блок, и там же сказано, какой номер
+    // остался в тикете — дважды одно и то же читать незачем.
+    const txReplaced = results.filter((r) => r.status === 'success' && r.replacedTransactionId);
+    const txReplaceUnfinished = results.filter(
+      (r) => r.status !== 'success' && r.replacedTransactionId && r.reason !== 'transaction-duplicate'
+    );
     const txNotSaved = txFilledResults.filter((r) => r.txVerified === 'not-saved');
     const txUnverified = txFilledResults.filter((r) => r.txVerified === 'unverified');
     const txConfirmed = txFilledResults.filter(
@@ -3033,11 +3078,43 @@
           txConfirmed
             .slice(0, MAX_LISTED)
             .map((r) => `${r.ticketId} — ${r.transactionIdFilled}` +
+              (r.replacedTransactionId ? ` (было "${r.replacedTransactionId}")` : '') +
               (r.transactionLoadNote ? ` (${r.transactionLoadNote})` : ''))
             .join('\n') +
           (txConfirmed.length > MAX_LISTED
             ? `\n… и ещё ${txConfirmed.length - MAX_LISTED}`
             : '')
+        : '';
+
+    // Отдельный блок «было → стало» — для ручной сверки: это единственные
+    // тикеты, где скрипт стёр то, что в них уже стояло.
+    const txReplacedText =
+      txReplaced.length > 0
+        ? `\n\nПЕРЕПИСАН Transaction ID (${txReplaced.length}) — было → стало:\n` +
+          listWithTail(
+            txReplaced,
+            (r) =>
+              `${r.ticketId} — было "${r.replacedTransactionId}" → стало "${r.transactionIdFilled}"` +
+              (r.txVerified === 'not-saved'
+                ? ' ⚠ новый номер НЕ сохранился'
+                : r.txVerified === 'unverified'
+                  ? ' (сохранение не проверено)'
+                  : ''),
+            'в консоли: window.__bulkApproveLastResults'
+          )
+        : '';
+
+    const txReplaceUnfinishedText =
+      txReplaceUnfinished.length > 0
+        ? `\n\n⚠ ЗАМЕНА TRANSACTION ID НЕ ЗАВЕРШИЛАСЬ (${txReplaceUnfinished.length}) — ` +
+          `скрипт тикет не закрыл, проверь, какой номер в нём стоит сейчас:\n` +
+          listWithTail(
+            txReplaceUnfinished,
+            (r) =>
+              `${r.ticketId} — было "${r.replacedTransactionId}", вписывали ` +
+              `"${r.attemptedTransactionId || r.transactionIdFilled || '?'}": ${describeReason(r.reason)}`,
+            'в консоли: window.__bulkApproveLastResults'
+          )
         : '';
 
     const txNotSavedText =
@@ -3075,6 +3152,9 @@
             (d) =>
               `${d.ticketId} — вписывали "${d.transactionId}"` +
               (d.ownerTicketId ? `, транзакция уже у обращения ${d.ownerTicketId}` : '') +
+              (d.replacedTransactionId
+                ? ` (переписывали по галочке — в тикете должен остаться "${d.replacedTransactionId}")`
+                : '') +
               (d.fromThisRun ? '' : ' (из прошлого прогона)'),
             'в блоке для копирования ниже (там все) и в консоли: window.__bulkApproveDuplicates'
           )
@@ -3087,7 +3167,9 @@
             txMismatchSkips,
             (r) => `${r.ticketId} — в тикете "${r.existingTransactionId}", в списке "${r.wantedTransactionId}" (видно по: ${r.detectedIn})`,
             'в консоли: window.__bulkApproveLastResults'
-          )
+          ) +
+          `\nЕсли номера в тикетах неверные — запусти этот же список ещё раз с галочкой ` +
+          `«Переписывать Transaction ID»: эти тикеты остались в «осталось» и будут взяты снова.`
         : '';
 
     const zeroAmountListText =
@@ -3180,6 +3262,9 @@
     if (txConfirmed.length > 0) {
       summaryLines.push(`  • из них с вписанным Transaction ID: ${txConfirmed.length}`);
     }
+    if (txReplaced.length > 0) {
+      summaryLines.push(`  • из них Transaction ID ПЕРЕПИСАН (было → стало ниже): ${txReplaced.length}`);
+    }
     if (txNotSaved.length > 0) {
       summaryLines.push(`  • ⚠ статус изменён, но Transaction ID НЕ сохранился: ${txNotSaved.length}`);
     }
@@ -3231,6 +3316,12 @@
     if (txMismatchSkips.length > 0) {
       summaryLines.push(
         `Пропущено (Transaction ID уже заполнен и отличается): ${txMismatchSkips.length}`
+      );
+    }
+    if (txReplaceUnfinished.length > 0) {
+      summaryLines.push(
+        `⚠ Замена Transaction ID не завершилась, тикет не закрыт: ${txReplaceUnfinished.length} ` +
+        `(они же посчитаны по своим причинам)`
       );
     }
     if (duplicateSkips.length > 0) {
@@ -3370,7 +3461,9 @@
       summaryLines.join('\n') +
       popupsListText +
       duplicateText +
+      txReplaceUnfinishedText +
       txNotSavedText +
+      txReplacedText +
       txFilledListText +
       txUnverifiedText +
       txMismatchText +
@@ -3502,6 +3595,11 @@
   // запрашивают. Вернётся в нужный статус — попадёт в новую выгрузку, а с
   // новым списком память начинается заново.
   let currentListDropped = null;
+  // Галочка «Переписывать Transaction ID» на этот прогон. Номер из списка
+  // заменяет ЛЮБОЙ другой номер в тикете — какой из номеров неверный, решает
+  // человек, собирая список, а не скрипт. Сбрасывается в начале каждого
+  // прогона и между запусками не запоминается: включать её надо осознанно.
+  let currentOverwriteTx = false;
 
   // Запись о дубле в том виде, в каком она лежит в памяти списка
   function duplicateRecord(r, fromThisRun) {
@@ -3510,6 +3608,7 @@
       transactionId: r.attemptedTransactionId || r.transactionId || '',
       ownerTicketId: r.ownerTicketId || null,
       popupText: r.popupText || '',
+      replacedTransactionId: r.replacedTransactionId || null,
       at: r.at || Date.now(),
       fromThisRun: !!fromThisRun,
     };
@@ -3836,6 +3935,43 @@
         autoRow.appendChild(autoText);
         body.appendChild(autoRow);
 
+        // Перезапись чужого номера. Только для режима с парами — в обычном
+        // 225 скрипт Transaction ID не трогает вовсе. Выключена по умолчанию
+        // и не запоминается: это единственное место, где скрипт стирает то,
+        // что в тикете уже было, и включать его надо на каждый прогон заново.
+        const overwriteBox = document.createElement('input');
+        overwriteBox.type = 'checkbox';
+        overwriteBox.className = 'bulk-approve-beta-overwrite-tx';
+        overwriteBox.checked = false;
+        overwriteBox.style.cssText = 'margin-top:3px;flex-shrink:0';
+
+        const overwriteWarn = document.createElement('div');
+        overwriteWarn.className = 'bulk-approve-beta-overwrite-warning';
+        overwriteWarn.style.cssText =
+          'display:none;margin:6px 0 0 24px;color:#B00020;font-weight:600';
+        overwriteWarn.textContent =
+          'Номер из списка заменит ЛЮБОЙ другой Transaction ID, который уже стоит в тикете. ' +
+          'Включай, только если в списке точно правильные номера. Все замены будут в отчёте: ' +
+          '«было → стало».';
+
+        if (needsPairs) {
+          const overwriteRow = document.createElement('label');
+          overwriteRow.style.cssText =
+            'display:flex;gap:8px;align-items:flex-start;margin-top:10px;cursor:pointer';
+          const overwriteText = document.createElement('div');
+          overwriteText.style.cssText = 'color:#333';
+          overwriteText.textContent =
+            'Переписывать Transaction ID, если в тикете стоит другой номер. ' +
+            'Без галочки такие тикеты пропускаются и ничего в них не меняется.';
+          overwriteRow.appendChild(overwriteBox);
+          overwriteRow.appendChild(overwriteText);
+          body.appendChild(overwriteRow);
+          body.appendChild(overwriteWarn);
+          overwriteBox.addEventListener('change', () => {
+            overwriteWarn.style.display = overwriteBox.checked ? 'block' : 'none';
+          });
+        }
+
         const status = document.createElement('div');
         status.style.cssText = 'margin-top:10px;white-space:pre-wrap';
         body.appendChild(status);
@@ -4001,7 +4137,7 @@
         cancelBtn.addEventListener('click', () => finish(null));
         screenBtn.addEventListener('click', () => {
           if (screenBtn.disabled) return;
-          finish({ pairs: null, state: null, autopilot: false });
+          finish({ pairs: null, state: null, autopilot: false, overwriteTx: false });
         });
         runBtn.addEventListener('click', () => {
           if (runBtn.disabled) return;
@@ -4021,6 +4157,7 @@
             pairs: parsed.pairs,
             state,
             autopilot: autoBox.checked && !autoBox.disabled,
+            overwriteTx: needsPairs && overwriteBox.checked,
           });
         });
 
