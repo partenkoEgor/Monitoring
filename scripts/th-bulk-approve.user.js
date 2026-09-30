@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (225)
 // @namespace    th-management-bulk-approve
-// @version      2.10
-// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent"; "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Есть кнопка СТОП.
+// @version      2.12
+// @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -39,6 +39,66 @@
     // С какого возраста тикет считается зависшим (часы). Возраст берётся из
     // колонки Processing Date и считается на момент обработки тикета.
     staleAfterHours: 24,
+
+    // ── Догрузка данных после ввода Transaction ID ────────────────────
+    // Вписав номер транзакции, сайт идёт за её данными и дозаполняет
+    // остальные поля окна. Трогать Status до конца этой загрузки нельзя:
+    // ответ сервера перетирает выбранный статус.
+    //
+    // Замеры на боевой странице (дважды, разброс менее 50 мс): сайт шлёт ДВЕ
+    // независимые волны запросов от одного события ввода — первую примерно
+    // через 500 мс, вторую примерно через 3000 мс, и между ними 2,4 секунды
+    // полной тишины. Поэтому ждать «тишину после последнего ответа» нельзя:
+    // она закончилась бы ровно в этом разрыве.
+    transactionLoadEndpoints: [
+      'checkPaymentSupportRequestByTrxId', // занята ли транзакция другим тикетом
+      'getTransactionInfo',
+      'GetSubAgentInfo',
+    ],
+    // Ждём ИМЕННО этот запрос, а не время. Два замера одинаково показали
+    // старт второй волны около 3000 мс от ввода, но теми же данными не
+    // отличается гипотеза «волна идёт от ответа первой» — в обоих замерах
+    // первая ответила одинаково быстро. Если верна вторая гипотеза, на
+    // тикете с медленным сервером волна уедет дальше любого разумного
+    // порога. Ожидание самого запроса снимает вопрос целиком.
+    transactionLoadSecondWave: 'getTransactionInfo',
+    // Своя граница для второй волны: у тикета с несуществующей транзакцией
+    // её может не быть вовсе, и без отдельного срока такой тикет висел бы
+    // весь transactionLoadTimeout.
+    transactionLoadSecondWaveTimeout: 8000,
+    // Нижняя граница от момента ввода — страховка на случай, не учтённый выше
+    transactionLoadSettleAfterInput: 5000,
+    // И не раньше этого с последнего ответа
+    transactionLoadQuietPeriod: 800,
+    // Сколько ждать ПЕРВОГО запроса. Не ушёл — значит сайт не увидел ввод
+    transactionLoadFirstRequestTimeout: 3000,
+    // Жёсткий потолок ожидания догрузки
+    transactionLoadTimeout: 20000,
+    // Как часто перепроверять журнал, пока ждём
+    transactionLoadPollInterval: 150,
+
+    // ── Автопилот: скрипт сам набирает пачки тикетов в фильтр ─────────
+    // Ровно столько тикетов умещается на одну страницу выдачи. Больше —
+    // и сайт включает пагинацию, а ею пользоваться нельзя: страницы
+    // нестабильны, и прогон по ним молча терял бы тикеты.
+    autopilotChunkSize: 100,
+    // Сколько ждать, пока таблица перестроится после Apply
+    autopilotTableTimeout: 40000,
+    // Не раньше этого от нажатия Apply. Vue сносит старую таблицу не
+    // мгновенно, и без этой паузы мы приняли бы ещё не тронутую выдачу
+    // предыдущей пачки за новую.
+    autopilotTableSettleMin: 1500,
+    // Столько состав таблицы не должен меняться, чтобы считать её готовой
+    autopilotTableQuietPeriod: 1000,
+    // Пустая выдача — законный исход (в пачке нет ни одного живого тикета),
+    // но отличить её от «ещё грузится» можно только временем
+    autopilotEmptyConfirm: 8000,
+    // Столько пустых пачек подряд — и прогон останавливается. Триста
+    // тикетов подряд, которых сайт не показал, — это сломанный фильтр,
+    // а не совпадение.
+    autopilotMaxEmptyChunks: 3,
+    // Пауза между пачками
+    autopilotBetweenChunksDelay: 1500,
   };
 
   // ------------------------------------------------------------------
@@ -46,6 +106,13 @@
   // какие тикеты брать (по External Status) и в какой статус их переводить.
   // Кнопка на экране создаётся по одной на каждый workflow.
   // ------------------------------------------------------------------
+  // Один и тот же матчер статуса используют два режима — обычный 225 и 225
+  // по списку. Держим его в одном месте, чтобы копии не разъехались.
+  const MATCH_225 = (text) => {
+    const t = text.trim().toLowerCase();
+    return t.includes('225') && t.includes('approved by agent');
+  };
+
   const WORKFLOWS = [
     {
       id: '225',
@@ -55,13 +122,15 @@
       // (без учёта регистра, лишних пробелов и числового кода в начале —
       // см. normalizeExternalStatus). Остальные тикеты пропускаются.
       requiredExternalStatuses: ['Approved (M)'],
+      // Перед прогоном спрашиваем список Ticket ID. Он НЕ обязателен: в
+      // окне есть «Запустить по экрану» — прежнее поведение этой кнопки.
+      // Со списком включается автопилот, и скрипт сам набирает тикеты в
+      // фильтр страницы пачками, как в режиме «по списку (225)».
+      allowTicketIdList: true,
       // Текст, который печатается в поле поиска статуса (как это делает человек)
       searchTerm: '225',
       // Текст, который должен встречаться в опции статуса (нечувствительно к регистру)
-      statusMatch: (text) => {
-        const t = text.trim().toLowerCase();
-        return t.includes('225') && t.includes('approved by agent');
-      },
+      statusMatch: MATCH_225,
       // Только для текста в диалогах подтверждения/отчёта
       targetStatusLabel: '225 Approved by agent',
     },
@@ -104,6 +173,24 @@
       // уходит в список для ручной проверки.
       fillAmountFromTransaction: true,
     },
+    {
+      // Тикеты, которые надо закрыть как 225, но у которых не заполнен
+      // Transaction ID — сайт без него закрыть не даст. Номера транзакций
+      // оператор приносит списком «Ticket ID → Transaction ID» из своей
+      // таблицы; скрипт спрашивает этот список перед прогоном.
+      //
+      // Отбор двойной: тикет должен быть И в списке, И в нужном External
+      // Status. Список сам по себе — данные, набранные руками, и опечатка в
+      // номере не должна закрывать случайный тикет.
+      id: '225-list',
+      buttonLabel: 'Bulk Approve по списку (225)',
+      buttonColor: '#E0A02C',
+      requiredExternalStatuses: ['Approved (M)'],
+      searchTerm: '225',
+      statusMatch: MATCH_225,
+      targetStatusLabel: '225 Approved by agent',
+      fillTransactionIdFromList: true,
+    },
   ];
 
   // Общее состояние выполнения (используется кнопкой СТОП)
@@ -131,6 +218,28 @@
     'transaction-not-rejected': 'транзакция не в статусе rejected — тикет не открывали',
     'no-transaction-status-column':
       'не удалось прочитать колонку Transaction Status — не с чем сверять, тикет не открывали',
+    // У этой причины есть своя строка в сводке, но формулировка нужна и здесь:
+    // в режиме по списку такой тикет попадает в список «посмотреть глазами».
+    'wrong-external-status': 'External Status тикета не подходит для этого режима — не трогали',
+    'not-in-list': 'тикета нет в поданном списке — не трогали',
+    'transaction-id-mismatch':
+      'Transaction ID уже заполнен, и не тем номером, что в списке — ничего не меняли, нужна ручная проверка',
+    'no-transaction-id-field': 'в окне нет поля Transaction ID — вписать некуда',
+    'popup-before-apply':
+      'перед Apply на экране висело окно сайта — Apply не нажимали, тикет не тронут',
+    'transaction-duplicate-known':
+      'в прошлом прогоне сайт сказал, что транзакция занята другим обращением — тикет не открывали',
+    'transaction-duplicate':
+      'сайт сказал, что эта транзакция уже занята другим обращением — статус НЕ меняли, ' +
+      'Apply НЕ нажимали, тикет нужно разобрать руками',
+    'unknown-popup':
+      'сайт показал незнакомое окно — статус НЕ меняли, Apply НЕ нажимали, прогон остановлен',
+    'transaction-id-not-accepted':
+      'сайт не принял вписанный Transaction ID (поле сбросилось) — статус не меняли',
+    'transaction-load-not-started':
+      'сайт не среагировал на вписанный Transaction ID (не ушёл ни один запрос) — статус не меняли',
+    'transaction-load-timeout':
+      'сайт не закончил догружать данные транзакции — статус не меняли, проверь вручную',
     'no-amount-receipt-field': 'в окне нет поля Amount by receipt — сумму вписать некуда',
     'amount-format-unclear': 'не понял формат суммы в Transaction Amount — не стал рисковать и вписывать',
     'amount-not-accepted': 'сайт не принял вписанную сумму (поле сбросилось) — ничего не меняли, проверь вручную',
@@ -144,12 +253,143 @@
     exception: 'непредвиденная ошибка скрипта (подробности в консоли)',
   };
 
+  // Закрыт ли тикет из списка. Один предикат на живой счётчик в панели и на
+  // итоговый отчёт: две копии этого условия однажды разойдутся, и человек
+  // увидит в панели одно число, а в отчёте другое.
+  //
+  // «Вписали, но не проверили» закрытым НЕ считается: непроверенный тикет
+  // должен остаться в списке и попасть под следующий прогон.
+  function isListTicketClosed(result) {
+    return (
+      result.status === 'success' &&
+      result.txVerified !== 'not-saved' &&
+      result.txVerified !== 'unverified'
+    );
+  }
+
   function describeReason(reason) {
     return REASON_LABELS[reason] || `неизвестная причина: ${reason}`;
   }
 
   // Спец. класс ошибки, которым прерываем цепочку await'ов при нажатии СТОП
   class StopSignal extends Error {}
+
+  // ------------------------------------------------------------------
+  // ЖУРНАЛ СЕТЕВЫХ ЗАПРОСОВ.
+  //
+  // Нужен ровно для одного: поймать момент, когда сайт закончил догружать
+  // данные после ввода Transaction ID. По DOM это не ловится — между вводом
+  // и обновлением полей 3,6 секунды тишины, а само обновление может свестись
+  // к паре секунд в поле даты, которых на другом тикете не будет вовсе.
+  //
+  // Обёртка СТРОГО пассивная: отмечает старт и финиш, возвращает ровно то,
+  // что вернул оригинал, не трогает аргументы и не глотает ошибки.
+  // ------------------------------------------------------------------
+  const requestLog = { seq: 0, entries: [] };
+  const MAX_REQUEST_LOG = 200;
+
+  function noteRequestStart(url) {
+    const entry = {
+      id: ++requestLog.seq,
+      url: String(url == null ? '' : url),
+      startedAt: Date.now(),
+      finishedAt: null,
+    };
+    requestLog.entries.push(entry);
+    if (requestLog.entries.length > MAX_REQUEST_LOG) {
+      requestLog.entries.splice(0, requestLog.entries.length - MAX_REQUEST_LOG);
+    }
+    return entry;
+  }
+
+  function installRequestLog() {
+    // Флаг-часовой: при повторной инъекции скрипта две обёртки поверх друг
+    // друга давали бы двойные записи.
+    if (window.__bulkApproveRequestLogInstalled) return;
+    window.__bulkApproveRequestLogInstalled = true;
+
+    const origOpen = XMLHttpRequest.prototype.open;
+    const origSend = XMLHttpRequest.prototype.send;
+
+    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+      try {
+        this.__bulkApproveUrl = url;
+      } catch (e) {
+        /* журнал не имеет права мешать запросу */
+      }
+      return origOpen.call(this, method, url, ...rest);
+    };
+
+    XMLHttpRequest.prototype.send = function (...args) {
+      try {
+        const entry = noteRequestStart(this.__bulkApproveUrl);
+        this.addEventListener('loadend', () => {
+          entry.finishedAt = Date.now();
+        });
+      } catch (e) {
+        /* см. выше */
+      }
+      return origSend.apply(this, args);
+    };
+
+    const origFetch = window.fetch;
+    if (typeof origFetch === 'function') {
+      window.fetch = function (input, ...rest) {
+        let entry = null;
+        try {
+          entry = noteRequestStart(input && input.url ? input.url : input);
+        } catch (e) {
+          /* см. выше */
+        }
+        const done = () => {
+          if (entry) entry.finishedAt = Date.now();
+        };
+        let result;
+        try {
+          result = origFetch.call(this, input, ...rest);
+        } catch (e) {
+          done();
+          throw e;
+        }
+        if (result && typeof result.then === 'function') {
+          // Возвращаем ИСХОДНЫЙ промис: цепочка вызывающего не меняется
+          result.then(done, done);
+        } else {
+          done();
+        }
+        return result;
+      };
+    }
+  }
+
+  // Отметка «сейчас» в журнале: всё, что стартовало позже неё, относится к
+  // текущему шагу, а не к тому, что висело на странице раньше.
+  function requestLogMark() {
+    return requestLog.seq;
+  }
+
+  function matchesEndpoint(url, needle) {
+    // Пустой адрес — не совпадение ни с чем. В замерах попадался запрос,
+    // у которого URL не прочитался; такие просто не считаются отслеживаемыми
+    // и не должны ронять ожидание.
+    return url !== '' && url.toLowerCase().includes(String(needle).toLowerCase());
+  }
+
+  // Сколько запросов, начатых после отметки, ещё не завершились. В отличие
+  // от trackedRequestsSince здесь не важно, куда запрос шёл: за выдачей
+  // таблицы сайт ходит с пустым URL (проверено на боевой странице), и
+  // опознать этот запрос по адресу невозможно — считаем любые.
+  function requestsInFlightSince(mark) {
+    return requestLog.entries.filter((e) => e.id > mark && e.finishedAt === null).length;
+  }
+
+  function trackedRequestsSince(mark) {
+    return requestLog.entries.filter(
+      (e) =>
+        e.id > mark &&
+        CONFIG.transactionLoadEndpoints.some((needle) => matchesEndpoint(e.url, needle))
+    );
+  }
 
   function checkStop() {
     if (state.stopRequested) {
@@ -201,6 +441,38 @@
       /^ok$/i.test(confirmText);
 
     return { icon, title, content, confirmBtn, cancelBtn, hasCancel, isKnownSuccessDismiss };
+  }
+
+  // Известное окно сайта: «Обращение с этим номером транзакции уже создано: N».
+  // Иконка question, кнопка подтверждения копирует номер в буфер обмена
+  // (подписана Copy / Copy ticket number), рядом кнопка закрытия
+  // (Cancel / Close). Нажимать кнопку копирования нельзя: буфер нужен
+  // человеку для вставки списков, и затирать его посреди прогона мы не
+  // вправе. Безопасное закрытие здесь — именно вторая кнопка.
+  //
+  // Сайт двуязычный и показывает то русскую, то английскую версию одного и
+  // того же окна. Здесь перечислены только те формулировки, которые реально
+  // видели на боевой странице: окно, не подошедшее ни под одну, считается
+  // незнакомым и останавливает прогон. Добавлять сюда догадки нельзя — цена
+  // ложного совпадения в том, что скрипт сам закроет чужой вопрос.
+  //
+  // На кнопки смотрим по классам SweetAlert2 (.swal2-cancel), а не по
+  // подписям, поэтому смена языка кнопок ничего не ломает.
+  const DUPLICATE_POPUP_PATTERNS = [
+    /номером\s+транзакции\s+уже\s+создано/i,
+    /транзакци[яю]\s+уже\s+использует/i,
+    /transfer\s+number\s+has\s+already\s+been\s+created/i,
+  ];
+
+  function isDuplicateTransactionPopup(info) {
+    const text = `${info.title} ${info.content}`;
+    return DUPLICATE_POPUP_PATTERNS.some((re) => re.test(text));
+  }
+
+  // Номер обращения, которое уже держит эту транзакцию
+  function extractOwnerTicketId(info) {
+    const match = `${info.title} ${info.content}`.match(/(\d{5,})/);
+    return match ? match[1] : null;
   }
 
   const swalObserver = new MutationObserver(() => {
@@ -315,6 +587,69 @@
     });
   }
 
+  // Ждёт, пока сайт закончит догружать данные после ввода Transaction ID.
+  //
+  // mark    — отметка журнала, снятая ДО ввода
+  // inputAt — момент ввода (от него считаются все сроки)
+  //
+  // Возвращает { ok: true, secondWaveMissing } либо { ok: false, reason }.
+  // Вся логика ожидания живёт здесь одна: если тайминги сайта изменятся,
+  // править надо только эту функцию и константы в CONFIG.
+  async function waitForTransactionDataLoaded(mark, inputAt) {
+    const firstEndpoint = CONFIG.transactionLoadEndpoints[0];
+    const secondEndpoint = CONFIG.transactionLoadSecondWave;
+
+    // Первая волна обязана уйти. Если её нет — сайт не увидел наш ввод, и
+    // это самый опасный исход из возможных: пойти дальше означало бы менять
+    // статус тикету, которому мы на самом деле ничего не вписали.
+    try {
+      await waitFor(
+        () => trackedRequestsSince(mark).some((e) => matchesEndpoint(e.url, firstEndpoint)),
+        CONFIG.transactionLoadFirstRequestTimeout
+      );
+    } catch (e) {
+      if (e instanceof StopSignal) throw e;
+      return { ok: false, reason: 'transaction-load-not-started' };
+    }
+
+    const hardDeadline = inputAt + CONFIG.transactionLoadTimeout;
+    const secondWaveDeadline = inputAt + CONFIG.transactionLoadSecondWaveTimeout;
+    let secondWaveSeen = false;
+    let secondWaveMissing = false;
+
+    for (;;) {
+      checkStop();
+
+      const now = Date.now();
+      const tracked = trackedRequestsSince(mark);
+      const inFlight = tracked.filter((e) => e.finishedAt === null);
+      const finished = tracked.filter((e) => e.finishedAt !== null);
+      const lastFinishedAt = finished.reduce((max, e) => Math.max(max, e.finishedAt), 0);
+
+      if (!secondWaveSeen) {
+        secondWaveSeen = finished.some((e) => matchesEndpoint(e.url, secondEndpoint));
+      }
+      // Второй волны может не быть вовсе — например, если транзакция не
+      // найдена. Тогда через свой срок идём дальше, но помечаем результат:
+      // молчать об этом нельзя.
+      if (!secondWaveSeen && !secondWaveMissing && now >= secondWaveDeadline) {
+        secondWaveMissing = true;
+      }
+
+      const settled =
+        (secondWaveSeen || secondWaveMissing) &&
+        now - inputAt >= CONFIG.transactionLoadSettleAfterInput &&
+        inFlight.length === 0 &&
+        lastFinishedAt > 0 &&
+        now - lastFinishedAt >= CONFIG.transactionLoadQuietPeriod;
+
+      if (settled) return { ok: true, secondWaveMissing };
+      if (now >= hardDeadline) return { ok: false, reason: 'transaction-load-timeout' };
+
+      await interruptibleSleep(CONFIG.transactionLoadPollInterval);
+    }
+  }
+
   function fireClick(el) {
     if (!el) return;
     el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
@@ -322,17 +657,36 @@
     el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
   }
 
-  // Записывает значение в <input> так, чтобы Vue его заметил. Простое
+  // Записывает значение в поле ввода так, чтобы Vue его заметил. Простое
   // input.value = x реактивность не тронет: нужно звать нативный сеттер
   // (иначе перехватчик Vue не сработает) и разослать input + change.
+  //
+  // Прототип выбирается по тегу не для красоты: сеттер HTMLInputElement,
+  // позванный на <textarea>, падает с "Illegal invocation". Поле фильтра
+  // «Ticket ID» на странице — именно textarea.
   function setInputValue(input, value) {
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype,
-      'value'
-    ).set;
-    nativeInputValueSetter.call(input, value);
+    const proto =
+      input.tagName === 'TEXTAREA'
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype;
+    const nativeValueSetter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+    nativeValueSetter.call(input, value);
     input.dispatchEvent(new Event('input', { bubbles: true }));
     input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  // Виден ли элемент. Намеренно НЕ через offsetParent: блок быстрых
+  // фильтров прячется через style="display: none" на родителе, и проверять
+  // надо именно цепочку родителей.
+  function isElementVisible(el) {
+    if (!el) return false;
+    let node = el;
+    while (node && node.nodeType === 1) {
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      node = node.parentElement;
+    }
+    return true;
   }
 
   function getOpenModal() {
@@ -557,6 +911,29 @@
     return cell ? cell.textContent.trim() : '';
   }
 
+  // Номер колонки Transaction ID строго по названию, БЕЗ резервного номера.
+  // Отличается от getTransactionIdFromRow намеренно: там резервный индекс 11
+  // уместен (привязка пойманных окон к тикету — не критичное решение), а
+  // здесь по значению решается, перезаписывать ли номер транзакции. Прочитать
+  // не ту колонку и на этом основании что-то решить — недопустимо.
+  function getTransactionIdColumnIndex() {
+    const exact = getColumnIndex('transaction id');
+    if (exact) return exact;
+    if (!columnIndexMap) return null;
+    const key = Object.keys(columnIndexMap).find(
+      (name) => name.includes('transaction') && name.includes('id')
+    );
+    return key ? columnIndexMap[key] : null;
+  }
+
+  // Текст колонки Transaction ID, либо null, если колонку не нашли по имени.
+  function getTransactionIdByName(row) {
+    const idx = getTransactionIdColumnIndex();
+    if (!idx) return null;
+    const cell = row.querySelector(`td:nth-child(${idx})`);
+    return cell ? cell.textContent.trim() : null;
+  }
+
   // Превращает текст денежной ячейки в число: убирает валютные символы,
   // пробелы и разделители тысяч. Возвращает null, если разобрать не вышло
   // (ячейка пустая или там не число).
@@ -687,6 +1064,221 @@
   }
 
   // Находит .input-group внутри модалки, где <span class="title"> точно равен label
+  // ------------------------------------------------------------------
+  // АВТОПИЛОТ: скрипт сам подставляет тикеты в фильтр сайта пачками.
+  //
+  // Раньше режим «по списку» работал только с тем, что оператор уже вывел
+  // на экран: вставил сотню номеров в поиск, нажал Apply, запустил прогон,
+  // дождался, вставил следующую сотню. На списке в пятьсот тикетов это пять
+  // ручных заходов, между которыми прогон стоит и ждёт человека.
+  //
+  // Здесь тот же цикл делает скрипт. Пачка — ровно autopilotChunkSize: это
+  // предел одной страницы выдачи, а пагинацией пользоваться нельзя
+  // (страницы нестабильны, прогон по ним терял бы тикеты молча).
+  // ------------------------------------------------------------------
+
+  // Поле фильтра «Ticket ID» — textarea, номера в нём разделяются переводом
+  // строки. Сначала ищем внутри формы фильтров, потом по всей странице:
+  // форма может называться иначе, а плейсхолдер у поля уникален.
+  function getTicketIdFilterInput() {
+    return (
+      document.querySelector('#filter_form textarea[placeholder="Ticket ID"]') ||
+      document.querySelector('textarea[placeholder="Ticket ID"]')
+    );
+  }
+
+  function getFilterApplyButton() {
+    return (
+      document.querySelector('#filter_form .btn-block button[type="submit"]') ||
+      document.querySelector('#filter_form button[type="submit"]')
+    );
+  }
+
+  // Кнопка, раскрывающая блок быстрых фильтров. Ищем по подписи, а не по
+  // порядковому номеру: рядом стоят ещё «Filters» и «Column settings».
+  function getQuickFiltersToggle() {
+    return Array.from(document.querySelectorAll('button.btn-settings-columns')).find((b) =>
+      /quick\s*filters/i.test(b.textContent || '')
+    );
+  }
+
+  // Чего не хватает для автопилота. Пустой массив — всё на месте.
+  function autopilotMissingControls() {
+    const missing = [];
+    if (!getTicketIdFilterInput()) missing.push('поле фильтра «Ticket ID»');
+    if (!getFilterApplyButton()) missing.push('кнопка Apply у фильтров');
+    return missing;
+  }
+
+  function chunkArray(items, size) {
+    const out = [];
+    for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+    return out;
+  }
+
+  // Состав таблицы одной строкой — по нему видно, перестроилась она или нет.
+  // Берём текст ячеек, а не номера тикетов: номер читается через карту
+  // колонок, которая на момент перестройки может быть ещё старой.
+  function tableSignature() {
+    return getTicketRows()
+      .map((row) => row.textContent.replace(/\s+/g, ' ').trim())
+      .join('§');
+  }
+
+  // Ждёт, пока сайт перестроит таблицу после Apply.
+  //
+  // Ориентируемся на состав таблицы, а не на запросы: запрос за выдачей
+  // уходит с пустым URL (проверено на боевой странице), и отличить его от
+  // любого другого нечем.
+  //
+  // Возвращает { ok: true, empty } либо { ok: false, reason }.
+  async function waitForTableAfterApply(mark, clickedAt) {
+    const hardDeadline = clickedAt + CONFIG.autopilotTableTimeout;
+    let lastSignature = null;
+    let stableSince = 0;
+
+    for (;;) {
+      checkStop();
+
+      const now = Date.now();
+      const signature = tableSignature();
+      const rowCount = getTicketRows().length;
+
+      if (signature !== lastSignature) {
+        lastSignature = signature;
+        stableSince = now;
+      }
+
+      const settledLongEnough = now - clickedAt >= CONFIG.autopilotTableSettleMin;
+      // Пустая таблица и «таблица ещё грузится» выглядят на экране одинаково,
+      // поэтому пустой выдаче нужен свой, более длинный срок И отсутствие
+      // незакрытых запросов. Ошибиться здесь не страшно — тикеты такой пачки
+      // остаются в памяти списка и попадут в следующий прогон, — но обидно,
+      // и лишняя проверка стоит дёшево.
+      const quietLongEnough =
+        now - stableSince >=
+        (rowCount === 0 ? CONFIG.autopilotEmptyConfirm : CONFIG.autopilotTableQuietPeriod);
+      const nothingPending = rowCount > 0 || requestsInFlightSince(mark) === 0;
+
+      if (settledLongEnough && quietLongEnough && nothingPending) {
+        return { ok: true, empty: rowCount === 0 };
+      }
+      if (now >= hardDeadline) return { ok: false, reason: 'table-timeout' };
+
+      await interruptibleSleep(200);
+    }
+  }
+
+  // Подставляет пачку номеров в фильтр и дожидается новой выдачи.
+  //
+  // Возвращает { ok: true, ticketIds } либо { ok: false, reason, detail },
+  // где reason — код для сообщения об остановке прогона.
+  async function applyTicketIdFilter(ticketIds, workflow) {
+    const log = `[BulkApprove/${workflow.id}]`;
+
+    const area = getTicketIdFilterInput();
+    if (!area) return { ok: false, reason: 'no-filter-input' };
+
+    const applyBtn = getFilterApplyButton();
+    if (!applyBtn) return { ok: false, reason: 'no-apply-button' };
+
+    // Блок быстрых фильтров может быть свёрнут. Поле при этом в DOM есть, но
+    // скрыто — писать в скрытое поле сайт, скорее всего, примет, однако
+    // проверить это нечем, а разворачивать блок дёшево.
+    if (!isElementVisible(area)) {
+      const toggle = getQuickFiltersToggle();
+      if (!toggle) return { ok: false, reason: 'quick-filters-collapsed' };
+      console.log(`${log} Блок быстрых фильтров свёрнут — раскрываю.`);
+      fireClick(toggle);
+      try {
+        await waitFor(() => isElementVisible(getTicketIdFilterInput()), 5000);
+      } catch (e) {
+        if (e instanceof StopSignal) throw e;
+        return { ok: false, reason: 'quick-filters-collapsed' };
+      }
+    }
+
+    const text = ticketIds.join('\n');
+    setInputValue(area, text);
+
+    // Читаем обратно. Это не тавтология из 2.7: там мы проверяли собственную
+    // запись в поле, значение которого потом всё равно уходило из Vue-модели.
+    // Здесь поле — вход фильтра, и если сайт его подрезал (маска, лимит
+    // длины), то в выдачу уедет не тот набор тикетов, а узнать об этом после
+    // Apply будет уже неоткуда.
+    const readBack = String(area.value == null ? '' : area.value);
+    const missing = ticketIds.filter((id) => !readBack.includes(id));
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        reason: 'filter-value-rejected',
+        detail: `в поле не оказалось ${missing.length} из ${ticketIds.length} номеров`,
+      };
+    }
+
+    console.log(`${log} Подставил в фильтр ${ticketIds.length} тикетов, жму Apply.`);
+    const mark = requestLogMark();
+    const clickedAt = Date.now();
+    fireClick(applyBtn);
+
+    const waited = await waitForTableAfterApply(mark, clickedAt);
+    if (!waited.ok) return { ok: false, reason: waited.reason };
+
+    // Набор колонок после перестройки теоретически тот же, но карта колонок
+    // снималась до Apply и с тех пор пережила полное пересоздание таблицы.
+    // Перечитать её дешевле, чем однажды прочитать номер тикета из чужой
+    // колонки.
+    refreshColumnIndexMap();
+
+    if (waited.empty) {
+      console.warn(`${log} По этой пачке сайт не показал ни одного тикета.`);
+      return { ok: true, ticketIds: [] };
+    }
+
+    const shown = getTicketRows().map((row) => getTicketIdFromRow(row));
+    const asked = new Set(ticketIds);
+    const strangers = shown.filter((id) => !asked.has(id));
+
+    // Главная страховка автопилота. Если в выдаче есть хоть один тикет, о
+    // котором мы не спрашивали, значит фильтр не применился — и мы сейчас
+    // собираемся обрабатывать чужую выборку. Такое должно останавливать
+    // прогон, а не пролезать в отчёт строкой статистики.
+    if (strangers.length > 0) {
+      return {
+        ok: false,
+        reason: 'filter-not-applied',
+        detail:
+          `в выдаче ${strangers.length} тикетов, которых не было в пачке ` +
+          `(например ${strangers.slice(0, 3).join(', ')})`,
+      };
+    }
+
+    console.log(`${log} Сайт показал ${shown.length} тикетов из ${ticketIds.length} запрошенных.`);
+    return { ok: true, ticketIds: shown };
+  }
+
+  // Формулировки для остановок автопилота. Держим рядом с кодами, которые
+  // возвращает applyTicketIdFilter.
+  function describeAutopilotFailure(reason, detail) {
+    const tail = detail ? ` (${detail})` : '';
+    switch (reason) {
+      case 'no-filter-input':
+        return 'на странице не нашлось поле фильтра «Ticket ID» — подставить пачку некуда';
+      case 'no-apply-button':
+        return 'на странице не нашлась кнопка Apply у фильтров — применить пачку нечем';
+      case 'quick-filters-collapsed':
+        return 'блок быстрых фильтров свёрнут, и раскрыть его не удалось';
+      case 'filter-value-rejected':
+        return `сайт не принял список номеров в поле фильтра${tail}`;
+      case 'table-timeout':
+        return `таблица не перестроилась за ${CONFIG.autopilotTableTimeout / 1000} с после Apply`;
+      case 'filter-not-applied':
+        return `фильтр не применился${tail} — обрабатывать эту выдачу нельзя`;
+      default:
+        return `не удалось подставить пачку (${reason})`;
+    }
+  }
+
   function findFieldGroup(modal, label) {
     const groups = modal.querySelectorAll('.form-add .input-group');
     for (const g of groups) {
@@ -749,7 +1341,18 @@
   //   'not-saved'  — сумма не сохранилась или сохранилась другой;
   //   'unverified' — проверить не удалось (строки нет, окно не открылось и т.п.).
   // ------------------------------------------------------------------
-  async function verifyAmountSaved(ticketId, expectedAmount, workflow) {
+  // Общая проверка «значение действительно сохранилось», одна на все поля.
+  //
+  // Родилась из verifyAmountSaved (2.7) — там же описана причина её
+  // существования: чтение того же input.value, который мы сами и записали,
+  // не доказывает ничего, потому что на Apply уходит модель Vue. Настоящая
+  // проверка возможна только ПОСЛЕ Apply.
+  //
+  // Параметры различий между полями всего три: чем читать из строки таблицы,
+  // как сравнивать и как называется поле в окне.
+  async function verifyFieldSaved(opts) {
+    const { ticketId, workflow, fieldLabel, expected, readFromRow, isSame, rowSourceName } = opts;
+
     let row;
     try {
       // Таблица после Apply обычно перечитывается — даём строке вернуться
@@ -759,13 +1362,13 @@
       return { verdict: 'unverified', note: 'строка пропала из таблицы после сохранения' };
     }
 
-    // Быстрый путь: сумма уже видна в списке — значит, сервер её принял
-    const rowAmount = getAmountFromRow(row);
-    if (rowAmount && sameAmount(rowAmount.raw, expectedAmount)) {
-      return { verdict: 'saved', storedAmount: rowAmount.raw, note: 'подтверждено по колонке Amount' };
+    // Быстрый путь: значение уже видно в списке — значит, сервер его принял
+    const rowValue = readFromRow(row);
+    if (rowValue !== null && rowValue !== '' && isSame(rowValue, expected)) {
+      return { verdict: 'saved', stored: rowValue, note: `подтверждено по ${rowSourceName}` };
     }
 
-    // Путь сомнения: в списке по-прежнему ноль — но это может быть и просто
+    // Путь сомнения: в списке по-прежнему не то — но это может быть и просто
     // неперечитанная таблица. Открываем тикет и смотрим само поле.
     const editLink = getEditLinkFromRow(row);
     if (!editLink) {
@@ -784,7 +1387,7 @@
       }
 
       // Та же паранойя, что и в основном проходе: читать чужое окно нельзя,
-      // иначе можно объявить сумму сохранённой по данным другого тикета.
+      // иначе можно объявить значение сохранённым по данным другого тикета.
       let modalTicketId;
       try {
         modalTicketId = await waitFor(() => getModalTicketId(modal));
@@ -799,27 +1402,27 @@
         };
       }
 
-      let amountGroup;
+      let group;
       try {
-        amountGroup = await waitFor(() => findFieldGroup(modal, 'Amount by receipt'));
+        group = await waitFor(() => findFieldGroup(modal, fieldLabel));
       } catch (e) {
         if (e instanceof StopSignal) throw e;
-        return { verdict: 'unverified', note: 'в окне проверки нет поля Amount by receipt' };
+        return { verdict: 'unverified', note: `в окне проверки нет поля ${fieldLabel}` };
       }
 
-      const amountInput = amountGroup.querySelector(
+      const input = group.querySelector(
         'input.mx-input, input[type="text"]:not(.multiselect__input)'
       );
-      const storedAmount = amountInput ? amountInput.value.trim() : '';
+      const stored = input ? input.value.trim() : '';
 
-      if (sameAmount(storedAmount, expectedAmount)) {
-        return { verdict: 'saved', storedAmount, note: 'подтверждено по полю в окне' };
+      if (stored !== '' && isSame(stored, expected)) {
+        return { verdict: 'saved', stored, note: 'подтверждено по полю в окне' };
       }
 
       return {
         verdict: 'not-saved',
-        storedAmount,
-        note: storedAmount === '' ? 'поле пустое' : `в поле "${storedAmount}"`,
+        stored,
+        note: stored === '' ? 'поле пустое' : `в поле "${stored}"`,
       };
     } finally {
       // Окно проверки обязано закрыться при ЛЮБОМ исходе: незакрытая модалка
@@ -837,6 +1440,36 @@
         }
       }
     }
+  }
+
+  function verifyAmountSaved(ticketId, expectedAmount, workflow) {
+    return verifyFieldSaved({
+      ticketId,
+      workflow,
+      fieldLabel: 'Amount by receipt',
+      expected: expectedAmount,
+      readFromRow: (row) => {
+        const amount = getAmountFromRow(row);
+        return amount ? amount.raw : null;
+      },
+      isSame: sameAmount,
+      rowSourceName: 'колонке Amount',
+    });
+  }
+
+  function verifyTransactionIdSaved(ticketId, expected, workflow) {
+    return verifyFieldSaved({
+      ticketId,
+      workflow,
+      fieldLabel: 'Transaction ID',
+      expected,
+      // Только по названию колонки: прочитать чужую и объявить сохранение
+      // хуже, чем лишний раз переоткрыть окно.
+      readFromRow: getTransactionIdByName,
+      // Строгое сравнение: номер транзакции не число, нормализовать нельзя
+      isSame: (a, b) => String(a).trim() === String(b).trim(),
+      rowSourceName: 'колонке Transaction ID',
+    });
   }
 
   // ------------------------------------------------------------------
@@ -910,6 +1543,81 @@
           reason: 'transaction-not-rejected',
           externalStatus,
           transactionStatus: txStatus,
+        };
+      }
+    }
+
+    // Отбор по списку. Он работает в обоих режимах со списком — и там, где
+    // в списке пары «тикет → транзакция», и там, где одни номера тикетов.
+    // Проверка стоит отдельно от подстановки номера специально: список сам
+    // по себе решает, БРАТЬ ли тикет, а что в него вписать — вопрос второй.
+    //
+    // С автопилотом на экране и так только тикеты из пачки, но список — это
+    // ещё и защита: если фильтр однажды вернёт не то, тикет не будет тронут
+    // даже при подходящем статусе.
+    if (currentListPairs && !currentListPairs.has(ticketId)) {
+      console.log(
+        `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: в списке его нет — пропускаю.`
+      );
+      return { ticketId, status: 'skipped', reason: 'not-in-list', externalStatus };
+    }
+
+    // Дубль из прошлых прогонов. Автопилот таких и не запрашивает, но без
+    // автопилота тикет может оказаться на экране, если оператор вывел его
+    // сам, — и тогда его тоже не трогаем.
+    if (currentListDuplicates && currentListDuplicates.has(ticketId)) {
+      const known = currentListDuplicates.get(ticketId);
+      console.log(
+        `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: в прошлом прогоне сайт ` +
+        `сказал, что транзакция занята` + (known.ownerTicketId ? ` обращением ${known.ownerTicketId}` : '') +
+        ` — не открываю.`
+      );
+      return {
+        ticketId,
+        status: 'skipped',
+        reason: 'transaction-duplicate-known',
+        attemptedTransactionId: known.transactionId,
+        ownerTicketId: known.ownerTicketId,
+        popupText: known.popupText,
+        externalStatus,
+      };
+    }
+
+    // Номер транзакции приходит не со страницы, а из списка. Решаем здесь,
+    // что впишем, но саму запись делаем позже — внутри окна и только после
+    // проверки личности тикета.
+    let transactionIdToFill = null;
+    if (workflow.fillTransactionIdFromList) {
+      const wanted = currentListPairs ? currentListPairs.get(ticketId) : null;
+      if (!wanted) {
+        // Сюда можно попасть только если список есть, тикет в нём есть, а
+        // номера у него нет — для этого режима список разбирается парами,
+        // так что это означало бы сломанный разбор, а не обычный пропуск.
+        console.warn(
+          `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: ` +
+          `в списке нет номера транзакции — пропускаю.`
+        );
+        return { ticketId, status: 'skipped', reason: 'not-in-list', externalStatus };
+      }
+      transactionIdToFill = wanted;
+
+      // Дешёвая отсечка по таблице, если колонка нашлась ПО НАЗВАНИЮ. Тикет
+      // с чужим номером транзакции даже не открываем: перезаписывать чужую
+      // транзакцию нельзя, а разбираться с этим должен человек.
+      const rowTx = getTransactionIdByName(row);
+      if (rowTx !== null && rowTx !== '' && rowTx !== wanted) {
+        console.warn(
+          `[BulkApprove/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: в списке стоит ` +
+          `"${wanted}", а в тикете уже "${rowTx}" — ничего не меняю, нужна ручная проверка.`
+        );
+        return {
+          ticketId,
+          status: 'skipped',
+          reason: 'transaction-id-mismatch',
+          existingTransactionId: rowTx,
+          wantedTransactionId: wanted,
+          detectedIn: 'таблица',
+          externalStatus,
         };
       }
     }
@@ -1092,6 +1800,208 @@
     await interruptibleSleep(CONFIG.stepDelay);
 
     // ------------------------------------------------------------------
+    // ПОДСТАНОВКА TRANSACTION ID (только режим «по списку»).
+    // Как и с суммой: делаем это ДО работы со Status и до Apply — личность
+    // тикета уже подтверждена, а если подстановка сорвётся, статус останется
+    // нетронутым и тикет не окажется обработан наполовину.
+    // ------------------------------------------------------------------
+    let transactionIdFilled = null;
+    let transactionLoadNote = null;
+    if (transactionIdToFill) {
+      setProgress({ action: 'вписываю Transaction ID' });
+
+      let txGroup;
+      try {
+        txGroup = await waitFor(() => findFieldGroup(modal, 'Transaction ID'));
+      } catch (e) {
+        if (e instanceof StopSignal) throw e;
+        console.warn(
+          `[BulkApprove/${workflow.id}] Тикет ${ticketId}: в окне нет поля Transaction ID.`
+        );
+        return failTicket(ticketId, workflow, {
+          ticketId,
+          status: 'failed',
+          reason: 'no-transaction-id-field',
+        });
+      }
+
+      // Пока вписываем номер, окна сайта относятся именно к нему. Без этого
+      // в отчёте у пойманного окна стояло «(нет данных)»: currentTransactionId
+      // читается из колонки таблицы, а она у таких тикетов пустая — номер как
+      // раз и вписываем.
+      if (transactionIdToFill) currentTransactionId = transactionIdToFill;
+
+      const txInput = txGroup.querySelector(
+        'input.mx-input, input[type="text"]:not(.multiselect__input)'
+      );
+      if (!txInput) {
+        // В Team Helper у чтения Transaction ID есть откат на нередактируемое
+        // значение — значит, у части тикетов поля для ввода может не быть.
+        console.warn(
+          `[BulkApprove/${workflow.id}] Тикет ${ticketId}: поле Transaction ID найдено, но внутри нет текстового input.`
+        );
+        return failTicket(ticketId, workflow, {
+          ticketId,
+          status: 'failed',
+          reason: 'no-transaction-id-field',
+        });
+      }
+
+      const existingTx = txInput.value.trim();
+      if (existingTx !== '' && existingTx !== transactionIdToFill) {
+        console.warn(
+          `[BulkApprove/${workflow.id}] Тикет ${ticketId}: в окне уже стоит "${existingTx}", ` +
+          `а в списке "${transactionIdToFill}" — ничего не меняю, статус не трогаю.`
+        );
+        return failTicket(ticketId, workflow, {
+          ticketId,
+          status: 'skipped',
+          reason: 'transaction-id-mismatch',
+          existingTransactionId: existingTx,
+          wantedTransactionId: transactionIdToFill,
+          detectedIn: 'окно',
+        });
+      }
+
+      if (existingTx === transactionIdToFill) {
+        // Номер уже на месте — скорее всего прошлый прогон вписал его, но
+        // упал на статусе. Не переписываем, идём сразу к статусу.
+        console.log(
+          `[BulkApprove/${workflow.id}] Тикет ${ticketId}: Transaction ID уже стоит правильный — ` +
+          `не переписываю, меняю только статус.`
+        );
+      } else {
+        // Отметку журнала снимаем ДО ввода: всё, что уйдёт после неё,
+        // относится к нашей вставке, а не к тому, что висело раньше.
+        const mark = requestLogMark();
+        const inputAt = Date.now();
+        setInputValue(txInput, transactionIdToFill);
+        txInput.blur();
+        txInput.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+
+        setProgress({ action: 'жду загрузку данных транзакции' });
+        const loaded = await waitForTransactionDataLoaded(mark, inputAt);
+        if (!loaded.ok) {
+          console.warn(
+            `[BulkApprove/${workflow.id}] Тикет ${ticketId}: ${describeReason(loaded.reason)} — статус не меняю.`
+          );
+          return failTicket(ticketId, workflow, {
+            ticketId,
+            status: 'failed',
+            reason: loaded.reason,
+            attemptedTransactionId: transactionIdToFill,
+          });
+        }
+        if (loaded.secondWaveMissing) {
+          transactionLoadNote = 'вторая волна запросов не пришла';
+          console.warn(
+            `[BulkApprove/${workflow.id}] Тикет ${ticketId}: ${transactionLoadNote} — ` +
+            `данные транзакции могли не подтянуться, стоит глянуть глазами.`
+          );
+        }
+
+        // Читаем обратно только ПОСЛЕ загрузки: сайт мог поправить значение.
+        // Сравниваем строго — Transaction ID не число, нормализовать нельзя.
+        const written = txInput.value.trim();
+        if (written !== transactionIdToFill) {
+          console.warn(
+            `[BulkApprove/${workflow.id}] Тикет ${ticketId}: сайт не принял Transaction ID — ` +
+            `вписывали "${transactionIdToFill}", в поле оказалось "${written}". Статус не меняю.`
+          );
+          return failTicket(ticketId, workflow, {
+            ticketId,
+            status: 'failed',
+            reason: 'transaction-id-not-accepted',
+            attemptedTransactionId: transactionIdToFill,
+            actualTransactionId: written,
+          });
+        }
+        console.log(
+          `[BulkApprove/${workflow.id}] Тикет ${ticketId}: в Transaction ID вписано "${transactionIdToFill}".`
+        );
+
+        // ПРОВЕРКА НА ДУБЛЬ ТРАНЗАКЦИИ.
+        //
+        // Первая волна запросов — это и есть проверка сайта «занята ли
+        // транзакция другим обращением». Если занята, сайт показывает окно,
+        // и дальше идти нельзя: у SweetAlert2 модальная подложка, живой
+        // человек сквозь неё не кликнул бы, а fireClick рассылает события
+        // напрямую и подложку обходит. Именно так на боевом прогоне тикет
+        // закрылся с чужой транзакцией, пока вопрос сайта висел без ответа.
+        //
+        // Известное окно о дубле закрываем кнопкой Cancel и едем дальше:
+        // тикет пропускается, разбирать его будет человек. Любое ДРУГОЕ окно
+        // по-прежнему останавливает прогон — что делают его кнопки, мы не
+        // знаем, а гадать там, где на другом конце чей-то вывод, нельзя.
+        const blocking = getOpenSwalPopup();
+        if (blocking) {
+          const info = classifySwalPopup(blocking);
+          const popupText = info.title || info.content || info.icon;
+          const known = isDuplicateTransactionPopup(info);
+
+          if (known) {
+            const owner = extractOwnerTicketId(info);
+            console.warn(
+              `[BulkApprove/${workflow.id}] Тикет ${ticketId}: сайт говорит, что транзакция ` +
+              `"${transactionIdToFill}" уже занята` + (owner ? ` обращением ${owner}` : '') +
+              `. Статус НЕ меняю, Apply НЕ жму, окно закрываю кнопкой Cancel.`
+            );
+            if (info.cancelBtn) fireClick(info.cancelBtn);
+            try {
+              await waitForGone(() => getOpenSwalPopup(), CONFIG.blockingPopupTimeout);
+            } catch (e) {
+              if (e instanceof StopSignal) throw e;
+              // Закрыть не вышло — работать сквозь окно нельзя, встаём
+              runAbortReason =
+                `Тикет ${ticketId}: окно «${popupText}» не закрылось по Cancel. Прогон остановлен — ` +
+                `закрой его вручную и запусти заново.`;
+              console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
+              const stuck = await failTicket(ticketId, workflow, {
+                ticketId,
+                status: 'skipped',
+                reason: 'transaction-duplicate',
+                attemptedTransactionId: transactionIdToFill,
+                popupText,
+                ownerTicketId: owner,
+              });
+              state.stopRequested = true;
+              return stuck;
+            }
+
+            return failTicket(ticketId, workflow, {
+              ticketId,
+              status: 'skipped',
+              reason: 'transaction-duplicate',
+              attemptedTransactionId: transactionIdToFill,
+              popupText,
+              ownerTicketId: owner,
+            });
+          }
+
+          runAbortReason =
+            `Тикет ${ticketId}: после ввода Transaction ID "${transactionIdToFill}" сайт показал ` +
+            `незнакомое окно «${popupText}». Статус НЕ менялся, Apply НЕ нажимался — тикет остался ` +
+            `нетронутым. Прогон остановлен: прочитай окно, реши по этому тикету вручную и запусти заново.`;
+          console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
+          // Сначала закрываем окно Edit, и только потом просим остановку:
+          // waitForGone внутри failTicket бросает StopSignal, если флаг уже
+          // поднят, и результат этого тикета не дошёл бы до отчёта.
+          const result = await failTicket(ticketId, workflow, {
+            ticketId,
+            status: 'skipped',
+            reason: 'unknown-popup',
+            attemptedTransactionId: transactionIdToFill,
+            popupText,
+          });
+          state.stopRequested = true;
+          return result;
+        }
+      }
+
+      transactionIdFilled = transactionIdToFill;
+    }
+
+    // ------------------------------------------------------------------
     // ПОДСТАНОВКА СУММЫ (только режим 239, только если Amount = 0).
     // Делаем это ДО работы со Status и до Apply: личность тикета уже
     // подтверждена, а если подстановка сорвётся — статус останется
@@ -1219,6 +2129,8 @@
     }
     await interruptibleSleep(CONFIG.stepDelay);
 
+    setProgress({ action: 'ставлю статус' });
+
     // Печатаем searchTerm workflow'а в поле поиска — так же, как это делает человек.
     // Это надёжнее, чем искать нужный текст в нераскрытом полном списке.
     if (multiselectInput) {
@@ -1283,6 +2195,31 @@
       return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'no-apply-button' });
     }
 
+    // Последняя проверка перед необратимым действием: не висит ли на экране
+    // окно сайта. Подложка SweetAlert2 останавливает человека, но не
+    // fireClick, поэтому «нажать Apply сквозь вопрос сайта» технически
+    // возможно — и однажды уже случилось. Здесь это стоит одного запроса
+    // к DOM, а цена пропуска — закрытый тикет с чужой транзакцией.
+    const blockingBeforeApply = getOpenSwalPopup();
+    if (blockingBeforeApply) {
+      const info = classifySwalPopup(blockingBeforeApply);
+      const popupText = info.title || info.content || info.icon;
+      runAbortReason =
+        `Тикет ${ticketId}: перед нажатием Apply на экране висит окно сайта «${popupText}». ` +
+        `Apply НЕ нажимался. Прогон остановлен — разберись с этим тикетом вручную и запусти заново.`;
+      console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
+      // Порядок важен — см. комментарий у проверки на дубль транзакции
+      const result = await failTicket(ticketId, workflow, {
+        ticketId,
+        status: 'skipped',
+        reason: 'popup-before-apply',
+        popupText,
+      });
+      state.stopRequested = true;
+      return result;
+    }
+
+    setProgress({ action: 'жму Apply' });
     fireClick(applyBtn);
 
     // Ждём, пока модалка закроется (AJAX). Если по дороге появится swal2-окно —
@@ -1302,11 +2239,15 @@
 
     console.log(
       `[BulkApprove/${workflow.id}] Тикет ${ticketId}: готово ✅` +
-      (amountFilled ? ` (вписана сумма "${amountFilled}")` : '')
+      (amountFilled ? ` (вписана сумма "${amountFilled}")` : '') +
+      (transactionIdFilled ? ` (вписан Transaction ID "${transactionIdFilled}")` : '')
     );
-    return amountFilled
-      ? { ticketId, status: 'success', amountFilled }
-      : { ticketId, status: 'success' };
+
+    const success = { ticketId, status: 'success' };
+    if (amountFilled) success.amountFilled = amountFilled;
+    if (transactionIdFilled) success.transactionIdFilled = transactionIdFilled;
+    if (transactionLoadNote) success.transactionLoadNote = transactionLoadNote;
+    return success;
   }
 
   // ------------------------------------------------------------------
@@ -1314,6 +2255,30 @@
   // ------------------------------------------------------------------
   async function runBulkApprove(workflow) {
     refreshColumnIndexMap();
+
+    // Режимы со списком начинаются с вопроса. Для «по списку (225)» список
+    // обязателен — без номеров транзакций делать нечего. Для обычного 225 он
+    // необязателен: в окне есть «Запустить по экрану».
+    currentListPairs = null;
+    currentListState = null;
+    currentListDuplicates = null;
+    currentListDropped = null;
+    let autopilot = false;
+    let askedInWindow = false;
+    if (workflow.fillTransactionIdFromList || workflow.allowTicketIdList) {
+      const entered = await showTicketListWindow(workflow);
+      if (!entered) return; // отмена — молча выходим, ничего не трогая
+      askedInWindow = true;
+      currentListPairs = entered.pairs;
+      currentListState = entered.state;
+      currentListDropped = new Map(
+        (entered.state ? entered.state.dropped : []).map((d) => [d.ticketId, d])
+      );
+      currentListDuplicates = new Map(
+        (entered.state ? entered.state.duplicates : []).map((d) => [d.ticketId, d])
+      );
+      autopilot = entered.autopilot;
+    }
 
     if (workflow.fillAmountFromTransaction) {
       if (!(columnIndexMap && columnIndexMap['amount'])) {
@@ -1342,29 +2307,94 @@
       return;
     }
 
-    const rows = getTicketRows();
-    if (rows.length === 0) {
-      alert('Не найдено ни одного тикета на странице.');
-      return;
+    // Что именно прогоняем.
+    //
+    // Автопилот: пачки набираются из списка, и что сейчас на экране —
+    // неважно, эту выдачу он всё равно заменит своей.
+    // Без автопилота: одна «пачка» — это то, что оператор уже вывел сам;
+    // фильтр страницы скрипт не трогает.
+    const listDone = new Set(currentListState ? currentListState.done : []);
+    let chunks;
+
+    if (autopilot) {
+      const missing = autopilotMissingControls();
+      if (missing.length > 0) {
+        alert(
+          'Автопилот включён, но на странице нет того, чем он работает:\n' +
+          missing.map((m) => `  • ${m}`).join('\n') +
+          '\n\nПрогон не начат. Разверни блок Quick filters и запусти снова, ' +
+          'либо сними галочку «Автопилот» и выведи тикеты в поиск сам.'
+        );
+        return;
+      }
+
+      // В пачки не идут отложенные дубли (сайт на них уже ответил) и
+      // выбывшие тикеты (их статус сменился, пока шла обработка списка)
+      const remaining = [...currentListPairs.keys()].filter(
+        (id) => !listDone.has(id) && !currentListDuplicates.has(id) && !currentListDropped.has(id)
+      );
+      if (remaining.length === 0) {
+        const parked = [...currentListDuplicates.values()];
+        if (parked.length === 0) {
+          alert(
+            `Из списка (${currentListPairs.size}) уже обработано всё` +
+            (currentListDropped.size > 0
+              ? ` (из них ${currentListDropped.size} выбыли — у них сменился External Status)`
+              : '') +
+            '. Если список нужно прогнать заново — нажми «Начать заново» в окне ввода.'
+          );
+          return;
+        }
+        // Прогонять нечего, но человеку всё ещё нужен список дублей — отдаём
+        // его тем же окном отчёта, а не alert'ом, из которого не скопировать.
+        showReportWindow(
+          `Прогонять нечего.\n` +
+          `Из списка (${currentListPairs.size}) обработано всё, кроме ${parked.length} ` +
+          `тикетов, у которых транзакция занята другим обращением. Они отложены и ` +
+          `повторно не прогоняются.\n\n` +
+          `Если какие-то из них уже поправлены руками и их нужно прогнать снова — ` +
+          `нажми «Начать заново» в окне ввода списка.`,
+          [duplicateCopyBlock(parked)]
+        );
+        window.__bulkApproveDuplicates = parked;
+        return;
+      }
+      chunks = chunkArray(remaining, CONFIG.autopilotChunkSize);
+    } else {
+      const rows = getTicketRows();
+      if (rows.length === 0) {
+        alert('Не найдено ни одного тикета на странице.');
+        return;
+      }
+      chunks = [null]; // null — «бери то, что уже на экране»
     }
 
-    const confirmed = confirm(
-      `Найдено тикетов на экране: ${rows.length}.\n` +
-      `Будут обработаны только те, у кого External Status — один из:\n` +
-      workflow.requiredExternalStatuses.map((name) => `  • ${name}`).join('\n') + `\n` +
-      (workflow.requiredTransactionStatus
-        ? `и при этом Transaction Status = "${workflow.requiredTransactionStatus}".\n`
-        : '') +
-      `Остальные — пропущены.\n` +
-      `У подходящих будет выставлен статус "${workflow.targetStatusLabel}" и нажат Apply.` +
-      (workflow.fillAmountFromTransaction
-        ? `\n\nВ тикетах с Amount = 0 сумма будет подставлена из колонки Transaction Amount\n` +
-          `в поле "Amount by receipt". Если брать нечего или поле уже заполнено —\n` +
-          `тикет пропускается и попадает в список для ручной проверки.`
-        : '') +
-      `\n\nПродолжить?`
-    );
-    if (!confirmed) return;
+    const queuedTotal = autopilot
+      ? chunks.reduce((sum, c) => sum + c.length, 0)
+      : getTicketRows().length;
+
+    // Окно ввода списка уже показало всё то же самое и имеет свои кнопки
+    // запуска — второй диалог подряд был бы лишним кликом на каждом прогоне.
+    // У режимов без окна (239) confirm остаётся единственной проверкой.
+    if (!askedInWindow) {
+      const confirmed = confirm(
+        `Найдено тикетов на экране: ${queuedTotal}.\n` +
+        `Будут обработаны только те, у кого External Status — один из:\n` +
+        workflow.requiredExternalStatuses.map((name) => `  • ${name}`).join('\n') + `\n` +
+        (workflow.requiredTransactionStatus
+          ? `и при этом Transaction Status = "${workflow.requiredTransactionStatus}".\n`
+          : '') +
+        `Остальные — пропущены.\n` +
+        `У подходящих будет выставлен статус "${workflow.targetStatusLabel}" и нажат Apply.` +
+        (workflow.fillAmountFromTransaction
+          ? `\n\nВ тикетах с Amount = 0 сумма будет подставлена из колонки Transaction Amount\n` +
+            `в поле "Amount by receipt". Если брать нечего или поле уже заполнено —\n` +
+            `тикет пропускается и попадает в список для ручной проверки.`
+          : '') +
+        `\n\nПродолжить?`
+      );
+      if (!confirmed) return;
+    }
 
     capturedPopups.length = 0; // отчёт по попапам — только за этот прогон
     runAbortReason = null;
@@ -1373,11 +2403,39 @@
     state.stopRequested = false;
     updateButtonsUI();
 
-    // Список тикетов фиксируем по номерам, а не по позициям строк: таблица
-    // перерисовывается прямо во время прогона, и обращение по индексу молча
-    // подсовывало бы не тот тикет либо навсегда пропускало один из них.
-    const plannedTicketIds = rows.map((r) => getTicketIdFromRow(r));
-    const total = plannedTicketIds.length;
+    // Все тикеты, которые прогон собирался посмотреть — накапливаются по
+    // пачкам. По ним в конце считается, до кого прогон не дошёл.
+    const plannedTicketIds = [];
+
+    // Тикеты, которые мы РЕАЛЬНО запросили у сайта — то есть из пачек,
+    // которые успели примениться. Считать «сайт не показал» по всему списку
+    // нельзя: туда попали бы и закрытые в прошлые прогоны, и те, до чьей
+    // пачки прогон не дошёл, — и цифра говорила бы о сайте то, чего он не
+    // делал. Ровно так один отчёт и заявил «не показал 710» после одной
+    // применённой пачки на сотню.
+    const requestedTicketIds = [];
+
+    // Сквозной счётчик по списку: сколько из него закрыто за все прогоны,
+    // включая текущий. Обновляется по ходу, чтобы панель показывала живое
+    // число, а не то, что было на старте.
+    const listClosedIds = new Set(listDone);
+
+    const listLineNow = () =>
+      currentListPairs ? `из списка: ${listClosedIds.size} из ${currentListPairs.size}` : '';
+
+    setProgress({
+      visible: true,
+      title: workflow.buttonLabel,
+      index: 0,
+      total: 0,
+      ticketId: '',
+      ok: 0,
+      skipped: 0,
+      failed: 0,
+      action: 'начинаю',
+      listLine: listLineNow(),
+      chunkLine: autopilot ? `Пачка 0 из ${chunks.length}` : '',
+    });
 
     const results = [];
     let stoppedEarly = false;
@@ -1400,137 +2458,296 @@
       return true;
     };
 
-    for (let i = 0; i < total; i++) {
+    // Пустая выдача сама по себе законна: в пачке может не оказаться ни
+    // одного живого тикета. Но три пустых пачки подряд — это триста тикетов,
+    // которых сайт не показал, и это уже не совпадение.
+    let consecutiveEmptyChunks = 0;
+    let emptyChunks = 0;
+    let chunksDone = 0;
+
+    for (let chunkNo = 0; chunkNo < chunks.length; chunkNo++) {
       if (state.stopRequested) {
         stoppedEarly = true;
         break;
       }
 
-      const ticketId = plannedTicketIds[i];
+      if (autopilot) {
+        const chunk = chunks[chunkNo];
+        setProgress({
+          chunkLine: `Пачка ${chunkNo + 1} из ${chunks.length}`,
+          index: 0,
+          total: chunk.length,
+          ticketId: '',
+          action: `подставляю ${chunk.length} тикетов в фильтр`,
+        });
 
-      // Пустая таблица — это НЕ «тикеты кончились», а её перезагрузка. Раньше
-      // скрипт в этот момент молча пролистывал весь остаток списка и рапортовал
-      // «Готово», хотя не посмотрел почти ни одного тикета.
-      if (getTicketRows().length === 0) {
-        console.warn(
-          `[BulkApprove/${workflow.id}] Таблица пуста (идёт перезагрузка?) — жду, пока она вернётся...`
-        );
+        let applied;
         try {
-          await waitFor(() => getTicketRows().length > 0, CONFIG.tableReloadTimeout);
+          applied = await applyTicketIdFilter(chunk, workflow);
         } catch (e) {
           if (e instanceof StopSignal) {
             stoppedEarly = true;
             break;
           }
+          throw e;
+        }
+
+        if (!applied.ok) {
           runAbortReason =
-            `Таблица тикетов пропала со страницы и не вернулась за ${CONFIG.tableReloadTimeout / 1000} с. ` +
-            `Прогон остановлен: продолжать вслепую нельзя. Обнови страницу и запусти заново.`;
+            `Пачка ${chunkNo + 1} из ${chunks.length}: ` +
+            `${describeAutopilotFailure(applied.reason, applied.detail)}. ` +
+            `Прогон остановлен — обработанное до этого момента сохранено, ` +
+            `оставшиеся тикеты можно забрать из блока для копирования ниже.`;
           console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
           stoppedEarly = true;
           break;
         }
-      }
 
-      const row = findRowByTicketId(ticketId);
-      if (!row) {
-        console.warn(
-          `[BulkApprove/${workflow.id}] (${i + 1}/${total}) Тикет ${ticketId}: строки больше нет в таблице — НЕ обработан.`
-        );
-        results.push({ ticketId, status: 'failed', reason: 'row-disappeared' });
-        if (registerFailure('row-disappeared')) {
-          stoppedEarly = true;
-          break;
-        }
-        continue;
-      }
+        chunksDone++;
+        requestedTicketIds.push(...chunk);
 
-      let result;
-      try {
-        result = await processTicket(row, i, total, workflow);
-        results.push(result);
-      } catch (e) {
-        if (e instanceof StopSignal) {
-          console.log(`[BulkApprove/${workflow.id}] Получен сигнал СТОП — прерываю выполнение.`);
-          tryCancelModal();
-          stoppedEarly = true;
-          break;
-        }
-        console.error(`[BulkApprove/${workflow.id}] Необработанная ошибка на тикете ${ticketId}:`, e);
-        result = { ticketId, status: 'failed', reason: 'exception' };
-        results.push(result);
-      }
-
-      // Сумму вписали — убеждаемся, что она сохранилась. Делаем это здесь, а
-      // не внутри processTicket: цикл уже умеет ждать перезагрузку таблицы и
-      // заново находить строку по номеру тикета.
-      if (CONFIG.verifyAmountSaved && result.status === 'success' && result.amountFilled) {
-        try {
-          const check = await verifyAmountSaved(ticketId, result.amountFilled, workflow);
-          // result лежит в results по ссылке — отчёт увидит эти поля
-          result.amountVerified = check.verdict;
-          result.storedAmount = check.storedAmount;
-          result.verifyNote = check.note;
-
-          if (check.verdict === 'saved') {
-            consecutiveUnsavedAmounts = 0;
-            console.log(
-              `[BulkApprove/${workflow.id}] Тикет ${ticketId}: сумма "${result.amountFilled}" сохранилась ` +
-              `(${check.note}).`
-            );
-          } else if (check.verdict === 'not-saved') {
-            console.error(
-              `[BulkApprove/${workflow.id}] Тикет ${ticketId}: СУММА НЕ СОХРАНИЛАСЬ — вписывали ` +
-              `"${result.amountFilled}", ${check.note}. Статус при этом уже изменён.`
-            );
-            consecutiveUnsavedAmounts++;
-            // Если виноват формат или вёрстка, не сохранится у всех подряд —
-            // гнать дальше и трогать деньги впустую вредно.
-            if (consecutiveUnsavedAmounts >= CONFIG.maxConsecutiveFailures) {
-              runAbortReason =
-                `Подряд у ${consecutiveUnsavedAmounts} тикетов сумма не сохранилась, хотя статус менялся. ` +
-                `Похоже, сайт перестал принимать сумму в том виде, в каком её вписывает скрипт. ` +
-                `Прогон остановлен. Перечисленные ниже тикеты нужно поправить вручную.`;
-              console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
-              stoppedEarly = true;
-              break;
-            }
-          } else {
-            console.warn(
-              `[BulkApprove/${workflow.id}] Тикет ${ticketId}: не удалось проверить сумму — ${check.note}.`
-            );
-          }
-        } catch (e) {
-          if (e instanceof StopSignal) {
+        if (applied.ticketIds.length === 0) {
+          emptyChunks++;
+          consecutiveEmptyChunks++;
+          if (consecutiveEmptyChunks >= CONFIG.autopilotMaxEmptyChunks) {
+            runAbortReason =
+              `Подряд ${consecutiveEmptyChunks} пачек по ${CONFIG.autopilotChunkSize} тикетов ` +
+              `сайт вернул пустыми. Похоже, фильтр не отбирает тикеты так, как мы рассчитываем ` +
+              `(например, на странице стоит ещё один фильтр, под который они не подходят). ` +
+              `Прогон остановлен, чтобы не листать остаток списка впустую.`;
+            console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
             stoppedEarly = true;
             break;
           }
-          console.error(`[BulkApprove/${workflow.id}] Ошибка при проверке суммы у тикета ${ticketId}:`, e);
-          result.amountVerified = 'unverified';
-          result.verifyNote = 'проверка завершилась ошибкой скрипта';
+          continue;
         }
+        consecutiveEmptyChunks = 0;
+      } else {
+        chunksDone++;
       }
 
-      if (result.status === 'failed') {
-        if (registerFailure(result.reason)) {
+      // Состав страницы фиксируем по номерам, а не по позициям строк: таблица
+      // перерисовывается прямо во время прогона, и обращение по индексу молча
+      // подсовывало бы не тот тикет либо навсегда пропускало один из них.
+      const pageTicketIds = getTicketRows().map((r) => getTicketIdFromRow(r));
+      plannedTicketIds.push(...pageTicketIds);
+      const total = pageTicketIds.length;
+      setProgress({ total, action: '' });
+
+      for (let i = 0; i < total; i++) {
+        if (state.stopRequested) {
           stoppedEarly = true;
           break;
         }
-      } else if (result.status === 'success') {
-        consecutiveFailures = 0;
-      }
 
-      // Прогон мог остановить сам себя изнутри (не тот тикет в модалке,
-      // залипшая модалка, чужое окно на экране)
-      if (state.stopRequested) {
-        stoppedEarly = true;
-        break;
-      }
+        const ticketId = pageTicketIds[i];
+        setProgress({ index: i + 1, ticketId, action: 'открываю Edit' });
 
-      const wasSkipped = result.status === 'skipped';
+        // Пустая таблица — это НЕ «тикеты кончились», а её перезагрузка. Раньше
+        // скрипт в этот момент молча пролистывал весь остаток списка и рапортовал
+        // «Готово», хотя не посмотрел почти ни одного тикета.
+        if (getTicketRows().length === 0) {
+          console.warn(
+            `[BulkApprove/${workflow.id}] Таблица пуста (идёт перезагрузка?) — жду, пока она вернётся...`
+          );
+          try {
+            await waitFor(() => getTicketRows().length > 0, CONFIG.tableReloadTimeout);
+          } catch (e) {
+            if (e instanceof StopSignal) {
+              stoppedEarly = true;
+              break;
+            }
+            runAbortReason =
+              `Таблица тикетов пропала со страницы и не вернулась за ${CONFIG.tableReloadTimeout / 1000} с. ` +
+              `Прогон остановлен: продолжать вслепую нельзя. Обнови страницу и запусти заново.`;
+            console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
+            stoppedEarly = true;
+            break;
+          }
+        }
 
-      if (i < total - 1 && !wasSkipped) {
+        const row = findRowByTicketId(ticketId);
+        if (!row) {
+          console.warn(
+            `[BulkApprove/${workflow.id}] (${i + 1}/${total}) Тикет ${ticketId}: строки больше нет в таблице — НЕ обработан.`
+          );
+          results.push({ ticketId, status: 'failed', reason: 'row-disappeared' });
+          if (registerFailure('row-disappeared')) {
+            stoppedEarly = true;
+            break;
+          }
+          continue;
+        }
+
+        let result;
         try {
-          await interruptibleSleep(CONFIG.betweenTicketsDelay);
+          result = await processTicket(row, i, total, workflow);
+          results.push(result);
+        } catch (e) {
+          if (e instanceof StopSignal) {
+            console.log(`[BulkApprove/${workflow.id}] Получен сигнал СТОП — прерываю выполнение.`);
+            tryCancelModal();
+            stoppedEarly = true;
+            break;
+          }
+          console.error(`[BulkApprove/${workflow.id}] Необработанная ошибка на тикете ${ticketId}:`, e);
+          result = { ticketId, status: 'failed', reason: 'exception' };
+          results.push(result);
+        }
+
+        if (result) {
+          setProgress({
+            ok: results.filter((r) => r.status === 'success').length,
+            skipped: results.filter((r) => r.status === 'skipped').length,
+            failed: results.filter((r) => r.status === 'failed').length,
+            action: '',
+          });
+        }
+
+        // Сумму вписали — убеждаемся, что она сохранилась. Делаем это здесь, а
+        // не внутри processTicket: цикл уже умеет ждать перезагрузку таблицы и
+        // заново находить строку по номеру тикета.
+        if (CONFIG.verifyAmountSaved && result.status === 'success' && result.amountFilled) {
+          try {
+            const check = await verifyAmountSaved(ticketId, result.amountFilled, workflow);
+            // result лежит в results по ссылке — отчёт увидит эти поля
+            result.amountVerified = check.verdict;
+            result.storedAmount = check.stored;
+            result.verifyNote = check.note;
+
+            if (check.verdict === 'saved') {
+              consecutiveUnsavedAmounts = 0;
+              console.log(
+                `[BulkApprove/${workflow.id}] Тикет ${ticketId}: сумма "${result.amountFilled}" сохранилась ` +
+                `(${check.note}).`
+              );
+            } else if (check.verdict === 'not-saved') {
+              console.error(
+                `[BulkApprove/${workflow.id}] Тикет ${ticketId}: СУММА НЕ СОХРАНИЛАСЬ — вписывали ` +
+                `"${result.amountFilled}", ${check.note}. Статус при этом уже изменён.`
+              );
+              consecutiveUnsavedAmounts++;
+              // Если виноват формат или вёрстка, не сохранится у всех подряд —
+              // гнать дальше и трогать деньги впустую вредно.
+              if (consecutiveUnsavedAmounts >= CONFIG.maxConsecutiveFailures) {
+                runAbortReason =
+                  `Подряд у ${consecutiveUnsavedAmounts} тикетов сумма не сохранилась, хотя статус менялся. ` +
+                  `Похоже, сайт перестал принимать сумму в том виде, в каком её вписывает скрипт. ` +
+                  `Прогон остановлен. Перечисленные ниже тикеты нужно поправить вручную.`;
+                console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
+                stoppedEarly = true;
+                break;
+              }
+            } else {
+              console.warn(
+                `[BulkApprove/${workflow.id}] Тикет ${ticketId}: не удалось проверить сумму — ${check.note}.`
+              );
+            }
+          } catch (e) {
+            if (e instanceof StopSignal) {
+              stoppedEarly = true;
+              break;
+            }
+            console.error(`[BulkApprove/${workflow.id}] Ошибка при проверке суммы у тикета ${ticketId}:`, e);
+            result.amountVerified = 'unverified';
+            result.verifyNote = 'проверка завершилась ошибкой скрипта';
+          }
+        }
+
+        // То же самое для номера транзакции. Причина ровно та же, что была у
+        // сумм в 2.7: статус может сохраниться, а значение — нет, и без
+        // проверки после Apply этого никто не заметит.
+        if (CONFIG.verifyAmountSaved && result.status === 'success' && result.transactionIdFilled) {
+          setProgress({ action: 'проверяю, сохранился ли Transaction ID' });
+          try {
+            const check = await verifyTransactionIdSaved(ticketId, result.transactionIdFilled, workflow);
+            result.txVerified = check.verdict;
+            result.storedTransactionId = check.stored;
+            result.txVerifyNote = check.note;
+
+            if (check.verdict === 'saved') {
+              consecutiveUnsavedAmounts = 0;
+              console.log(
+                `[BulkApprove/${workflow.id}] Тикет ${ticketId}: Transaction ID ` +
+                `"${result.transactionIdFilled}" сохранился (${check.note}).`
+              );
+            } else if (check.verdict === 'not-saved') {
+              console.error(
+                `[BulkApprove/${workflow.id}] Тикет ${ticketId}: TRANSACTION ID НЕ СОХРАНИЛСЯ — ` +
+                `вписывали "${result.transactionIdFilled}", ${check.note}. Статус при этом уже изменён.`
+              );
+              consecutiveUnsavedAmounts++;
+              if (consecutiveUnsavedAmounts >= CONFIG.maxConsecutiveFailures) {
+                runAbortReason =
+                  `Подряд у ${consecutiveUnsavedAmounts} тикетов не сохранился Transaction ID, хотя статус менялся. ` +
+                  `Похоже, сайт перестал принимать номер в том виде, в каком его вписывает скрипт. ` +
+                  `Прогон остановлен. Перечисленные ниже тикеты нужно поправить вручную.`;
+                console.error(`[BulkApprove/${workflow.id}] ${runAbortReason}`);
+                stoppedEarly = true;
+                break;
+              }
+            } else {
+              console.warn(
+                `[BulkApprove/${workflow.id}] Тикет ${ticketId}: не удалось проверить Transaction ID — ${check.note}.`
+              );
+            }
+          } catch (e) {
+            if (e instanceof StopSignal) {
+              stoppedEarly = true;
+              break;
+            }
+            console.error(
+              `[BulkApprove/${workflow.id}] Ошибка при проверке Transaction ID у тикета ${ticketId}:`, e
+            );
+            result.txVerified = 'unverified';
+            result.txVerifyNote = 'проверка завершилась ошибкой скрипта';
+          }
+        }
+
+        if (result.status === 'failed') {
+          if (registerFailure(result.reason)) {
+            stoppedEarly = true;
+            break;
+          }
+        } else if (result.status === 'success') {
+          consecutiveFailures = 0;
+        }
+
+        // Прогон мог остановить сам себя изнутри (не тот тикет в модалке,
+        // залипшая модалка, чужое окно на экране)
+        if (state.stopRequested) {
+          stoppedEarly = true;
+          break;
+        }
+
+        // Живой счётчик по списку. Предикат один на счётчик и на отчёт —
+        // иначе панель и итог однажды разойдутся, и верить будет нечему.
+        if (currentListPairs && currentListPairs.has(result.ticketId)) {
+          if (isListTicketClosed(result)) listClosedIds.add(result.ticketId);
+          setProgress({ listLine: listLineNow() });
+        }
+
+        const wasSkipped = result.status === 'skipped';
+
+        if (i < total - 1 && !wasSkipped) {
+          try {
+            await interruptibleSleep(CONFIG.betweenTicketsDelay);
+          } catch (e) {
+            if (e instanceof StopSignal) {
+              stoppedEarly = true;
+              break;
+            }
+          }
+        }
+      }
+
+      // Прогон мог остановиться внутри пачки — тогда остальные пачки не трогаем
+      if (stoppedEarly) break;
+
+      if (autopilot && chunkNo < chunks.length - 1) {
+        setProgress({ action: 'перехожу к следующей пачке' });
+        try {
+          await interruptibleSleep(CONFIG.autopilotBetweenChunksDelay);
         } catch (e) {
           if (e instanceof StopSignal) {
             stoppedEarly = true;
@@ -1543,6 +2760,7 @@
     state.isRunning = false;
     state.stopRequested = false;
     updateButtonsUI();
+    hideProgress();
 
     const successResults = results.filter((r) => r.status === 'success');
     const successCount = successResults.length;
@@ -1568,6 +2786,26 @@
     const noTxStatusSkips = results.filter(
       (r) => r.status === 'skipped' && r.reason === 'no-transaction-status-column'
     );
+    // Режим «по списку»
+    const notInListSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'not-in-list');
+    // Сайт сказал, что транзакция уже занята. Самый дорогой исход прогона:
+    // именно здесь чужая транзакция однажды уехала не в тот тикет.
+    const knownDuplicateSkips = results.filter(
+      (r) => r.status === 'skipped' && r.reason === 'transaction-duplicate-known'
+    );
+    const duplicateSkips = results.filter(
+      (r) => r.status === 'skipped' && r.reason === 'transaction-duplicate'
+    );
+    const txMismatchSkips = results.filter(
+      (r) => r.status === 'skipped' && r.reason === 'transaction-id-mismatch'
+    );
+    const txFilledResults = results.filter((r) => r.status === 'success' && r.transactionIdFilled);
+    const txNotSaved = txFilledResults.filter((r) => r.txVerified === 'not-saved');
+    const txUnverified = txFilledResults.filter((r) => r.txVerified === 'unverified');
+    const txConfirmed = txFilledResults.filter(
+      (r) => r.txVerified !== 'not-saved' && r.txVerified !== 'unverified'
+    );
+
     const zeroAmountSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'zero-amount');
     const alreadyFilledSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'amount-already-filled');
     // Тикеты, где скрипт ИЗМЕНИЛ денежное поле. Такое обязано быть в отчёте
@@ -1588,6 +2826,109 @@
     // список остался нетронутым.
     const seenIds = new Set(results.map((r) => r.ticketId));
     const notReachedIds = plannedTicketIds.filter((id) => !seenIds.has(id));
+
+    // Память по списку: что закрыто и что требует рук. Копится между
+    // прогонами — список гоняют пачками по сотне тикетов, и человеку нужен
+    // сквозной счёт, а не «за этот прогон».
+    let listRemaining = [];
+    let listNeedsAttention = [];
+    let listNotOnPage = 0;
+    let listDoneTotal = 0;
+    // Все дубли списка — из прошлых прогонов и из этого. Без списка (режимы
+    // без памяти) — только этого прогона.
+    let listDuplicatesAll = duplicateSkips.map((r) => duplicateRecord(r, true));
+    let listDroppedAll = [];
+    let listDroppedNew = 0;
+    if (currentListPairs && currentListState) {
+      // listClosedIds уже собран по ходу прогона тем же предикатом, которым
+      // считалась панель — второй раз то же самое не пересчитываем.
+      const done = listClosedIds;
+      const attention = new Map(
+        currentListState.needsAttention.map((a) => [String(a.ticketId), a])
+      );
+
+      results.forEach((r) => {
+        // Строки со страницы, которых нет в списке, нас не касаются
+        if (!currentListPairs.has(r.ticketId)) return;
+
+        if (isListTicketClosed(r)) {
+          attention.delete(r.ticketId);
+          return;
+        }
+
+        attention.set(r.ticketId, {
+          ticketId: r.ticketId,
+          reason:
+            r.txVerified === 'not-saved'
+              ? `Transaction ID не сохранился (${r.txVerifyNote || 'в тикете его нет'})`
+              : describeReason(r.reason),
+        });
+      });
+
+      // Дубли копятся: старые из памяти плюс новые этого прогона. Новый
+      // перекрывает старый — у него свежий текст окна.
+      const allDuplicates = new Map(
+        [...(currentListDuplicates || new Map()).values()].map((d) => [
+          d.ticketId,
+          { ...d, fromThisRun: false },
+        ])
+      );
+      duplicateSkips.forEach((r) => allDuplicates.set(r.ticketId, duplicateRecord(r, true)));
+
+      // Выбывшие: старые из памяти плюс те, у кого статус оказался чужим в
+      // этом прогоне. Закрытый в этом прогоне из выбывших уходит — это
+      // возможно без автопилота, когда тикет вернулся в нужный статус и
+      // оператор сам вывел его на экран.
+      const allDropped = new Map(
+        [...(currentListDropped || new Map()).values()].map((d) => [d.ticketId, d])
+      );
+      results.forEach((r) => {
+        if (r.status !== 'skipped' || r.reason !== 'wrong-external-status') return;
+        if (!currentListPairs.has(r.ticketId)) return;
+        if (!allDropped.has(r.ticketId)) listDroppedNew++;
+        allDropped.set(r.ticketId, {
+          ticketId: r.ticketId,
+          externalStatus: r.externalStatus || '',
+          at: Date.now(),
+        });
+      });
+      done.forEach((id) => allDropped.delete(id));
+      // Выбывший тикет больше не интересен — и как дубль тоже
+      allDropped.forEach((_, id) => allDuplicates.delete(id));
+      listDroppedAll = [...allDropped.values()];
+      listDuplicatesAll = [...allDuplicates.values()];
+
+      // У дублей свой блок и свой раздел — в «прогнать заново» им не место:
+      // прогонять их заново как раз не надо. Выбывшим тоже: они больше не наши.
+      allDuplicates.forEach((_, id) => attention.delete(id));
+      allDropped.forEach((_, id) => attention.delete(id));
+
+      listRemaining = [...currentListPairs.keys()].filter(
+        (id) => !done.has(id) && !allDuplicates.has(id) && !allDropped.has(id)
+      );
+      listNeedsAttention = [...attention.values()];
+      listDoneTotal = done.size;
+
+      // «Сайт не показал» — это запрошенное минус показанное, и только оно.
+      // В ручном режиме запроса не было: там сравниваем список с экраном,
+      // как и раньше.
+      if (autopilot) {
+        const shownSet = new Set(plannedTicketIds);
+        listNotOnPage = requestedTicketIds.filter((id) => !shownSet.has(id)).length;
+      } else {
+        const seen = new Set(plannedTicketIds);
+        listNotOnPage = [...currentListPairs.keys()].filter((id) => !seen.has(id)).length;
+      }
+
+      writeListStorage(listStorageKey(workflow), {
+        savedAt: Date.now(),
+        text: currentListState.text,
+        done: [...done],
+        needsAttention: listNeedsAttention,
+        duplicates: listDuplicatesAll.map(({ fromThisRun, ...d }) => d),
+        dropped: listDroppedAll,
+      });
+    }
 
     console.log(`[BulkApprove/${workflow.id}] ИТОГ:`, results);
     // Быстрый доступ из консоли, например:
@@ -1615,10 +2956,42 @@
     // за остальными в консоль
     const MAX_LISTED = 40;
 
+    // Обрезанный список ОБЯЗАН сказать, что он обрезан. Иначе заголовок
+    // говорит «(60)», под ним лежит сорок строк, и человек уходит работать с
+    // неполными данными, ничего не заподозрив. Ровно это и случилось с
+    // разделом про дубли, когда хвост забыли приписать руками.
+    const listWithTail = (items, render, where) => {
+      const shown = items.slice(0, MAX_LISTED).map(render).join('\n');
+      if (items.length <= MAX_LISTED) return shown;
+      return (
+        shown +
+        `\n… и ещё ${items.length - MAX_LISTED}` +
+        (where ? ` — полный список ${where}` : '')
+      );
+    };
+
+    // Тикеты, которые скрипт уже разобрал как дубли, в общий список
+    // «требуют ручной проверки» не попадают: у них есть свой раздел с
+    // номером чужого обращения и свой блок для копирования, и повторять их
+    // здесь значило бы показывать одно и то же двумя разными способами.
+    // Фильтруем ПО ТИКЕТУ, а не по тексту окна: если прогон остановили
+    // раньше, чем скрипт успел вынести вердикт, окно так и останется
+    // единственным следом, и прятать его нельзя.
+    const duplicateTicketIds = new Set(duplicateSkips.map((r) => r.ticketId));
+    const popupsForReview = capturedPopups.filter((p) => !duplicateTicketIds.has(p.ticketId));
+
     const popupsListText =
-      popupCount > 0
-        ? `\n\nТребуют ручной проверки на дубликаты (${popupCount}):\n` +
-          capturedPopups.map((p) => `${p.ticketId} - ${p.transactionId}`).join('\n')
+      popupsForReview.length > 0
+        ? `\n\nТребуют ручной проверки на дубликаты (${popupsForReview.length}` +
+          (popupsForReview.length !== popupCount
+            ? `; ещё ${popupCount - popupsForReview.length} окон относятся к тикетам из раздела про занятые транзакции`
+            : '') +
+          `):\n` +
+          listWithTail(
+            popupsForReview,
+            (p) => `${p.ticketId} - ${p.transactionId}`,
+            'в консоли: window.__bulkApproveCapturedPopups'
+          )
         : '';
 
     const notRejectedText =
@@ -1640,6 +3013,69 @@
         ? `\n\n⚠ У ${noTxStatusSkips.length} тикетов не удалось прочитать колонку Transaction Status — ` +
           `они пропущены. Похоже, набор колонок в таблице менялся во время прогона: ` +
           `перезагрузи страницу и запусти заново.`
+        : '';
+
+    const txFilledListText =
+      txConfirmed.length > 0
+        ? `\n\nВписан Transaction ID (${txConfirmed.length}):\n` +
+          txConfirmed
+            .slice(0, MAX_LISTED)
+            .map((r) => `${r.ticketId} — ${r.transactionIdFilled}` +
+              (r.transactionLoadNote ? ` (${r.transactionLoadNote})` : ''))
+            .join('\n') +
+          (txConfirmed.length > MAX_LISTED
+            ? `\n… и ещё ${txConfirmed.length - MAX_LISTED}`
+            : '')
+        : '';
+
+    const txNotSavedText =
+      txNotSaved.length > 0
+        ? `\n\n⚠ TRANSACTION ID НЕ СОХРАНИЛСЯ (${txNotSaved.length}) — статус УЖЕ изменён, поправь вручную:\n` +
+          listWithTail(
+            txNotSaved,
+            (r) => `${r.ticketId} — вписывали "${r.transactionIdFilled}", ${r.txVerifyNote || 'в тикете его нет'}`,
+            'в консоли: window.__bulkApproveLastResults'
+          )
+        : '';
+
+    const txUnverifiedText =
+      txUnverified.length > 0
+        ? `\n\nTransaction ID вписан, но проверить не удалось (${txUnverified.length}):\n` +
+          listWithTail(
+            txUnverified,
+            (r) => `${r.ticketId} — вписывали "${r.transactionIdFilled}" (${r.txVerifyNote || 'причина неизвестна'})`,
+            'в консоли: window.__bulkApproveLastResults'
+          )
+        : '';
+
+    // Раздел показывает ВСЕ дубли списка, накопленные за прогоны: по нему
+    // проходят руками, и собирать его по кускам из старых отчётов нельзя.
+    const newDuplicatesCount = listDuplicatesAll.filter((d) => d.fromThisRun).length;
+    const duplicateText =
+      listDuplicatesAll.length > 0
+        ? `\n\n⚠ ТРАНЗАКЦИЯ ЗАНЯТА ДРУГИМ ОБРАЩЕНИЕМ (${listDuplicatesAll.length}` +
+          (listDuplicatesAll.length !== newDuplicatesCount
+            ? `; новых в этом прогоне ${newDuplicatesCount}, остальные из прошлых`
+            : '') +
+          `) — статус НЕ меняли, Apply НЕ нажимали, повторно не прогоняются, разберись вручную:\n` +
+          listWithTail(
+            listDuplicatesAll,
+            (d) =>
+              `${d.ticketId} — вписывали "${d.transactionId}"` +
+              (d.ownerTicketId ? `, транзакция уже у обращения ${d.ownerTicketId}` : '') +
+              (d.fromThisRun ? '' : ' (из прошлого прогона)'),
+            'в блоке для копирования ниже (там все) и в консоли: window.__bulkApproveDuplicates'
+          )
+        : '';
+
+    const txMismatchText =
+      txMismatchSkips.length > 0
+        ? `\n\nПропущены: в тикете уже стоит ДРУГОЙ Transaction ID (${txMismatchSkips.length}) — статус НЕ меняли:\n` +
+          listWithTail(
+            txMismatchSkips,
+            (r) => `${r.ticketId} — в тикете "${r.existingTransactionId}", в списке "${r.wantedTransactionId}" (видно по: ${r.detectedIn})`,
+            'в консоли: window.__bulkApproveLastResults'
+          )
         : '';
 
     const zeroAmountListText =
@@ -1687,10 +3123,11 @@
     const amountUnverifiedText =
       amountUnverified.length > 0
         ? `\n\nСумма вписана, но проверить не удалось (${amountUnverified.length}) — статус изменён, сумму стоит глянуть:\n` +
-          amountUnverified
-            .slice(0, MAX_LISTED)
-            .map((r) => `${r.ticketId} — вписывали "${r.amountFilled}" (${r.verifyNote || 'причина неизвестна'})`)
-            .join('\n')
+          listWithTail(
+            amountUnverified,
+            (r) => `${r.ticketId} — вписывали "${r.amountFilled}" (${r.verifyNote || 'причина неизвестна'})`,
+            'в консоли: window.__bulkApproveLastResults'
+          )
         : '';
 
     const formatUnclearText =
@@ -1710,7 +3147,11 @@
     const failureBreakdown = [...failureCounts.entries()].sort((a, b) => b[1] - a[1]);
 
     const summaryLines = [
-      `Всего тикетов в списке: ${total}`,
+      autopilot
+        ? `Всего тикетов из списка показал сайт: ${plannedTicketIds.length} ` +
+          `(запрошено в применённых пачках: ${requestedTicketIds.length}, ` +
+          `всего в очереди на этот прогон: ${queuedTotal})`
+        : `Всего тикетов в списке: ${plannedTicketIds.length}`,
       `Успешно: ${successCount}`,
     ];
     // Строка-уточнение к «Успешно» — должна идти сразу за ним, иначе читается
@@ -1723,6 +3164,15 @@
     }
     if (amountUnverified.length > 0) {
       summaryLines.push(`  • сумма вписана, но не проверена: ${amountUnverified.length}`);
+    }
+    if (txConfirmed.length > 0) {
+      summaryLines.push(`  • из них с вписанным Transaction ID: ${txConfirmed.length}`);
+    }
+    if (txNotSaved.length > 0) {
+      summaryLines.push(`  • ⚠ статус изменён, но Transaction ID НЕ сохранился: ${txNotSaved.length}`);
+    }
+    if (txUnverified.length > 0) {
+      summaryLines.push(`  • Transaction ID вписан, но не проверен: ${txUnverified.length}`);
     }
     if (!hasProcessingDateColumn) {
       if (successCount > 0) {
@@ -1740,11 +3190,52 @@
       }
     }
     summaryLines.push(`Пропущено (не тот External Status): ${wrongStatusSkips.length}`);
+    // Что именно там стояло. «Не тот статус» без самого статуса не отвечает
+    // на единственный вопрос, который после этого возникает: тикет уже
+    // кто-то закрыл или он ушёл куда-то ещё.
+    if (wrongStatusSkips.length > 0) {
+      const byStatus = [
+        ...wrongStatusSkips.reduce((acc, r) => {
+          const key = r.externalStatus === '' || r.externalStatus == null ? '(пусто)' : r.externalStatus;
+          return acc.set(key, (acc.get(key) || 0) + 1);
+        }, new Map()),
+      ].sort((a, b) => b[1] - a[1]);
+      const TOP = 6;
+      byStatus.slice(0, TOP).forEach(([name, count]) => summaryLines.push(`  • ${name}: ${count}`));
+      if (byStatus.length > TOP) {
+        const rest = byStatus.slice(TOP).reduce((sum, [, count]) => sum + count, 0);
+        summaryLines.push(`  • прочие (${byStatus.length - TOP} статусов): ${rest}`);
+      }
+    }
     if (notRejectedSkips.length > 0) {
       summaryLines.push(`Пропущено (транзакция не rejected): ${notRejectedSkips.length}`);
     }
     if (noTxStatusSkips.length > 0) {
       summaryLines.push(`Пропущено (не прочитал Transaction Status): ${noTxStatusSkips.length}`);
+    }
+    if (notInListSkips.length > 0) {
+      summaryLines.push(`Пропущено (нет в списке): ${notInListSkips.length}`);
+    }
+    if (txMismatchSkips.length > 0) {
+      summaryLines.push(
+        `Пропущено (Transaction ID уже заполнен и отличается): ${txMismatchSkips.length}`
+      );
+    }
+    if (duplicateSkips.length > 0) {
+      summaryLines.push(
+        `Пропущено (транзакция занята другим обращением): ${duplicateSkips.length}`
+      );
+    }
+    if (knownDuplicateSkips.length > 0) {
+      summaryLines.push(
+        `Пропущено (дубль из прошлых прогонов, не открывали): ${knownDuplicateSkips.length}`
+      );
+    }
+    const unknownPopupSkips = results.filter(
+      (r) => r.status === 'skipped' && r.reason === 'unknown-popup'
+    );
+    if (unknownPopupSkips.length > 0) {
+      summaryLines.push(`Пропущено (незнакомое окно сайта): ${unknownPopupSkips.length}`);
     }
     if (zeroAmountSkips.length > 0) {
       summaryLines.push(`Пропущено (Amount = 0, подставить нечего): ${zeroAmountSkips.length}`);
@@ -1754,6 +3245,61 @@
     }
     if (formatUnclearSkips.length > 0) {
       summaryLines.push(`Пропущено (непонятный формат суммы): ${formatUnclearSkips.length}`);
+    }
+    if (autopilot) {
+      summaryLines.push(
+        `Пачек по ${CONFIG.autopilotChunkSize}: обработано ${chunksDone} из ${chunks.length}` +
+        (emptyChunks > 0 ? `, из них пустых ${emptyChunks}` : '')
+      );
+    }
+    if (currentListPairs) {
+      // Формулировка намеренно нейтральная: при работе пачками это норма,
+      // а не ошибка, и пугать этой строкой нельзя.
+      summaryLines.push(
+        autopilot
+          ? `Сайт не показал по фильтру: ${listNotOnPage} — ` +
+            `обычно это уже закрытые или удалённые тикеты`
+          : `Из вашего списка не было на этой странице: ${listNotOnPage} — ` +
+            `это нормально, если гоните список по частям`
+      );
+      summaryLines.push(
+        `Обработано из списка всего: ${listDoneTotal} из ${currentListPairs.size}, ` +
+        (listDuplicatesAll.length > 0
+          ? `отложено дублей ${listDuplicatesAll.length}, `
+          : '') +
+        (listDroppedAll.length > 0
+          ? `выбыло (сменился статус) ${listDroppedAll.length}, `
+          : '') +
+        `осталось ${listRemaining.length}`
+      );
+      if (listDroppedNew > 0) {
+        summaryLines.push(
+          `  • выбыли в этом прогоне: ${listDroppedNew} — следующие прогоны этого списка их не запрашивают`
+        );
+      }
+    }
+    // Все причины пропуска, у которых есть своя строка выше. Новая причина,
+    // не попавшая сюда, раньше просто исчезала бы из сводки — теперь она
+    // выводится общей строкой ниже. Отчёт не должен молчать о том, что скрипт
+    // чего-то не сделал.
+    const namedSkipReasons = new Set([
+      'wrong-external-status', 'transaction-not-rejected', 'no-transaction-status-column',
+      'not-in-list', 'transaction-id-mismatch', 'transaction-duplicate', 'unknown-popup',
+      'transaction-duplicate-known',
+      'zero-amount', 'amount-already-filled', 'amount-format-unclear',
+    ]);
+    const otherSkips = results.filter(
+      (r) => r.status === 'skipped' && !namedSkipReasons.has(r.reason)
+    );
+    if (otherSkips.length > 0) {
+      const counts = new Map();
+      otherSkips.forEach((r) => counts.set(r.reason, (counts.get(r.reason) || 0) + 1));
+      summaryLines.push(`Пропущено по другим причинам: ${otherSkips.length}`);
+      [...counts.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .forEach(([reason, count]) => {
+          summaryLines.push(`  • ${describeReason(reason)}: ${count}`);
+        });
     }
     summaryLines.push(`Ошибок: ${failed.length}`);
     failureBreakdown.forEach(([reason, count]) => {
@@ -1803,12 +3349,19 @@
         ? `Прогон завершён, но НЕ ВСЕ тикеты обработаны.\n`
         : amountNotSaved.length > 0
           ? `Прогон завершён, но У ЧАСТИ ТИКЕТОВ НЕ СОХРАНИЛАСЬ СУММА.\n`
-          : `Готово.\n`;
+          : txNotSaved.length > 0
+            ? `Прогон завершён, но У ЧАСТИ ТИКЕТОВ НЕ СОХРАНИЛСЯ TRANSACTION ID.\n`
+            : `Готово.\n`;
 
     const reportText =
       header +
       summaryLines.join('\n') +
       popupsListText +
+      duplicateText +
+      txNotSavedText +
+      txFilledListText +
+      txUnverifiedText +
+      txMismatchText +
       amountNotSavedText +
       amountFilledListText +
       amountUnverifiedText +
@@ -1819,6 +3372,10 @@
       formatUnclearText +
       failedText +
       notReachedText +
+      (autopilot
+        ? `\n\nВ поле фильтра «Ticket ID» осталась последняя пачка — таблица на экране ` +
+          `показывает именно её. Очисти поле и нажми Apply, чтобы вернуть обычную выдачу.`
+        : '') +
       `\n\nПодробности — в консоли (F12).`;
 
     // Строки для вставки в таблицу учёта. Берём ТОЛЬКО подтверждённые:
@@ -1836,7 +3393,53 @@
     window.__bulkApproveStaleTickets = staleResults;
     window.__bulkApproveCopyRows = copyRows;
 
-    showReportWindow(reportText, copyRows);
+    // Блоков для копирования может быть несколько. В режиме по списку первым
+    // идёт самый нужный: оставшиеся Ticket ID — их сразу вставляют в поиск
+    // сайта, чтобы набрать следующую пачку.
+    const copyBlocks = [];
+
+    if (currentListPairs) {
+      if (listRemaining.length > 0) {
+        copyBlocks.push({
+          label: autopilot
+            ? `Не закрыты (${listRemaining.length}) — останутся в памяти списка ` +
+              `и попадут в следующий прогон:`
+            : `Оставшиеся Ticket ID (${listRemaining.length}) — вставить в поиск для следующей пачки:`,
+          text: listRemaining.join('\n'),
+        });
+      }
+      // Дубли — отдельным блоком и ровно парой «тикет → транзакция»: по нему
+      // проходят руками, поэтому он должен вставляться в таблицу как есть,
+      // без причины третьей колонкой. Номер чужого обращения по каждому из
+      // них есть в тексте отчёта выше.
+      if (listDuplicatesAll.length > 0) {
+        copyBlocks.push(duplicateCopyBlock(listDuplicatesAll));
+        window.__bulkApproveDuplicates = listDuplicatesAll;
+      }
+      if (listNeedsAttention.length > 0) {
+        copyBlocks.push({
+          label: `Прогнать заново или посмотреть глазами (${listNeedsAttention.length}):`,
+          text: listNeedsAttention.map((a) => `${a.ticketId}\t${a.reason}`).join('\n'),
+        });
+      }
+      if (txConfirmed.length > 0) {
+        copyBlocks.push({
+          label: `Для таблицы (${txConfirmed.length}) — Ticket ID, Transaction ID:`,
+          text: txConfirmed.map((r) => `${r.ticketId}\t${r.transactionIdFilled}`).join('\n'),
+        });
+      }
+      window.__bulkApproveListRemaining = listRemaining;
+      window.__bulkApproveListNeedsAttention = listNeedsAttention;
+    }
+
+    if (copyRows.length > 0) {
+      copyBlocks.push({
+        label: `Для таблицы (${copyRows.length}) — Ticket ID, Transaction ID, Amount:`,
+        text: copyRows.map((r) => `${r.ticketId}\t${r.transactionId}\t${r.amount}`).join('\n'),
+      });
+    }
+
+    showReportWindow(reportText, copyBlocks);
   }
 
   // ------------------------------------------------------------------
@@ -1851,7 +3454,718 @@
   // Классы намеренно свои: окно не должно попадать ни под .modal_wrap
   // (его ищет getOpenModal), ни под .swal2-popup (за ним следит swalObserver).
   // ------------------------------------------------------------------
-  function showReportWindow(reportText, copyRows) {
+  // ------------------------------------------------------------------
+  // СПИСОК «Ticket ID → Transaction ID»
+  //
+  // Оператор приносит его из своей таблицы двумя колонками. Для скрипта это
+  // единственный источник номеров транзакций в режиме «по списку».
+  // ------------------------------------------------------------------
+  // У каждого режима своя память: список пар для «по списку (225)» и список
+  // одних Ticket ID для обычного 225 — разные вещи, и путать их счётчики
+  // обработанного нельзя.
+  const LIST_STORAGE_KEYS = {
+    pairs: 'th-bulk-approve:tx-list:v1',
+    ids: 'th-bulk-approve:ticket-list:v1',
+  };
+
+  function listStorageKey(workflow) {
+    return workflow.fillTransactionIdFromList ? LIST_STORAGE_KEYS.pairs : LIST_STORAGE_KEYS.ids;
+  }
+
+  // Список текущего прогона: Map «Ticket ID → Transaction ID». В режиме, где
+  // номеров транзакций нет, значением стоит null — сам список при этом
+  // продолжает работать отбором, и вся остальная механика (память между
+  // прогонами, счётчики, остаток) не знает о разнице.
+  let currentListPairs = null;
+  let currentListState = null;
+  // Тикеты, на которых сайт сказал «транзакция уже занята другим
+  // обращением» — за все прогоны этого списка. Map ticketId → запись.
+  // Повторно такие тикеты не открываются: ответ сайта от повторной попытки
+  // не изменится, а каждая стоит секунд десять и одно лишнее окно.
+  let currentListDuplicates = null;
+  // Тикеты, выбывшие из списка: их External Status уже не тот, что нужен
+  // режиму. Список собирают из выгрузки тикетов в нужном статусе, а
+  // обработка идёт часами — за это время тикет может уйти к кому-то другому.
+  // Такой тикет больше не интересен: следующие прогоны этого списка его не
+  // запрашивают. Вернётся в нужный статус — попадёт в новую выгрузку, а с
+  // новым списком память начинается заново.
+  let currentListDropped = null;
+
+  // Запись о дубле в том виде, в каком она лежит в памяти списка
+  function duplicateRecord(r, fromThisRun) {
+    return {
+      ticketId: String(r.ticketId),
+      transactionId: r.attemptedTransactionId || r.transactionId || '',
+      ownerTicketId: r.ownerTicketId || null,
+      popupText: r.popupText || '',
+      at: r.at || Date.now(),
+      fromThisRun: !!fromThisRun,
+    };
+  }
+
+  // Блок для копирования: ровно пара «тикет → транзакция», по ней проходят
+  // руками, поэтому она должна вставляться в таблицу как есть.
+  function duplicateCopyBlock(records) {
+    return {
+      label:
+        `Транзакция занята другим обращением (${records.length}) — ` +
+        `разобрать вручную; Ticket ID, Transaction ID:`,
+      text: records.map((d) => `${d.ticketId}\t${d.transactionId}`).join('\n'),
+    };
+  }
+
+  // Разбирает вставленный текст. Возвращает пары и ВСЕ найденные претензии:
+  // окно ввода покажет их человеку и не даст запуститься, пока они есть.
+  //
+  // Намеренно НЕ «вытаскиваем два числа регуляркой»: номер вида TXN-123 так
+  // молча превратился бы в 123, и в тикет уехало бы не то.
+  function parseTicketTransactionList(text) {
+    const pairs = new Map();
+    const badLines = [];
+    const duplicateTickets = [];
+    const byTransaction = new Map();
+
+    String(text == null ? '' : text)
+      .split(/\r?\n/)
+      .forEach((raw, idx) => {
+        const lineNo = idx + 1;
+        const line = raw.trim();
+        if (line === '') return;
+
+        // Основной формат — таб между колонками. Заодно принимаем тире,
+        // точку с запятой, запятую и просто пробелы.
+        const tokens = line
+          .replace(/\s+[-—–]\s+/g, '\t')
+          .split(/[\t;,\s]+/)
+          .map((t) => t.trim())
+          .filter((t) => t !== '');
+
+        if (tokens.length < 2) {
+          badLines.push({ line: lineNo, text: line, why: 'нужны два значения' });
+          return;
+        }
+
+        const ticketId = tokens[0];
+        const transactionId = tokens[1];
+
+        if (!/^\d+$/.test(ticketId)) {
+          badLines.push({ line: lineNo, text: line, why: 'первое значение не похоже на Ticket ID' });
+          return;
+        }
+        if (!/^[A-Za-z0-9._-]+$/.test(transactionId)) {
+          badLines.push({
+            line: lineNo,
+            text: line,
+            why: 'второе значение не похоже на Transaction ID',
+          });
+          return;
+        }
+
+        if (pairs.has(ticketId)) {
+          // Один и тот же тикет с одним и тем же номером — просто дубль
+          // строки, схлопываем молча. С разными номерами — это уже вопрос.
+          if (pairs.get(ticketId) !== transactionId) {
+            duplicateTickets.push({
+              ticketId,
+              values: [pairs.get(ticketId), transactionId],
+            });
+          }
+          return;
+        }
+
+        pairs.set(ticketId, transactionId);
+        if (!byTransaction.has(transactionId)) byTransaction.set(transactionId, []);
+        byTransaction.get(transactionId).push(ticketId);
+      });
+
+    // Одна транзакция у разных тикетов — ровно тот случай, из-за которого в
+    // этом проекте чужая транзакция уже дважды уезжала не в тот тикет.
+    const duplicateTransactions = [...byTransaction.entries()]
+      .filter(([, tickets]) => tickets.length > 1)
+      .map(([transactionId, tickets]) => ({ transactionId, tickets }));
+
+    return { pairs, badLines, duplicateTickets, duplicateTransactions };
+  }
+
+  // Разбирает список ОДНИХ Ticket ID — по номеру в строке. Возвращает то же,
+  // что и разбор пар, чтобы окно ввода и прогон не различали эти два случая.
+  //
+  // Строго один столбец: так решено сознательно. Список сюда попадает из
+  // выгрузки, и лишняя колонка обычно значит, что скопировали не тот кусок
+  // таблицы, — молча взять из неё первое число было бы худшим из исходов.
+  function parseTicketIdList(text) {
+    const pairs = new Map();
+    const badLines = [];
+    let duplicates = 0;
+
+    String(text == null ? '' : text)
+      .split(/\r?\n/)
+      .forEach((raw, idx) => {
+        const lineNo = idx + 1;
+        const line = raw.trim();
+        if (line === '') return;
+
+        if (/[\t;,]/.test(line) || /\s/.test(line)) {
+          badLines.push({
+            line: lineNo,
+            text: line,
+            why: 'в строке больше одного значения — нужен только Ticket ID',
+          });
+          return;
+        }
+        if (!/^\d+$/.test(line)) {
+          badLines.push({ line: lineNo, text: line, why: 'не похоже на Ticket ID' });
+          return;
+        }
+
+        if (pairs.has(line)) {
+          duplicates++;
+          return;
+        }
+        // null вместо номера транзакции: в этом режиме его просто нет
+        pairs.set(line, null);
+      });
+
+    return { pairs, badLines, duplicateTickets: [], duplicateTransactions: [], duplicates };
+  }
+
+  // Разбор списка для конкретного режима — одна точка выбора на весь скрипт.
+  function parseListForWorkflow(workflow, text) {
+    return workflow.fillTransactionIdFromList
+      ? parseTicketTransactionList(text)
+      : parseTicketIdList(text);
+  }
+
+  // Отпечаток набора пар: по нему понимаем, тот же это список или новый.
+  function listFingerprint(pairs) {
+    return [...pairs.entries()]
+      .map(([ticketId, transactionId]) => `${ticketId}:${transactionId}`)
+      .sort()
+      .join('|');
+  }
+
+  // localStorage может быть недоступен (приватное окно, запрет на сайте) —
+  // любое обращение оборачиваем, память между прогонами это удобство, а не
+  // условие работы.
+  function readListStorage(key) {
+    try {
+      const raw = window.localStorage.getItem(key);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      if (!data || typeof data !== 'object') return null;
+      return {
+        savedAt: data.savedAt || null,
+        text: typeof data.text === 'string' ? data.text : '',
+        done: Array.isArray(data.done) ? data.done.map(String) : [],
+        needsAttention: Array.isArray(data.needsAttention) ? data.needsAttention : [],
+        dropped: Array.isArray(data.dropped)
+          ? data.dropped
+              .filter((d) => d && d.ticketId)
+              .map((d) => ({ ...d, ticketId: String(d.ticketId) }))
+          : [],
+        duplicates: Array.isArray(data.duplicates)
+          ? data.duplicates
+              .filter((d) => d && d.ticketId)
+              .map((d) => ({ ...d, ticketId: String(d.ticketId) }))
+          : [],
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeListStorage(key, data) {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(data));
+    } catch (e) {
+      console.warn(
+        '[BulkApprove] Не удалось сохранить список — память между прогонами в этом браузере не работает.',
+        e
+      );
+    }
+  }
+
+  function clearListStorage(key) {
+    try {
+      window.localStorage.removeItem(key);
+    } catch (e) {
+      /* см. readListStorage */
+    }
+  }
+
+  // Окно ввода списка. Возвращает { pairs, state } либо null (отмена).
+  // Окно ввода списка. Обслуживает два режима сразу:
+  //
+  //   • «по списку (225)» — список пар «Ticket ID → Transaction ID», без
+  //     него режим бессмысленен, поэтому запуск только по списку;
+  //   • обычный 225 — список одних Ticket ID, и он НЕ обязателен: рядом
+  //     стоит кнопка «Запустить по экрану», которая даёт прежнее поведение.
+  //
+  // Это же окно заменяет прежний confirm(): в нём и так написано, сколько
+  // тикетов на экране и что с ними будет. Два диалога подряд ради одного и
+  // того же вопроса — лишний клик на каждом ежедневном прогоне.
+  //
+  // Возвращает { pairs, state, autopilot } — запуск по списку,
+  //            { pairs: null, state: null, autopilot: false } — по экрану,
+  //            null — отмена.
+  function showTicketListWindow(workflow) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let onKey = null;
+      let overlay = null;
+
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        if (onKey) document.removeEventListener('keydown', onKey);
+        if (overlay) overlay.remove();
+        resolve(value);
+      };
+
+      try {
+        const needsPairs = !!workflow.fillTransactionIdFromList;
+        const canRunByScreen = !needsPairs;
+        const storageKey = listStorageKey(workflow);
+        const saved = readListStorage(storageKey);
+        const rowsOnScreen = getTicketRows().length;
+
+        overlay = document.createElement('div');
+        // Классы намеренно НЕ .modal_wrap и НЕ .swal2-popup: иначе скрипт
+        // принял бы собственное окно за окно сайта и встал бы на нём.
+        overlay.className = 'bulk-approve-list-overlay';
+        overlay.style.cssText = [
+          'position:fixed', 'inset:0', 'z-index:2147483600',
+          'background:rgba(0,0,0,.5)', 'display:flex',
+          'align-items:center', 'justify-content:center', 'padding:20px',
+        ].join(';');
+
+        const panel = document.createElement('div');
+        panel.style.cssText = [
+          'background:#fff', 'color:#222', 'border-radius:8px',
+          'box-shadow:0 10px 40px rgba(0,0,0,.35)', 'max-width:760px',
+          'width:100%', 'max-height:90vh', 'display:flex',
+          'flex-direction:column', 'font-family:system-ui,Arial,sans-serif',
+          'font-size:14px', 'line-height:1.45',
+        ].join(';');
+
+        const body = document.createElement('div');
+        body.style.cssText = 'padding:18px 20px;overflow:auto;flex:1';
+
+        const title = document.createElement('div');
+        title.textContent = workflow.buttonLabel;
+        title.style.cssText = 'font-weight:600;font-size:16px;margin-bottom:4px';
+        body.appendChild(title);
+
+        // Что вообще произойдёт — раньше это был текст confirm()
+        const plan = document.createElement('div');
+        plan.style.cssText = 'color:#444;margin-bottom:12px;white-space:pre-wrap';
+        plan.textContent = [
+          `На экране сейчас тикетов: ${rowsOnScreen}.`,
+          'Будут обработаны только те, у кого External Status — один из:',
+          ...workflow.requiredExternalStatuses.map((name) => `  • ${name}`),
+          `Остальные пропускаются. У подходящих будет выставлен статус ` +
+            `"${workflow.targetStatusLabel}" и нажат Apply.`,
+        ].join('\n');
+        body.appendChild(plan);
+
+        const hint = document.createElement('div');
+        hint.textContent = needsPairs
+          ? 'Вставь список: Ticket ID и Transaction ID через табуляцию, по паре в строке. ' +
+            'Можно вставить весь список целиком — скрипт возьмёт только те тикеты, ' +
+            'которые сейчас на странице (или наберёт их сам, если включён автопилот).'
+          : 'Вставь список Ticket ID — по одному номеру в строке, без других колонок. ' +
+            'Скрипт обработает только эти тикеты. Если список не нужен, нажми ' +
+            '«Запустить по экрану» — тогда всё как раньше.';
+        hint.style.cssText = 'color:#555;margin-bottom:12px';
+        body.appendChild(hint);
+
+        const area = document.createElement('textarea');
+        area.value = saved ? saved.text : '';
+        area.rows = 12;
+        area.placeholder = needsPairs
+          ? '22708318\t23658907281\n22707583\t23658797989'
+          : '22708318\n22707583';
+        area.style.cssText = [
+          'width:100%', 'box-sizing:border-box', 'font-family:Consolas,monospace',
+          'font-size:13px', 'padding:8px', 'border:1px solid #ccc',
+          'border-radius:4px', 'resize:vertical', 'white-space:pre',
+        ].join(';');
+        body.appendChild(area);
+
+        // Автопилот. Включён по умолчанию: ради него этот режим и делался,
+        // а ручная работа пачками остаётся запасным путём — например, если
+        // оператору нужно прогнать только то, что он уже отобрал на экране
+        // своими фильтрами.
+        const missingControls = autopilotMissingControls();
+
+        const autoRow = document.createElement('label');
+        autoRow.style.cssText =
+          'display:flex;gap:8px;align-items:flex-start;margin-top:12px;cursor:pointer';
+
+        const autoBox = document.createElement('input');
+        autoBox.type = 'checkbox';
+        autoBox.className = 'bulk-approve-autopilot';
+        autoBox.checked = missingControls.length === 0;
+        autoBox.disabled = missingControls.length > 0;
+        autoBox.style.cssText = 'margin-top:3px;flex-shrink:0';
+
+        const autoText = document.createElement('div');
+        autoText.style.cssText = 'color:#333';
+        autoText.textContent =
+          missingControls.length > 0
+            ? `Автопилот недоступен: на странице нет ${missingControls.join(' и ')}. ` +
+              'Разверни блок Quick filters и открой это окно заново. Сейчас будут ' +
+              'обработаны только тикеты, которые уже на экране.'
+            : `Автопилот: подставлять тикеты из списка в фильтр страницы пачками ` +
+              `по ${CONFIG.autopilotChunkSize} и нажимать Apply самому. ` +
+              `Текущая выдача на экране будет заменена.`;
+
+        autoRow.appendChild(autoBox);
+        autoRow.appendChild(autoText);
+        body.appendChild(autoRow);
+
+        const status = document.createElement('div');
+        status.style.cssText = 'margin-top:10px;white-space:pre-wrap';
+        body.appendChild(status);
+
+        const footer = document.createElement('div');
+        footer.style.cssText =
+          'padding:12px 20px;border-top:1px solid #eee;display:flex;gap:8px;' +
+          'justify-content:flex-end;flex-shrink:0;flex-wrap:wrap';
+
+        const resetBtn = document.createElement('button');
+        resetBtn.textContent = 'Начать заново';
+        resetBtn.title = 'Забыть сохранённый список, счётчики, отложенные дубли и выбывшие тикеты';
+        resetBtn.style.cssText = [
+          'padding:8px 16px', 'border:1px solid #bbb', 'border-radius:4px',
+          'background:#f5f5f5', 'font-size:14px', 'cursor:pointer', 'margin-right:auto',
+        ].join(';');
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Отмена';
+        cancelBtn.style.cssText = [
+          'padding:8px 20px', 'border:1px solid #bbb', 'border-radius:4px',
+          'background:#f5f5f5', 'font-size:14px', 'cursor:pointer',
+        ].join(';');
+
+        // Прежнее поведение обычного 225: взять то, что оператор уже вывел
+        // на экран сам. Отдельной кнопкой, а не пустым списком, — чтобы
+        // «запустить без списка» нельзя было сделать случайно.
+        const screenBtn = document.createElement('button');
+        screenBtn.className = 'bulk-approve-run-screen';
+        screenBtn.textContent = `Запустить по экрану (${rowsOnScreen})`;
+        screenBtn.style.cssText = [
+          'padding:8px 20px', 'border:1px solid #2ABFCF', 'border-radius:4px',
+          'background:#fff', 'color:#1a8d99', 'font-size:14px', 'cursor:pointer',
+        ].join(';');
+
+        const runBtn = document.createElement('button');
+        runBtn.textContent = 'Запустить по списку';
+        runBtn.style.cssText = [
+          'padding:8px 20px', 'border:none', 'border-radius:4px',
+          'background:#2ABFCF', 'color:#fff', 'font-size:14px', 'cursor:pointer',
+        ].join(';');
+
+        footer.appendChild(resetBtn);
+        footer.appendChild(cancelBtn);
+        if (canRunByScreen) footer.appendChild(screenBtn);
+        footer.appendChild(runBtn);
+
+        let parsed = null;
+
+        // Тот же список, что лежит в памяти? Счётчики обработанного имеют
+        // смысл только для него, и от этого же зависит, сколько тикетов
+        // реально осталось прогнать.
+        const savedFingerprintOf = (p) =>
+          saved
+            ? listFingerprint(parseListForWorkflow(workflow, saved.text).pairs) ===
+              listFingerprint(p)
+            : false;
+
+        const refresh = () => {
+          parsed = parseListForWorkflow(workflow, area.value);
+          const lines = [];
+          const sameAsSaved = savedFingerprintOf(parsed.pairs);
+          const doneIds = new Set(sameAsSaved ? saved.done : []);
+          // Отложенные дубли повторно не прогоняются — в «осталось» их нет
+          const parkedIds = new Set(
+            sameAsSaved
+              ? [...saved.duplicates, ...saved.dropped].map((d) => d.ticketId)
+              : []
+          );
+          const remainingCount = [...parsed.pairs.keys()].filter(
+            (id) => !doneIds.has(id) && !parkedIds.has(id)
+          ).length;
+
+          lines.push(needsPairs
+            ? `Распознано пар: ${parsed.pairs.size}`
+            : `Распознано номеров: ${parsed.pairs.size}`);
+
+          if (parsed.duplicates > 0) {
+            lines.push(`Повторов в списке: ${parsed.duplicates} — схлопнул.`);
+          }
+
+          if (saved && (saved.done.length > 0 || saved.duplicates.length > 0 || saved.dropped.length > 0)) {
+            if (sameAsSaved) {
+              lines.push(
+                `В памяти: обработано ${saved.done.length}, ` +
+                `с проблемами ${saved.needsAttention.length}, ` +
+                (saved.duplicates.length > 0
+                  ? `отложено дублей ${saved.duplicates.length} (повторно не прогоняются), `
+                  : '') +
+                (saved.dropped.length > 0
+                  ? `выбыло (сменился статус) ${saved.dropped.length}, `
+                  : '') +
+                `осталось ${remainingCount}`
+              );
+            } else {
+              lines.push('Список изменился — счётчики обработанного сброшены.');
+            }
+          }
+
+          if (autoBox.checked && remainingCount > 0) {
+            const chunkCount = Math.ceil(remainingCount / CONFIG.autopilotChunkSize);
+            lines.push(
+              `Автопилот прогонит ${remainingCount} ` +
+              `${chunkCount === 1 ? 'тикет(ов) одной пачкой' : `тикетов за ${chunkCount} пачек`}.`
+            );
+          }
+
+          if (parsed.badLines.length > 0) {
+            lines.push('');
+            lines.push(`Не разобрал строк: ${parsed.badLines.length}`);
+            parsed.badLines.slice(0, 10).forEach((b) => {
+              lines.push(`  строка ${b.line}: ${b.why} — «${b.text}»`);
+            });
+            if (parsed.badLines.length > 10) {
+              lines.push(`  … и ещё ${parsed.badLines.length - 10}`);
+            }
+            lines.push('Если первая строка — заголовок таблицы, её нужно убрать.');
+          }
+
+          if (parsed.duplicateTickets.length > 0) {
+            lines.push('');
+            lines.push('Один тикет с РАЗНЫМИ транзакциями — так нельзя:');
+            parsed.duplicateTickets.slice(0, 10).forEach((d) => {
+              lines.push(`  ${d.ticketId}: ${d.values.join(' и ')}`);
+            });
+          }
+
+          if (parsed.duplicateTransactions.length > 0) {
+            lines.push('');
+            lines.push('Одна транзакция у РАЗНЫХ тикетов — так нельзя:');
+            parsed.duplicateTransactions.slice(0, 10).forEach((d) => {
+              lines.push(`  ${d.transactionId}: тикеты ${d.tickets.join(', ')}`);
+            });
+          }
+
+          const blocked =
+            parsed.pairs.size === 0 ||
+            parsed.badLines.length > 0 ||
+            parsed.duplicateTickets.length > 0 ||
+            parsed.duplicateTransactions.length > 0;
+
+          status.textContent = lines.join('\n');
+          status.style.color = blocked && parsed.pairs.size > 0 ? '#B00020' : '#555';
+          runBtn.disabled = blocked;
+          runBtn.style.opacity = blocked ? '0.5' : '1';
+          runBtn.style.cursor = blocked ? 'default' : 'pointer';
+
+          // По экрану запускать нечего, если экран пуст
+          screenBtn.disabled = rowsOnScreen === 0;
+          screenBtn.style.opacity = rowsOnScreen === 0 ? '0.5' : '1';
+          screenBtn.style.cursor = rowsOnScreen === 0 ? 'default' : 'pointer';
+        };
+
+        area.addEventListener('input', refresh);
+        autoBox.addEventListener('change', refresh);
+        refresh();
+
+        resetBtn.addEventListener('click', () => {
+          clearListStorage(storageKey);
+          area.value = '';
+          refresh();
+        });
+        cancelBtn.addEventListener('click', () => finish(null));
+        screenBtn.addEventListener('click', () => {
+          if (screenBtn.disabled) return;
+          finish({ pairs: null, state: null, autopilot: false });
+        });
+        runBtn.addEventListener('click', () => {
+          if (runBtn.disabled) return;
+          const text = area.value;
+          // Счётчики имеют смысл только для того же самого списка
+          const keep = savedFingerprintOf(parsed.pairs);
+          const state = {
+            savedAt: Date.now(),
+            text,
+            done: keep ? saved.done.slice() : [],
+            needsAttention: keep ? saved.needsAttention.slice() : [],
+            duplicates: keep ? saved.duplicates.slice() : [],
+            dropped: keep ? saved.dropped.slice() : [],
+          };
+          writeListStorage(storageKey, state);
+          finish({
+            pairs: parsed.pairs,
+            state,
+            autopilot: autoBox.checked && !autoBox.disabled,
+          });
+        });
+
+        onKey = (e) => {
+          if (e.key === 'Escape') finish(null);
+        };
+        document.addEventListener('keydown', onKey);
+        overlay.addEventListener('click', (e) => {
+          if (e.target === overlay) finish(null);
+        });
+
+        panel.appendChild(body);
+        panel.appendChild(footer);
+        overlay.appendChild(panel);
+        document.body.appendChild(overlay);
+        area.focus();
+      } catch (e) {
+        console.error('[BulkApprove] Не удалось показать окно ввода списка:', e);
+        alert(
+          'Не удалось показать окно ввода списка — подробности в консоли (F12). Прогон не начат.'
+        );
+        finish(null);
+      }
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // СЧЁТЧИК ПРОГРЕССА.
+  //
+  // Прогон сотни тикетов идёт больше десяти минут, и почти всё это время
+  // скрипт просто ждёт сайт. Без панели единственный признак жизни — строки
+  // в консоли, и отличить «работает» от «завис» невозможно.
+  // ------------------------------------------------------------------
+  const progressState = {
+    visible: false,
+    title: '',
+    index: 0,
+    total: 0,
+    ticketId: '',
+    ok: 0,
+    skipped: 0,
+    failed: 0,
+    action: '',
+    listLine: '',
+    chunkLine: '',
+  };
+  let progressBox = null;
+
+  function setProgress(patch) {
+    Object.assign(progressState, patch);
+    renderProgress();
+  }
+
+  function renderProgress() {
+    try {
+      if (!progressState.visible) {
+        if (progressBox) progressBox.style.display = 'none';
+        return;
+      }
+      if (!progressBox) {
+        progressBox = document.createElement('div');
+        progressBox.id = 'bulk-approve-progress';
+        progressBox.style.cssText = [
+          'position:fixed', 'right:20px', 'bottom:70px', 'z-index:999998',
+          'background:rgba(28,28,30,.92)', 'color:#fff', 'padding:10px 14px',
+          'border-radius:8px', 'font-family:system-ui,Arial,sans-serif',
+          'font-size:13px', 'line-height:1.5', 'max-width:340px',
+          'box-shadow:0 4px 12px rgba(0,0,0,.25)', 'pointer-events:none',
+          'white-space:pre-wrap',
+        ].join(';');
+        document.body.appendChild(progressBox);
+      }
+      progressBox.style.display = 'block';
+
+      const lines = [progressState.title];
+      if (progressState.chunkLine) lines.push(progressState.chunkLine);
+      lines.push(
+        `Тикет ${progressState.index} из ${progressState.total}` +
+        (progressState.ticketId ? ` · ${progressState.ticketId}` : '')
+      );
+      lines.push(
+        `успешно ${progressState.ok} · пропущено ${progressState.skipped} · ошибок ${progressState.failed}`
+      );
+      if (progressState.listLine) lines.push(progressState.listLine);
+      if (progressState.action) lines.push(`${progressState.action}…`);
+      progressBox.textContent = lines.join('\n');
+    } catch (e) {
+      /* панель — удобство, ронять из-за неё прогон нельзя */
+    }
+  }
+
+  function hideProgress() {
+    progressState.visible = false;
+    renderProgress();
+  }
+
+  // Одна колодка «подпись + поле + кнопка Скопировать». Блоков в окне может
+  // быть несколько: в режиме по списку копировать надо и оставшиеся Ticket ID
+  // для следующей пачки, и проблемные тикеты, и таблицу для учёта.
+  function appendCopyBlock(body, block) {
+    const label = document.createElement('div');
+    label.textContent = block.label;
+    label.style.cssText = 'margin:18px 0 6px;font-weight:600';
+    body.appendChild(label);
+
+    const area = document.createElement('textarea');
+    area.className = 'bulk-approve-report-copy';
+    area.readOnly = true;
+    area.value = block.text;
+    area.rows = Math.min(block.text.split('\n').length + 1, 12);
+    area.style.cssText = [
+      'width:100%', 'box-sizing:border-box', 'font-family:Consolas,monospace',
+      'font-size:13px', 'padding:8px', 'border:1px solid #ccc',
+      'border-radius:4px', 'resize:vertical', 'white-space:pre',
+    ].join(';');
+    area.addEventListener('focus', () => area.select());
+    body.appendChild(area);
+
+    const copyBtn = document.createElement('button');
+    copyBtn.textContent = 'Скопировать';
+    copyBtn.style.cssText = [
+      'margin-top:8px', 'padding:8px 16px', 'border:none',
+      'border-radius:4px', 'background:#2ABFCF', 'color:#fff',
+      'font-size:14px', 'cursor:pointer',
+    ].join(';');
+    copyBtn.addEventListener('click', async () => {
+      // Выделяем в любом случае: даже если запись в буфер не пройдёт,
+      // человек сможет нажать Ctrl+C сам.
+      area.focus();
+      area.select();
+      let ok = false;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(block.text);
+          ok = true;
+        }
+      } catch (e) {
+        ok = false;
+      }
+      if (!ok) {
+        try {
+          ok = document.execCommand('copy');
+        } catch (e) {
+          ok = false;
+        }
+      }
+      copyBtn.textContent = ok ? 'Скопировано ✓' : 'Выделено — нажми Ctrl+C';
+      copyBtn.style.background = ok ? '#3BA55D' : '#E0A030';
+      setTimeout(() => {
+        copyBtn.textContent = 'Скопировать';
+        copyBtn.style.background = '#2ABFCF';
+      }, 2500);
+    });
+    body.appendChild(copyBtn);
+  }
+
+  function showReportWindow(reportText, copyBlocks) {
     // Если что-то пойдёт не так с вёрсткой — отчёт всё равно должен дойти
     // до человека, поэтому любой сбой откатывается на обычный alert.
     try {
@@ -1887,67 +4201,9 @@
       ].join(';');
       body.appendChild(report);
 
-      if (copyRows.length > 0) {
-        const tsv = copyRows
-          .map((r) => `${r.ticketId}\t${r.transactionId}\t${r.amount}`)
-          .join('\n');
-
-        const label = document.createElement('div');
-        label.textContent =
-          `Для таблицы (${copyRows.length}) — Ticket ID, Transaction ID, Amount:`;
-        label.style.cssText = 'margin:18px 0 6px;font-weight:600';
-        body.appendChild(label);
-
-        const area = document.createElement('textarea');
-        area.className = 'bulk-approve-report-copy';
-        area.readOnly = true;
-        area.value = tsv;
-        area.rows = Math.min(copyRows.length + 1, 12);
-        area.style.cssText = [
-          'width:100%', 'box-sizing:border-box', 'font-family:Consolas,monospace',
-          'font-size:13px', 'padding:8px', 'border:1px solid #ccc',
-          'border-radius:4px', 'resize:vertical', 'white-space:pre',
-        ].join(';');
-        area.addEventListener('focus', () => area.select());
-        body.appendChild(area);
-
-        const copyBtn = document.createElement('button');
-        copyBtn.textContent = 'Скопировать';
-        copyBtn.style.cssText = [
-          'margin-top:8px', 'padding:8px 16px', 'border:none',
-          'border-radius:4px', 'background:#2ABFCF', 'color:#fff',
-          'font-size:14px', 'cursor:pointer',
-        ].join(';');
-        copyBtn.addEventListener('click', async () => {
-          // Выделяем в любом случае: даже если запись в буфер не пройдёт,
-          // человек сможет нажать Ctrl+C сам.
-          area.focus();
-          area.select();
-          let ok = false;
-          try {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              await navigator.clipboard.writeText(tsv);
-              ok = true;
-            }
-          } catch (e) {
-            ok = false;
-          }
-          if (!ok) {
-            try {
-              ok = document.execCommand('copy');
-            } catch (e) {
-              ok = false;
-            }
-          }
-          copyBtn.textContent = ok ? 'Скопировано ✓' : 'Выделено — нажми Ctrl+C';
-          copyBtn.style.background = ok ? '#3BA55D' : '#E0A030';
-          setTimeout(() => {
-            copyBtn.textContent = 'Скопировать';
-            copyBtn.style.background = '#2ABFCF';
-          }, 2500);
-        });
-        body.appendChild(copyBtn);
-      }
+      (copyBlocks || [])
+        .filter((block) => block && block.text !== '')
+        .forEach((block) => appendCopyBlock(body, block));
 
       const footer = document.createElement('div');
       footer.style.cssText =
@@ -2101,6 +4357,7 @@
     observer.observe(document.documentElement, { childList: true, subtree: true });
   }
 
+  installRequestLog();
   waitForeverAndAddButtons();
 
 })();
