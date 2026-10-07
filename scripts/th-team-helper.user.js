@@ -1153,11 +1153,6 @@
         font-weight: 600;
         color: ${T.textStrong};
       }
-      #th-prevstatus-tt .th-pst-date {
-        color: ${T.textDim};
-        margin-top: 3px;
-        font-size: 10.5px;
-      }
     `);
 
     const tt = document.createElement('div');
@@ -1170,11 +1165,10 @@
 
     const LABELS = { prev: 'Предыдущий статус', inWork: 'В работе у' };
 
-    function render(mode, valueHtml, dateHtml) {
+    function render(mode, valueHtml) {
       tt.innerHTML =
         `<div class="th-pst-label">${LABELS[mode]}</div>` +
-        `<div class="th-pst-value">${valueHtml}</div>` +
-        (dateHtml ? `<div class="th-pst-date">${dateHtml}</div>` : '');
+        `<div class="th-pst-value">${valueHtml}</div>`;
     }
 
     function escapeHtml(s) {
@@ -1186,17 +1180,15 @@
     function pickPrev(list) {
       const idx = list.findIndex(r => TRIGGERS.has((r.nameExternalStatus || '').trim().toLowerCase()));
       if (idx === -1 || idx + 1 >= list.length) return null;
-      const prev = list[idx + 1];
-      return { value: prev.nameExternalStatus || '—', date: prev.dateEdit || '' };
+      return list[idx + 1].nameExternalStatus || '—';
     }
 
     // Кто в работе — Admin username из самой свежей записи (верхняя
     // строка в окне «История тикета», колонка с ключом adminProcessedLogin).
-    // Только логин, без даты.
     function pickInWork(list) {
       const latest = list[0];
       if (!latest) return null;
-      return { value: String(latest.adminProcessedLogin || '').trim() || 'Не указан' };
+      return String(latest.adminProcessedLogin || '').trim() || 'Не указан';
     }
 
     function fetchHistory(ticketId) {
@@ -1269,7 +1261,7 @@
         if (currentTicket !== ticketId) return;
         const result = list && (mode === 'prev' ? pickPrev(list) : pickInWork(list));
         if (result) {
-          render(mode, escapeHtml(result.value), result.date ? escapeHtml(result.date) : '');
+          render(mode, escapeHtml(result));
         } else {
           render(mode, 'Не найдено');
         }
