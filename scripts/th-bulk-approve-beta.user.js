@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.12
+// @version      0.13
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -2489,6 +2489,166 @@
 
     const results = [];
     let stoppedEarly = false;
+
+    // ------------------------------------------------------------------
+    // ПАМЯТЬ СПИСКА ПО ХОДУ ПРОГОНА.
+    //
+    // Раньше память писалась один раз, в конце. Если вкладка зависала или
+    // перезагружалась, отчёта не было — и сделанное за этот прогон терялось.
+    // Теперь снимок пишется после каждого тикета, а итоговый отчёт строится
+    // по последнему результату КАЖДОГО тикета списка за все прогоны: человеку
+    // нужен итог по списку, который он принёс, а не по последнему запуску.
+    // ------------------------------------------------------------------
+    const listRunNo = currentListState ? (currentListState.runs || 0) + 1 : 0;
+    const listResultsAtStart = new Map();
+    if (currentListPairs && currentListState) {
+      Object.entries(currentListState.results || {}).forEach(([id, r]) => {
+        if (r && currentListPairs.has(id)) listResultsAtStart.set(id, { ...r, ticketId: id });
+      });
+      // Память из версий до 0.13 результатов не хранила — восстанавливаем
+      // их из того, что она хранила, иначе итог занизил бы закрытые.
+      listDone.forEach((id) => {
+        if (currentListPairs.has(id) && !listResultsAtStart.has(id)) {
+          listResultsAtStart.set(id, { ticketId: id, status: 'success', restored: true });
+        }
+      });
+      (currentListDuplicates || new Map()).forEach((dup, id) => {
+        if (currentListPairs.has(id) && !listResultsAtStart.has(id)) {
+          listResultsAtStart.set(id, {
+            ticketId: id,
+            status: 'skipped',
+            reason: 'transaction-duplicate',
+            attemptedTransactionId: dup.transactionId,
+            ownerTicketId: dup.ownerTicketId || null,
+            restored: true,
+          });
+        }
+      });
+      (currentListDropped || new Map()).forEach((drop, id) => {
+        if (currentListPairs.has(id) && !listResultsAtStart.has(id)) {
+          listResultsAtStart.set(id, {
+            ticketId: id,
+            status: 'skipped',
+            reason: 'wrong-external-status',
+            externalStatus: drop.externalStatus || '',
+            restored: true,
+          });
+        }
+      });
+    }
+
+    // Собирает всё, что известно о списке сейчас (прошлые прогоны + этот),
+    // и сразу сохраняет. null — прогон не по списку.
+    const listSnapshot = () => {
+      if (!(currentListPairs && currentListState)) return null;
+
+      // Последний результат по тикету. Два исключения: закрытый тикет не
+      // откатывается ничем (без автопилота он может снова попасть на экран и
+      // получить «не тот статус» — он ведь уже закрыт нами), а дубль, которого
+      // этот прогон просто не стал открывать, остаётся дублем с текстом окна.
+      const merged = new Map(listResultsAtStart);
+      results.forEach((r) => {
+        if (!r || !currentListPairs.has(r.ticketId)) return;
+        const prev = merged.get(r.ticketId);
+        if (prev && isListTicketClosed(prev)) return;
+        if (prev && prev.reason === 'transaction-duplicate' && r.reason === 'transaction-duplicate-known') return;
+        merged.set(r.ticketId, r);
+      });
+
+      const done = listClosedIds;
+      const attention = new Map(
+        currentListState.needsAttention.map((a) => [String(a.ticketId), a])
+      );
+      results.forEach((r) => {
+        // Строки со страницы, которых нет в списке, нас не касаются
+        if (!r || !currentListPairs.has(r.ticketId)) return;
+        if (isListTicketClosed(r)) {
+          attention.delete(r.ticketId);
+          return;
+        }
+        attention.set(r.ticketId, {
+          ticketId: r.ticketId,
+          reason:
+            r.txVerified === 'not-saved'
+              ? `Transaction ID не сохранился (${r.txVerifyNote || 'в тикете его нет'})`
+              : describeReason(r.reason),
+        });
+      });
+
+      // Дубли копятся: старые из памяти плюс новые этого прогона. Новый
+      // перекрывает старый — у него свежий текст окна.
+      const allDuplicates = new Map(
+        [...(currentListDuplicates || new Map()).values()].map((d) => [
+          d.ticketId,
+          { ...d, fromThisRun: false },
+        ])
+      );
+      results
+        .filter((r) => r && r.status === 'skipped' && r.reason === 'transaction-duplicate')
+        .forEach((r) => allDuplicates.set(r.ticketId, duplicateRecord(r, true)));
+
+      // Выбывшие: старые из памяти плюс те, у кого статус оказался чужим в
+      // этом прогоне. Закрытый из выбывших уходит — это возможно без
+      // автопилота, когда тикет вернулся в нужный статус и оператор сам
+      // вывел его на экран.
+      const allDropped = new Map(
+        [...(currentListDropped || new Map()).values()].map((d) => [d.ticketId, d])
+      );
+      let droppedNew = 0;
+      results.forEach((r) => {
+        if (!r || r.status !== 'skipped' || r.reason !== 'wrong-external-status') return;
+        if (!currentListPairs.has(r.ticketId) || done.has(r.ticketId)) return;
+        if (!allDropped.has(r.ticketId)) droppedNew++;
+        allDropped.set(r.ticketId, {
+          ticketId: r.ticketId,
+          externalStatus: r.externalStatus || '',
+          at: Date.now(),
+        });
+      });
+      done.forEach((id) => allDropped.delete(id));
+      // Выбывший тикет больше не интересен — и как дубль тоже
+      allDropped.forEach((_, id) => allDuplicates.delete(id));
+
+      // У дублей свой блок и свой раздел — в «прогнать заново» им не место:
+      // прогонять их заново как раз не надо. Выбывшим тоже: они больше не наши.
+      allDuplicates.forEach((_, id) => attention.delete(id));
+      allDropped.forEach((_, id) => attention.delete(id));
+
+      // Сайт не показал по фильтру — за все прогоны: запрашивали, а тикет так
+      // и не появился. Как только у тикета есть хоть какой-то результат или
+      // он показался на экране, он отсюда уходит.
+      const notShown = new Set(currentListState.notShown || []);
+      const shownNow = new Set(plannedTicketIds);
+      if (autopilot) {
+        requestedTicketIds.forEach((id) => {
+          if (!shownNow.has(id)) notShown.add(id);
+        });
+      }
+      shownNow.forEach((id) => notShown.delete(id));
+      merged.forEach((_, id) => notShown.delete(id));
+
+      const remaining = [...currentListPairs.keys()].filter(
+        (id) => !done.has(id) && !allDuplicates.has(id) && !allDropped.has(id)
+      );
+      const duplicates = [...allDuplicates.values()];
+      const dropped = [...allDropped.values()];
+      const needsAttention = [...attention.values()];
+
+      writeListStorage(listStorageKey(workflow), {
+        savedAt: Date.now(),
+        text: currentListState.text,
+        done: [...done],
+        needsAttention,
+        duplicates: duplicates.map(({ fromThisRun, ...d }) => d),
+        dropped,
+        results: Object.fromEntries(merged),
+        notShown: [...notShown],
+        runs: listRunNo,
+      });
+
+      return { merged, done, needsAttention, duplicates, dropped, droppedNew, remaining, notShown };
+    };
+
     let consecutiveFailures = 0;
     // Отдельный счётчик: тикет обработался успешно, но сумма не сохранилась.
     // Это не «ошибка тикета», поэтому в consecutiveFailures не попадает.
@@ -2581,6 +2741,7 @@
       // подсовывало бы не тот тикет либо навсегда пропускало один из них.
       const pageTicketIds = getTicketRows().map((r) => getTicketIdFromRow(r));
       plannedTicketIds.push(...pageTicketIds);
+      listSnapshot();
       const total = pageTicketIds.length;
       setProgress({ total, action: '' });
 
@@ -2622,6 +2783,7 @@
             `[BulkApproveBETA/${workflow.id}] (${i + 1}/${total}) Тикет ${ticketId}: строки больше нет в таблице — НЕ обработан.`
           );
           results.push({ ticketId, status: 'failed', reason: 'row-disappeared' });
+          listSnapshot();
           if (registerFailure('row-disappeared')) {
             stoppedEarly = true;
             break;
@@ -2776,6 +2938,7 @@
           if (isListTicketClosed(result)) listClosedIds.add(result.ticketId);
           setProgress({ listLine: listLineNow() });
         }
+        listSnapshot();
 
         const wasSkipped = result.status === 'skipped';
 
@@ -2812,7 +2975,15 @@
     updateButtonsUI();
     hideProgress();
 
-    const successResults = results.filter((r) => r.status === 'success');
+    // Последний снимок памяти. В режиме по списку отчёт считается по нему —
+    // по каждому тикету списка за все прогоны. Строки со страницы, которых в
+    // списке нет (без автопилота), относятся только к этому прогону.
+    const listSnap = listSnapshot();
+    const reportResults = listSnap
+      ? [...listSnap.merged.values(), ...results.filter((r) => !currentListPairs.has(r.ticketId))]
+      : results;
+
+    const successResults = reportResults.filter((r) => r.status === 'success');
     const successCount = successResults.length;
     // Сколько из обработанных тикетов пролежали больше суток. Считаем по
     // успешным: «обработано» — это то, что прогон реально закрыл. Возраст у
@@ -2823,39 +2994,42 @@
     const freshCount = agedResults.length - staleResults.length;
     // Дата в ячейке есть, но прочитать её не вышло — таких видно отдельно,
     // иначе смена формата колонки тихо испортила бы статистику.
-    const noAgeCount = successResults.length - agedResults.length;
-    const wrongStatusSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'wrong-external-status');
+    // Закрытые до 0.13 восстановлены из старой памяти — возраста у них нет
+    // не потому, что дата не читается, а потому, что его тогда не хранили.
+    const restoredSuccessCount = successResults.filter((r) => r.restored).length;
+    const noAgeCount = successResults.length - agedResults.length - restoredSuccessCount;
+    const wrongStatusSkips = reportResults.filter((r) => r.status === 'skipped' && r.reason === 'wrong-external-status');
     // Транзакция не отклонена — законная и самая частая причина пропуска в
     // широком пуле статусов. Показываем не список тикетов (он был бы во всю
     // страницу), а сводку по значениям колонки: по ней сразу видно, читается
     // ли Transaction Status вообще, или скрипт просто не нашёл ни одного
     // «rejected» и молча ничего не сделал.
-    const notRejectedSkips = results.filter(
+    const notRejectedSkips = reportResults.filter(
       (r) => r.status === 'skipped' && r.reason === 'transaction-not-rejected'
     );
-    const noTxStatusSkips = results.filter(
+    const noTxStatusSkips = reportResults.filter(
       (r) => r.status === 'skipped' && r.reason === 'no-transaction-status-column'
     );
     // Режим «по списку»
-    const notInListSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'not-in-list');
+    const notInListSkips = reportResults.filter((r) => r.status === 'skipped' && r.reason === 'not-in-list');
     // Сайт сказал, что транзакция уже занята. Самый дорогой исход прогона:
     // именно здесь чужая транзакция однажды уехала не в тот тикет.
-    const knownDuplicateSkips = results.filter(
+    const knownDuplicateSkips = reportResults.filter(
       (r) => r.status === 'skipped' && r.reason === 'transaction-duplicate-known'
     );
-    const duplicateSkips = results.filter(
+    const duplicateSkips = reportResults.filter(
       (r) => r.status === 'skipped' && r.reason === 'transaction-duplicate'
     );
-    const txMismatchSkips = results.filter(
+    const txMismatchSkips = reportResults.filter(
       (r) => r.status === 'skipped' && r.reason === 'transaction-id-mismatch'
     );
-    const txFilledResults = results.filter((r) => r.status === 'success' && r.transactionIdFilled);
+    const txFilledResults = reportResults.filter((r) => r.status === 'success' && r.transactionIdFilled);
     // Галочка «Переписывать Transaction ID»: где старый номер заменили и
     // тикет закрыли, и где замена началась, но тикет скрипт так и не закрыл.
     // Дубли сюда не входят: у них свой блок, и там же сказано, какой номер
     // остался в тикете — дважды одно и то же читать незачем.
-    const txReplaced = results.filter((r) => r.status === 'success' && r.replacedTransactionId);
-    const txReplaceUnfinished = results.filter(
+    const txReplaced = reportResults.filter((r) => r.status === 'success' && r.replacedTransactionId);
+    const txReplaceUnfinished = reportResults.filter(
       (r) => r.status !== 'success' && r.replacedTransactionId && r.reason !== 'transaction-duplicate'
     );
     const txNotSaved = txFilledResults.filter((r) => r.txVerified === 'not-saved');
@@ -2864,19 +3038,19 @@
       (r) => r.txVerified !== 'not-saved' && r.txVerified !== 'unverified'
     );
 
-    const zeroAmountSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'zero-amount');
-    const alreadyFilledSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'amount-already-filled');
+    const zeroAmountSkips = reportResults.filter((r) => r.status === 'skipped' && r.reason === 'zero-amount');
+    const alreadyFilledSkips = reportResults.filter((r) => r.status === 'skipped' && r.reason === 'amount-already-filled');
     // Тикеты, где скрипт ИЗМЕНИЛ денежное поле. Такое обязано быть в отчёте
     // явно, а не только в консоли: по этому списку сверяют, что сайт принял
     // сумму именно в том виде, в каком её вписали.
-    const amountFilledResults = results.filter((r) => r.status === 'success' && r.amountFilled);
+    const amountFilledResults = reportResults.filter((r) => r.status === 'success' && r.amountFilled);
     // Статус изменился, а сумма не сохранилась — самое опасное, что может
     // случиться в этом прогоне: тикет выглядит обработанным, но денег в нём нет.
     const amountNotSaved = amountFilledResults.filter((r) => r.amountVerified === 'not-saved');
     const amountUnverified = amountFilledResults.filter((r) => r.amountVerified === 'unverified');
     const amountConfirmed = amountFilledResults.filter((r) => r.amountVerified !== 'not-saved' && r.amountVerified !== 'unverified');
-    const formatUnclearSkips = results.filter((r) => r.status === 'skipped' && r.reason === 'amount-format-unclear');
-    const failed = results.filter((r) => r.status === 'failed');
+    const formatUnclearSkips = reportResults.filter((r) => r.status === 'skipped' && r.reason === 'amount-format-unclear');
+    const failed = reportResults.filter((r) => r.status === 'failed');
     const popupCount = capturedPopups.length;
 
     // Тикеты, до которых прогон вообще не дошёл (остановился раньше).
@@ -2894,104 +3068,34 @@
     let listDoneTotal = 0;
     // Все дубли списка — из прошлых прогонов и из этого. Без списка (режимы
     // без памяти) — только этого прогона.
-    let listDuplicatesAll = duplicateSkips.map((r) => duplicateRecord(r, true));
+    let listDuplicatesAll = results
+      .filter((r) => r.status === 'skipped' && r.reason === 'transaction-duplicate')
+      .map((r) => duplicateRecord(r, true));
     let listDroppedAll = [];
     let listDroppedNew = 0;
-    if (currentListPairs && currentListState) {
-      // listClosedIds уже собран по ходу прогона тем же предикатом, которым
-      // считалась панель — второй раз то же самое не пересчитываем.
-      const done = listClosedIds;
-      const attention = new Map(
-        currentListState.needsAttention.map((a) => [String(a.ticketId), a])
-      );
-
-      results.forEach((r) => {
-        // Строки со страницы, которых нет в списке, нас не касаются
-        if (!currentListPairs.has(r.ticketId)) return;
-
-        if (isListTicketClosed(r)) {
-          attention.delete(r.ticketId);
-          return;
-        }
-
-        attention.set(r.ticketId, {
-          ticketId: r.ticketId,
-          reason:
-            r.txVerified === 'not-saved'
-              ? `Transaction ID не сохранился (${r.txVerifyNote || 'в тикете его нет'})`
-              : describeReason(r.reason),
-        });
-      });
-
-      // Дубли копятся: старые из памяти плюс новые этого прогона. Новый
-      // перекрывает старый — у него свежий текст окна.
-      const allDuplicates = new Map(
-        [...(currentListDuplicates || new Map()).values()].map((d) => [
-          d.ticketId,
-          { ...d, fromThisRun: false },
-        ])
-      );
-      duplicateSkips.forEach((r) => allDuplicates.set(r.ticketId, duplicateRecord(r, true)));
-
-      // Выбывшие: старые из памяти плюс те, у кого статус оказался чужим в
-      // этом прогоне. Закрытый в этом прогоне из выбывших уходит — это
-      // возможно без автопилота, когда тикет вернулся в нужный статус и
-      // оператор сам вывел его на экран.
-      const allDropped = new Map(
-        [...(currentListDropped || new Map()).values()].map((d) => [d.ticketId, d])
-      );
-      results.forEach((r) => {
-        if (r.status !== 'skipped' || r.reason !== 'wrong-external-status') return;
-        if (!currentListPairs.has(r.ticketId)) return;
-        if (!allDropped.has(r.ticketId)) listDroppedNew++;
-        allDropped.set(r.ticketId, {
-          ticketId: r.ticketId,
-          externalStatus: r.externalStatus || '',
-          at: Date.now(),
-        });
-      });
-      done.forEach((id) => allDropped.delete(id));
-      // Выбывший тикет больше не интересен — и как дубль тоже
-      allDropped.forEach((_, id) => allDuplicates.delete(id));
-      listDroppedAll = [...allDropped.values()];
-      listDuplicatesAll = [...allDuplicates.values()];
-
-      // У дублей свой блок и свой раздел — в «прогнать заново» им не место:
-      // прогонять их заново как раз не надо. Выбывшим тоже: они больше не наши.
-      allDuplicates.forEach((_, id) => attention.delete(id));
-      allDropped.forEach((_, id) => attention.delete(id));
-
-      listRemaining = [...currentListPairs.keys()].filter(
-        (id) => !done.has(id) && !allDuplicates.has(id) && !allDropped.has(id)
-      );
-      listNeedsAttention = [...attention.values()];
-      listDoneTotal = done.size;
-
-      // «Сайт не показал» — это запрошенное минус показанное, и только оно.
-      // В ручном режиме запроса не было: там сравниваем список с экраном,
-      // как и раньше.
+    if (listSnap) {
+      listRemaining = listSnap.remaining;
+      listNeedsAttention = listSnap.needsAttention;
+      listDoneTotal = listSnap.done.size;
+      listDuplicatesAll = listSnap.duplicates;
+      listDroppedAll = listSnap.dropped;
+      listDroppedNew = listSnap.droppedNew;
+      // С автопилотом — за все прогоны (запрошено, но так и не показано).
+      // Без автопилота запроса не было: сравниваем список с экраном этого прогона.
       if (autopilot) {
-        const shownSet = new Set(plannedTicketIds);
-        listNotOnPage = requestedTicketIds.filter((id) => !shownSet.has(id)).length;
+        listNotOnPage = listSnap.notShown.size;
       } else {
         const seen = new Set(plannedTicketIds);
         listNotOnPage = [...currentListPairs.keys()].filter((id) => !seen.has(id)).length;
       }
-
-      writeListStorage(listStorageKey(workflow), {
-        savedAt: Date.now(),
-        text: currentListState.text,
-        done: [...done],
-        needsAttention: listNeedsAttention,
-        duplicates: listDuplicatesAll.map(({ fromThisRun, ...d }) => d),
-        dropped: listDroppedAll,
-      });
     }
 
     console.log(`[BulkApproveBETA/${workflow.id}] ИТОГ:`, results);
     // Быстрый доступ из консоли, например:
     // window.__bulkApproveLastResults.find(r => r.ticketId === '19406922')
     window.__bulkApproveLastResults = results;
+    // Итог по всему списку — то, из чего собран отчёт в режиме по списку
+    window.__bulkApproveListResults = reportResults;
 
     if (popupCount > 0) {
       console.log(`[BulkApproveBETA/${workflow.id}] Пойманные всплывающие окна (не "OK!"), требуют ручной проверки:`);
@@ -3040,7 +3144,9 @@
 
     const popupsListText =
       popupsForReview.length > 0
-        ? `\n\nТребуют ручной проверки на дубликаты (${popupsForReview.length}` +
+        ? `\n\nТребуют ручной проверки на дубликаты` +
+          (listSnap ? ' — окна этого прогона' : '') +
+          ` (${popupsForReview.length}` +
           (popupsForReview.length !== popupCount
             ? `; ещё ${popupCount - popupsForReview.length} окон относятся к тикетам из раздела про занятые транзакции`
             : '') +
@@ -3071,20 +3177,6 @@
         ? `\n\n⚠ У ${noTxStatusSkips.length} тикетов не удалось прочитать колонку Transaction Status — ` +
           `они пропущены. Похоже, набор колонок в таблице менялся во время прогона: ` +
           `перезагрузи страницу и запусти заново.`
-        : '';
-
-    const txFilledListText =
-      txConfirmed.length > 0
-        ? `\n\nВписан Transaction ID (${txConfirmed.length}):\n` +
-          txConfirmed
-            .slice(0, MAX_LISTED)
-            .map((r) => `${r.ticketId} — ${r.transactionIdFilled}` +
-              (r.replacedTransactionId ? ` (было "${r.replacedTransactionId}")` : '') +
-              (r.transactionLoadNote ? ` (${r.transactionLoadNote})` : ''))
-            .join('\n') +
-          (txConfirmed.length > MAX_LISTED
-            ? `\n… и ещё ${txConfirmed.length - MAX_LISTED}`
-            : '')
         : '';
 
     // Отдельный блок «было → стало» — для ручной сверки: это единственные
@@ -3242,7 +3334,9 @@
     const failureBreakdown = [...failureCounts.entries()].sort((a, b) => b[1] - a[1]);
 
     const summaryLines = [
-      autopilot
+      listSnap
+        ? `ИТОГ ПО ВСЕМУ СПИСКУ (${currentListPairs.size} тикетов, прогонов: ${listRunNo})`
+        : autopilot
         ? `Всего тикетов из списка показал сайт: ${plannedTicketIds.length} ` +
           `(запрошено в применённых пачках: ${requestedTicketIds.length}, ` +
           `всего в очереди на этот прогон: ${queuedTotal})`
@@ -3285,6 +3379,9 @@
       }
       if (noAgeCount > 0) {
         summaryLines.push(`  • из них с нечитаемой Processing Date: ${noAgeCount}`);
+      }
+      if (restoredSuccessCount > 0) {
+        summaryLines.push(`  • из них закрыты до версии 0.13 — возраст не сохранился: ${restoredSuccessCount}`);
       }
     }
     summaryLines.push(`Пропущено (не тот External Status): ${wrongStatusSkips.length}`);
@@ -3335,7 +3432,7 @@
         `Пропущено (дубль из прошлых прогонов, не открывали): ${knownDuplicateSkips.length}`
       );
     }
-    const unknownPopupSkips = results.filter(
+    const unknownPopupSkips = reportResults.filter(
       (r) => r.status === 'skipped' && r.reason === 'unknown-popup'
     );
     if (unknownPopupSkips.length > 0) {
@@ -3350,7 +3447,7 @@
     if (formatUnclearSkips.length > 0) {
       summaryLines.push(`Пропущено (непонятный формат суммы): ${formatUnclearSkips.length}`);
     }
-    if (autopilot) {
+    if (autopilot && !listSnap) {
       summaryLines.push(
         `Пачек по ${CONFIG.autopilotChunkSize}: обработано ${chunksDone} из ${chunks.length}` +
         (emptyChunks > 0 ? `, из них пустых ${emptyChunks}` : '')
@@ -3361,7 +3458,7 @@
       // а не ошибка, и пугать этой строкой нельзя.
       summaryLines.push(
         autopilot
-          ? `Сайт не показал по фильтру: ${listNotOnPage} — ` +
+          ? `Сайт не показал по фильтру (за все прогоны): ${listNotOnPage} — ` +
             `обычно это уже закрытые или удалённые тикеты`
           : `Из вашего списка не было на этой странице: ${listNotOnPage} — ` +
             `это нормально, если гоните список по частям`
@@ -3392,7 +3489,7 @@
       'transaction-duplicate-known',
       'zero-amount', 'amount-already-filled', 'amount-format-unclear',
     ]);
-    const otherSkips = results.filter(
+    const otherSkips = reportResults.filter(
       (r) => r.status === 'skipped' && !namedSkipReasons.has(r.reason)
     );
     if (otherSkips.length > 0) {
@@ -3409,6 +3506,20 @@
     failureBreakdown.forEach(([reason, count]) => {
       summaryLines.push(`  • ${describeReason(reason)}: ${count}`);
     });
+    // Одна строка про сам этот запуск — всё остальное выше по всему списку
+    if (listSnap) {
+      const runList = results.filter((r) => currentListPairs.has(r.ticketId));
+      summaryLines.push('');
+      summaryLines.push(
+        `В этом прогоне: закрыто +${runList.filter(isListTicketClosed).length}, ` +
+        `пропущено ${runList.filter((r) => r.status === 'skipped').length}, ` +
+        `ошибок ${runList.filter((r) => r.status === 'failed').length}` +
+        (autopilot
+          ? `; пачек по ${CONFIG.autopilotChunkSize}: ${chunksDone} из ${chunks.length}` +
+            (emptyChunks > 0 ? `, из них пустых ${emptyChunks}` : '')
+          : '')
+      );
+    }
 
     // Поимённый список упавших тикетов с причиной. Без него оператор видел
     // только счётчик и не знал, какие именно тикеты перезапускать.
@@ -3465,7 +3576,6 @@
       txReplaceUnfinishedText +
       txNotSavedText +
       txReplacedText +
-      txFilledListText +
       txUnverifiedText +
       txMismatchText +
       amountNotSavedText +
@@ -3526,12 +3636,6 @@
         copyBlocks.push({
           label: `Прогнать заново или посмотреть глазами (${listNeedsAttention.length}):`,
           text: listNeedsAttention.map((a) => `${a.ticketId}\t${a.reason}`).join('\n'),
-        });
-      }
-      if (txConfirmed.length > 0) {
-        copyBlocks.push({
-          label: `Для таблицы (${txConfirmed.length}) — Ticket ID, Transaction ID:`,
-          text: txConfirmed.map((r) => `${r.ticketId}\t${r.transactionIdFilled}`).join('\n'),
         });
       }
       window.__bulkApproveListRemaining = listRemaining;
@@ -3780,6 +3884,14 @@
               .filter((d) => d && d.ticketId)
               .map((d) => ({ ...d, ticketId: String(d.ticketId) }))
           : [],
+        // С 0.13: последний результат по каждому тикету списка за все прогоны —
+        // из него собирается итоговый отчёт по всему списку
+        results:
+          data.results && typeof data.results === 'object' && !Array.isArray(data.results)
+            ? data.results
+            : {},
+        notShown: Array.isArray(data.notShown) ? data.notShown.map(String) : [],
+        runs: typeof data.runs === 'number' && data.runs > 0 ? data.runs : 0,
       };
     } catch (e) {
       return null;
@@ -4152,6 +4264,9 @@
             needsAttention: keep ? saved.needsAttention.slice() : [],
             duplicates: keep ? saved.duplicates.slice() : [],
             dropped: keep ? saved.dropped.slice() : [],
+            results: keep ? { ...saved.results } : {},
+            notShown: keep ? saved.notShown.slice() : [],
+            runs: keep ? saved.runs : 0,
           };
           writeListStorage(storageKey, state);
           finish({
