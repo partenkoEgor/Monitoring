@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.31
-// @description  Десять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (предыдущий статус для закрытых, Admin username для тикетов в работе), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки по клику. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @version      1.32
+// @description  Одиннадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (предыдущий статус для закрытых, Admin username для тикетов в работе), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику и обмен сохранёнными фильтрами с коллегами через текстовый код. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -50,6 +50,9 @@
       fileButtons: true,
       // Маленькая кнопка копирования значения одной ячейки при наведении
       cellCopy: true,
+      // Кнопка рядом с «Saved filters»: поделиться сохранёнными фильтрами
+      // кодом и добавить фильтры коллеги по его коду
+      filterShare: true,
     },
 
     // ── Превью вложений ──────────────────────────────────────────────
@@ -329,6 +332,29 @@
       },
       fallbackLabel: 'Файл',
       fallbackKind: 'other',
+    },
+
+    // ── Обмен сохранёнными фильтрами ───────────────────────────────────
+    filterShare: {
+      // Эндпоинты сайта: список сохранённых фильтров страницы и сохранение
+      // одного фильтра. Те же запросы сайт делает сам при открытии
+      // «Saved filters» и при нажатии «Save filter».
+      getUrl: '/admin/filter/get',
+      saveUrl: '/admin/filter/save',
+      // Сохранённые фильтры привязаны к странице через reportId. Для
+      // Extended номер взят из запроса /admin/filter/get; для paymentsupport —
+      // из ссылок на файлы этой страницы (у Extended в них тот же номер,
+      // что и в фильтрах). Ключ — часть адреса после /backoffice/, в нижнем
+      // регистре. Если страницы здесь нет, номер берётся из ссылок на файлы
+      // в основной таблице.
+      reports: {
+        paymentsupport: { id: '08e0508d5f806e2b71eb556c7108526c', label: 'List of payment queries' },
+        extendedpaymentrequestlist: { id: 'd7b421f82c0cb8682ab375b35b131e71', label: 'List of payment queries (Extended)' },
+      },
+      // Начало кода, по которому его узнаёт окно «Добавить по коду»
+      codePrefix: 'TH-FILTERS:',
+      // Сколько фильтров максимум принимается из одного кода
+      maxFilters: 200,
     },
 
     // Подробный лог в консоль (F12 → Console)
@@ -3782,6 +3808,730 @@
   }
 
   // ==================================================================
+  // 11. ОБМЕН СОХРАНЁННЫМИ ФИЛЬТРАМИ
+  // ==================================================================
+
+  // Сайт хранит сохранённые фильтры на сервере, по пользователю и странице.
+  // Поделиться ими штатно нельзя — коллеге приходится заново выставлять
+  // все поля. Здесь фильтр берётся из того же списка, что видит окно
+  // «Saved filters», упаковывается в текстовый код, а у коллеги сохраняется
+  // тем же запросом, которым сайт сохраняет фильтр по кнопке «Save filter».
+  // В фильтре лежат внутренние номера (агентов, отделов, статусов) и набор
+  // колонок, поэтому язык сайта у отправителя и получателя роли не играет.
+  function initFilterShare() {
+    const CFG = CONFIG.filterShare;
+
+    addStyle('th-helper-filtershare-style', `
+      .th-fs-open-btn svg { display: block; }
+
+      #th-fs-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 999999;
+        background: rgba(0,0,0,0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+      #th-fs-modal {
+        width: 520px;
+        max-width: 100%;
+        max-height: 90vh;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        background: ${T.bg};
+        border: 1px solid ${T.border};
+        border-radius: 10px;
+        box-shadow: ${T.shadow};
+        font-family: "Open Sans", Tahoma, Arial, sans-serif;
+        font-size: 12px;
+        color: ${T.text};
+      }
+      #th-fs-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px 16px;
+        background: linear-gradient(135deg, ${ACCENT} 0%, ${ACCENT_HOVER} 100%);
+        flex-shrink: 0;
+      }
+      #th-fs-header-icon {
+        width: 26px; height: 26px;
+        border-radius: 6px;
+        background: rgba(255,255,255,0.2);
+        display: flex; align-items: center; justify-content: center;
+        flex-shrink: 0;
+      }
+      #th-fs-header-text { flex: 1; min-width: 0; }
+      #th-fs-title { font-size: 13px; font-weight: 700; color: #fff; line-height: 1.3; }
+      #th-fs-subtitle {
+        font-size: 10.5px; color: rgba(255,255,255,0.8); margin-top: 2px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      #th-fs-close {
+        border: none; background: transparent; color: rgba(255,255,255,0.85);
+        font-size: 18px; line-height: 1; cursor: pointer; padding: 0 4px;
+      }
+      #th-fs-close:hover { color: #fff; }
+
+      .th-fs-tabs { display: flex; border-bottom: 1px solid ${T.border}; flex-shrink: 0; }
+      .th-fs-tab {
+        flex: 1; padding: 9px 12px; border: none; border-bottom: 2px solid transparent;
+        background: ${T.panel}; color: ${T.textDim};
+        font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+      }
+      .th-fs-tab.active { background: ${T.bg}; color: ${ACCENT}; border-bottom-color: ${ACCENT}; }
+
+      .th-fs-pane {
+        display: none; flex-direction: column; gap: 10px;
+        padding: 14px 16px; overflow-y: auto; min-height: 0;
+      }
+      .th-fs-pane.active { display: flex; }
+      .th-fs-hint { color: ${T.textDim}; font-size: 11px; line-height: 1.5; }
+      .th-fs-state { color: ${T.textDim}; font-style: italic; }
+      .th-fs-error, .th-fs-ok, .th-fs-warn {
+        padding: 8px 11px; border-radius: 6px; font-size: 11px; line-height: 1.5;
+      }
+      .th-fs-error { background: rgba(226,75,74,0.08); border: 1px solid rgba(226,75,74,0.35); color: #E24B4A; }
+      .th-fs-ok { background: rgba(63,185,80,0.10); border: 1px solid rgba(63,185,80,0.40); color: #3fb950; }
+      .th-fs-warn { background: rgba(217,119,6,0.08); border: 1px solid rgba(217,119,6,0.35); color: #D97706; }
+
+      .th-fs-selectall {
+        display: flex; align-items: center; gap: 8px;
+        color: ${T.textDim}; font-size: 11px; cursor: pointer;
+      }
+      .th-fs-list {
+        display: flex; flex-direction: column;
+        border: 1px solid ${T.border}; border-radius: 7px;
+        max-height: 300px; overflow-y: auto;
+      }
+      .th-fs-item {
+        display: flex; align-items: flex-start; gap: 8px;
+        padding: 7px 10px; border-bottom: 1px solid ${T.border};
+      }
+      .th-fs-item:last-child { border-bottom: none; }
+      label.th-fs-item { cursor: pointer; }
+      .th-fs-item.disabled { opacity: .55; cursor: default; }
+      .th-fs-item input[type=checkbox] { margin: 2px 0 0; flex-shrink: 0; cursor: pointer; }
+      .th-fs-item-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+      .th-fs-item-name { font-weight: 600; color: ${T.textStrong}; word-break: break-word; }
+      .th-fs-item-meta { color: ${T.textDim}; font-size: 10.5px; }
+      .th-fs-item-warn { color: #D97706; font-size: 10.5px; }
+      .th-fs-name-inp {
+        width: 100%; box-sizing: border-box; padding: 4px 8px;
+        border: 1px solid ${T.border}; border-radius: 5px; outline: none;
+        background: ${T.bg}; color: ${T.textStrong};
+        font-family: inherit; font-size: 12px; font-weight: 600;
+      }
+      .th-fs-name-inp:focus { border-color: ${ACCENT}; }
+
+      .th-fs-code {
+        width: 100%; box-sizing: border-box; min-height: 90px; padding: 8px 10px;
+        border: 1px solid ${T.border}; border-radius: 6px; outline: none; resize: vertical;
+        background: ${T.panel}; color: ${T.text};
+        font-family: Consolas, "Courier New", monospace; font-size: 11px; word-break: break-all;
+      }
+      .th-fs-code:focus { border-color: ${ACCENT}; }
+
+      .th-fs-actions { display: flex; justify-content: flex-end; gap: 8px; }
+      .th-fs-primary {
+        padding: 6px 18px; border-radius: 6px; border: none;
+        background: ${ACCENT}; color: #fff;
+        font-family: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+      }
+      .th-fs-primary:hover:not(:disabled) { background: ${ACCENT_HOVER}; }
+      .th-fs-primary:disabled { opacity: .45; cursor: default; }
+      .th-fs-results { display: flex; flex-direction: column; gap: 3px; font-size: 11px; }
+      .th-fs-res-ok { color: #3fb950; }
+      .th-fs-res-err { color: #E24B4A; }
+    `);
+
+    function mk(tag, cls, text) {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (text !== undefined) e.textContent = text;
+      return e;
+    }
+
+    function plural(n, forms) {
+      const n10 = n % 10, n100 = n % 100;
+      if (n10 === 1 && n100 !== 11) return forms[0];
+      if (n10 >= 2 && n10 <= 4 && (n100 < 10 || n100 >= 20)) return forms[1];
+      return forms[2];
+    }
+    const FILTER_FORMS = ['фильтр', 'фильтра', 'фильтров'];
+
+    const REPORT_ID_RE = /^[0-9a-f]{32}$/;
+
+    // ── Страница и её reportId ────────────────────────────────────────
+
+    function currentReport() {
+      const m = location.pathname.match(/\/backoffice\/([^/?#]+)/i);
+      const known = m && CFG.reports[m[1].toLowerCase()];
+      if (known) return { id: known.id, label: known.label };
+
+      // Запасной путь: report_id в ссылках на файлы основной таблицы.
+      // Окна сайта (например, «История тикета») пропускаем — у них свой номер.
+      const counts = {};
+      document.querySelectorAll('a[href*="report_id="]').forEach(a => {
+        if (a.closest('.modal_wrap')) return;
+        const mm = (a.getAttribute('href') || '').match(/report_id=([0-9a-f]{32})/i);
+        if (mm) {
+          const id = mm[1].toLowerCase();
+          counts[id] = (counts[id] || 0) + 1;
+        }
+      });
+      const best = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+      return best ? { id: best, label: document.title || 'эта страница' } : null;
+    }
+
+    function reportLabel(id) {
+      const known = Object.values(CFG.reports).find(r => r.id === id);
+      return known ? known.label : `страница ${id.slice(0, 8)}…`;
+    }
+
+    // ── Запросы к сайту ───────────────────────────────────────────────
+
+    function requestHeaders() {
+      const h = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/plain, */*',
+        'X-Requested-With': 'XMLHttpRequest',
+      };
+      // Сайт сам отправляет этот заголовок с запросами фильтров
+      if (typeof pageWindow._TIMEZONE === 'string') h['X-Time-Zone'] = pageWindow._TIMEZONE;
+      return h;
+    }
+
+    async function postJson(url, body) {
+      let r;
+      try {
+        r = await fetch(url, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: requestHeaders(),
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        throw new Error('нет связи с сервером');
+      }
+      if (!r.ok) throw new Error(`сервер ответил ${r.status}`);
+      try {
+        return await r.json();
+      } catch (err) {
+        // Вместо JSON обычно приходит страница входа — сессия закончилась
+        throw new Error('сервер ответил не данными — возможно, истекла сессия, обновите страницу');
+      }
+    }
+
+    // Только плоский объект: значения — строки, числа, true/false, null или
+    // массивы из них. Ровно так выглядят все фильтры сайта; всё остальное
+    // в чужом коде не пропускаем дальше, чем до сообщения об ошибке.
+    function isPlainForm(form) {
+      if (!form || typeof form !== 'object' || Array.isArray(form)) return false;
+      const scalar = v => v === null || ['string', 'number', 'boolean'].includes(typeof v);
+      return Object.keys(form).every(k => {
+        const v = form[k];
+        return scalar(v) || (Array.isArray(v) && v.every(scalar));
+      });
+    }
+
+    async function loadFilters(reportId) {
+      const json = await postJson(CFG.getUrl, { reportId });
+      if (!json || json.success !== true || !Array.isArray(json.data)) {
+        throw new Error('сервер не отдал список фильтров');
+      }
+      return json.data.map(row => {
+        let form = null;
+        try {
+          form = typeof row.FilterParam === 'string' ? JSON.parse(row.FilterParam) : row.FilterParam;
+        } catch (err) { /* не читается — ниже станет null */ }
+        return { id: row.id, name: String(row.FilterName || ''), form: isPlainForm(form) ? form : null };
+      });
+    }
+
+    async function saveFilter(reportId, name, form) {
+      const json = await postJson(CFG.saveUrl, { reportId, filterName: name, form });
+      if (!json || json.success !== true) {
+        throw new Error((json && json.message) || 'сервер не подтвердил сохранение');
+      }
+    }
+
+    // ── Код: JSON → gzip → base64 ─────────────────────────────────────
+
+    function bytesToBase64(bytes) {
+      let s = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      }
+      return btoa(s);
+    }
+
+    function base64ToBytes(b64) {
+      const s = atob(b64);
+      const out = new Uint8Array(s.length);
+      for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+      return out;
+    }
+
+    async function pipeBytes(bytes, transform) {
+      const stream = new Blob([bytes]).stream().pipeThrough(transform);
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+
+    // z: — сжатый код, b: — без сжатия. Сжатие делает код в несколько раз
+    // короче (в фильтрах много одинаковых кусков, например список колонок),
+    // а если браузер его не умеет — код просто длиннее.
+    async function encodeCode(filters) {
+      const bytes = new TextEncoder().encode(JSON.stringify({ v: 1, filters }));
+      if (typeof CompressionStream === 'function') {
+        try {
+          return `${CFG.codePrefix}z:${bytesToBase64(await pipeBytes(bytes, new CompressionStream('gzip')))}`;
+        } catch (err) {
+          log('Не удалось сжать код фильтров, отдаём без сжатия', err);
+        }
+      }
+      return `${CFG.codePrefix}b:${bytesToBase64(bytes)}`;
+    }
+
+    function validatePayload(payload) {
+      if (!payload || payload.v !== 1 || !Array.isArray(payload.filters) || payload.filters.length === 0) {
+        throw new Error('в коде нет фильтров');
+      }
+      if (payload.filters.length > CFG.maxFilters) {
+        throw new Error(`в коде слишком много фильтров (${payload.filters.length})`);
+      }
+      return payload.filters.map((f, i) => {
+        if (!f || typeof f.name !== 'string' || !REPORT_ID_RE.test(String(f.reportId)) || !isPlainForm(f.form)) {
+          throw new Error(`фильтр №${i + 1} в коде повреждён`);
+        }
+        return { name: f.name.trim().slice(0, 200) || `Фильтр ${i + 1}`, reportId: f.reportId, form: f.form };
+      });
+    }
+
+    async function decodeCode(text) {
+      // Мессенджеры любят переносить длинные строки — пробелы и переносы
+      // внутри кода просто выбрасываем
+      const clean = String(text || '').replace(/\s+/g, '');
+      const at = clean.indexOf(CFG.codePrefix);
+      if (at === -1) throw new Error(`это не код фильтров — он начинается с ${CFG.codePrefix}`);
+      const m = clean.slice(at + CFG.codePrefix.length).match(/^([zb]):([A-Za-z0-9+/]+=*)/);
+      if (!m) throw new Error('код обрезан или повреждён — скопируйте его целиком');
+
+      let bytes;
+      try {
+        bytes = base64ToBytes(m[2]);
+      } catch (err) {
+        throw new Error('код обрезан или повреждён — скопируйте его целиком');
+      }
+      if (m[1] === 'z') {
+        if (typeof DecompressionStream !== 'function') {
+          throw new Error('этот браузер не умеет распаковывать код — обновите браузер');
+        }
+        try {
+          bytes = await pipeBytes(bytes, new DecompressionStream('gzip'));
+        } catch (err) {
+          throw new Error('код обрезан или повреждён — скопируйте его целиком');
+        }
+      }
+
+      let payload;
+      try {
+        payload = JSON.parse(new TextDecoder().decode(bytes));
+      } catch (err) {
+        throw new Error('код обрезан или повреждён — скопируйте его целиком');
+      }
+      return validatePayload(payload);
+    }
+
+    // ── Описание фильтра одной строкой ────────────────────────────────
+
+    const SUMMARY_FIELDS = [
+      ['idStatusUser', 'Статусы'],
+      ['externalStatus', 'Внешние статусы'],
+      ['internalStatus', 'Внутр. статусы'],
+      ['requestTypeIds', 'Типы тикета'],
+      ['departments', 'Отделы'],
+      ['agentId', 'Агенты'],
+      ['subAgentId', 'Субагенты'],
+      ['countryIds', 'Страны'],
+      ['refIds', 'Рефералы'],
+      ['topicId', 'Темы'],
+      ['subTopicId', 'Подтемы'],
+      ['adminSelect', 'Админы'],
+      ['currency', 'Валюты'],
+      ['epayTransactionStatus', 'Статусы депозитов'],
+      ['withdrawalTransactionStatus', 'Статусы выводов'],
+      ['savedColumns', 'Колонки'],
+    ];
+
+    function summarize(form) {
+      const parts = [];
+      SUMMARY_FIELDS.forEach(([key, label]) => {
+        const v = form[key];
+        if (Array.isArray(v) && v.length) parts.push(`${label} ${v.length}`);
+      });
+      if (form.isVip === true) parts.push('VIP');
+      if (form.myTickets === true) parts.push('Мои тикеты');
+      return parts.join(' · ') || 'без условий';
+    }
+
+    function uniqueName(name, taken) {
+      if (!taken.has(name)) return name;
+      for (let i = 2; ; i++) {
+        const candidate = `${name} (${i})`;
+        if (!taken.has(candidate)) return candidate;
+      }
+    }
+
+    // ── Вкладка «Поделиться» ─────────────────────────────────────────
+
+    function buildSharePane(pane, report) {
+      if (!report) {
+        pane.appendChild(mk('div', 'th-fs-error', 'Не удалось понять, к какой странице относятся фильтры. Откройте список тикетов и попробуйте ещё раз.'));
+        return;
+      }
+
+      pane.appendChild(mk('div', 'th-fs-hint',
+        'Отметьте фильтры, которыми хотите поделиться, и отправьте код коллеге в любом чате. ' +
+        'У коллеги они появятся в «Saved filters» вместе с набором колонок.'));
+
+      const state = mk('div', 'th-fs-state', 'Загрузка списка…');
+      pane.appendChild(state);
+
+      const selectAllLabel = mk('label', 'th-fs-selectall');
+      const selectAll = mk('input'); selectAll.type = 'checkbox';
+      selectAllLabel.appendChild(selectAll);
+      selectAllLabel.appendChild(document.createTextNode('Выбрать все'));
+      const list = mk('div', 'th-fs-list');
+      const actions = mk('div', 'th-fs-actions');
+      const copyBtn = mk('button', 'th-fs-primary', 'Скопировать код');
+      copyBtn.type = 'button';
+      copyBtn.disabled = true;
+      actions.appendChild(copyBtn);
+      const result = mk('div');
+      result.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+
+      let rows = [];
+
+      function update() {
+        const usable = rows.filter(r => r.filter.form);
+        const n = usable.filter(r => r.box.checked).length;
+        copyBtn.disabled = n === 0;
+        copyBtn.textContent = n ? `Скопировать код (${n})` : 'Скопировать код';
+        selectAll.checked = usable.length > 0 && n === usable.length;
+        selectAll.indeterminate = n > 0 && n < usable.length;
+      }
+
+      selectAll.addEventListener('change', () => {
+        rows.forEach(r => { if (r.filter.form) r.box.checked = selectAll.checked; });
+        update();
+      });
+
+      copyBtn.addEventListener('click', async () => {
+        const chosen = rows.filter(r => r.filter.form && r.box.checked).map(r => r.filter);
+        if (!chosen.length) return;
+        copyBtn.disabled = true;
+        const code = await encodeCode(chosen.map(f => ({ name: f.name, reportId: report.id, form: f.form })));
+        await copyText(code);
+        result.innerHTML = '';
+        result.appendChild(mk('div', 'th-fs-ok',
+          `Код скопирован: ${chosen.length} ${plural(chosen.length, FILTER_FORMS)}, ${code.length} символов. ` +
+          'Отправьте его коллеге целиком — у него кнопка «Обмен фильтрами» → «Добавить по коду».'));
+        const box = mk('textarea', 'th-fs-code th-fs-share-code');
+        box.readOnly = true;
+        box.value = code;
+        box.addEventListener('focus', () => box.select());
+        result.appendChild(box);
+        update();
+      });
+
+      loadFilters(report.id).then(filters => {
+        if (!filters.length) {
+          state.textContent = 'На этой странице у вас пока нет сохранённых фильтров.';
+          return;
+        }
+        state.remove();
+        rows = filters.map(filter => {
+          const item = mk('label', 'th-fs-item' + (filter.form ? '' : ' disabled'));
+          const box = mk('input'); box.type = 'checkbox';
+          box.disabled = !filter.form;
+          box.addEventListener('change', update);
+          const main = mk('div', 'th-fs-item-main');
+          main.appendChild(mk('div', 'th-fs-item-name', filter.name || '(без имени)'));
+          main.appendChild(mk('div', 'th-fs-item-meta',
+            filter.form ? summarize(filter.form) : 'Не удалось прочитать этот фильтр — пропускаем'));
+          item.appendChild(box);
+          item.appendChild(main);
+          list.appendChild(item);
+          return { filter, box };
+        });
+        pane.appendChild(selectAllLabel);
+        pane.appendChild(list);
+        pane.appendChild(actions);
+        pane.appendChild(result);
+        update();
+      }).catch(err => {
+        state.className = 'th-fs-error';
+        state.textContent = `Не удалось загрузить сохранённые фильтры: ${err.message}`;
+      });
+    }
+
+    // ── Вкладка «Добавить по коду» ────────────────────────────────────
+
+    function buildImportPane(pane) {
+      pane.appendChild(mk('div', 'th-fs-hint',
+        'Вставьте код, который прислал коллега. Фильтры сохранятся в ваши «Saved filters» — ' +
+        'заполнять поля вручную не нужно. Имя каждого фильтра можно поменять перед сохранением.'));
+
+      const input = mk('textarea', 'th-fs-code th-fs-import-code');
+      input.placeholder = `${CFG.codePrefix}…`;
+      pane.appendChild(input);
+
+      const status = mk('div');
+      const list = mk('div', 'th-fs-list');
+      const actions = mk('div', 'th-fs-actions');
+      const addBtn = mk('button', 'th-fs-primary', 'Добавить');
+      addBtn.type = 'button';
+      addBtn.disabled = true;
+      actions.appendChild(addBtn);
+      const results = mk('div', 'th-fs-results');
+      [status, list, actions, results].forEach(el => pane.appendChild(el));
+      list.style.display = 'none';
+
+      let rows = [];
+      let takenByReport = {};
+      let token = 0;
+      let timer = null;
+
+      function setStatus(cls, text) {
+        status.className = cls || '';
+        status.textContent = text || '';
+      }
+
+      function updateAddBtn() {
+        const n = rows.filter(r => r.box.checked).length;
+        addBtn.disabled = n === 0;
+        addBtn.textContent = n ? `Добавить ${n} ${plural(n, FILTER_FORMS)}` : 'Добавить';
+      }
+
+      async function preview() {
+        const my = ++token;
+        rows = [];
+        list.innerHTML = '';
+        list.style.display = 'none';
+        results.innerHTML = '';
+        addBtn.disabled = true;
+        addBtn.textContent = 'Добавить';
+
+        const text = input.value.trim();
+        if (!text) { setStatus('', ''); return; }
+
+        let filters;
+        try {
+          filters = await decodeCode(text);
+        } catch (err) {
+          if (my === token) setStatus('th-fs-error', `Код не подошёл: ${err.message}.`);
+          return;
+        }
+        if (my !== token) return;
+
+        // Имена уже сохранённых фильтров — чтобы не затереть свой фильтр
+        // с тем же именем, совпадающие имена получают номер « (2)».
+        setStatus('th-fs-state', 'Проверяю, нет ли у вас фильтров с такими же именами…');
+        const ids = [...new Set(filters.map(f => f.reportId))];
+        const taken = {};
+        let checkFailed = false;
+        await Promise.all(ids.map(async id => {
+          try {
+            taken[id] = new Set((await loadFilters(id)).map(f => f.name));
+          } catch (err) {
+            taken[id] = new Set();
+            checkFailed = true;
+          }
+        }));
+        if (my !== token) return;
+        takenByReport = taken;
+
+        if (checkFailed) {
+          setStatus('th-fs-warn', 'Не удалось проверить имена ваших фильтров — если у вас уже есть фильтр с таким же именем, проверьте его после сохранения.');
+        } else {
+          setStatus('th-fs-state', `В коде ${filters.length} ${plural(filters.length, FILTER_FORMS)}.`);
+        }
+
+        const proposedTaken = {};
+        ids.forEach(id => { proposedTaken[id] = new Set(taken[id]); });
+
+        rows = filters.map(filter => {
+          const proposed = uniqueName(filter.name, proposedTaken[filter.reportId]);
+          proposedTaken[filter.reportId].add(proposed);
+
+          const item = mk('div', 'th-fs-item');
+          const box = mk('input'); box.type = 'checkbox';
+          box.checked = true;
+          box.addEventListener('change', updateAddBtn);
+          const main = mk('div', 'th-fs-item-main');
+          const nameInp = mk('input', 'th-fs-name-inp');
+          nameInp.type = 'text';
+          nameInp.value = proposed;
+          main.appendChild(nameInp);
+          main.appendChild(mk('div', 'th-fs-item-meta', `${reportLabel(filter.reportId)} · ${summarize(filter.form)}`));
+          if (proposed !== filter.name) {
+            main.appendChild(mk('div', 'th-fs-item-warn', `У вас уже есть фильтр «${filter.name}» — этот сохранится под новым именем.`));
+          }
+          item.appendChild(box);
+          item.appendChild(main);
+          list.appendChild(item);
+          return { filter, box, nameInp };
+        });
+        list.style.display = '';
+        updateAddBtn();
+      }
+
+      input.addEventListener('input', () => {
+        clearTimeout(timer);
+        timer = setTimeout(preview, 250);
+      });
+
+      addBtn.addEventListener('click', async () => {
+        const chosen = rows.filter(r => r.box.checked);
+        if (!chosen.length) return;
+        const myToken = token;
+        addBtn.disabled = true;
+        input.disabled = true;
+        results.innerHTML = '';
+        let ok = 0;
+
+        for (const row of chosen) {
+          const f = row.filter;
+          const taken = takenByReport[f.reportId] || new Set();
+          let name = row.nameInp.value.trim() || f.name;
+          // Имя могли поправить руками на уже занятое — проверяем ещё раз
+          if (taken.has(name)) name = uniqueName(name, taken);
+          try {
+            await saveFilter(f.reportId, name, f.form);
+            taken.add(name);
+            ok++;
+            results.appendChild(mk('div', 'th-fs-res-ok', `✓ «${name}» — ${reportLabel(f.reportId)}`));
+          } catch (err) {
+            results.appendChild(mk('div', 'th-fs-res-err', `✗ «${name}»: ${err.message}`));
+          }
+        }
+
+        input.disabled = false;
+        if (myToken !== token) return;
+        rows.forEach(r => { r.box.disabled = true; r.nameInp.disabled = true; });
+        addBtn.textContent = 'Готово';
+        const summary = mk('div', ok === chosen.length ? 'th-fs-ok' : 'th-fs-warn',
+          `Добавлено ${ok} из ${chosen.length}. Новые фильтры уже в списке «Saved filters» — откройте его, чтобы применить.`);
+        results.appendChild(summary);
+      });
+    }
+
+    // ── Окно ──────────────────────────────────────────────────────────
+
+    function closeModal() {
+      const el = document.getElementById('th-fs-overlay');
+      if (el) el.remove();
+    }
+
+    function openModal(tab) {
+      closeModal();
+      const report = currentReport();
+
+      const overlay = mk('div'); overlay.id = 'th-fs-overlay';
+      const modal = mk('div'); modal.id = 'th-fs-modal';
+      overlay.appendChild(modal);
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(); });
+
+      const header = mk('div'); header.id = 'th-fs-header';
+      const iconWrap = mk('div'); iconWrap.id = 'th-fs-header-icon';
+      iconWrap.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/><line x1="15.4" y1="6.5" x2="8.6" y2="10.5"/></svg>`;
+      const headerText = mk('div'); headerText.id = 'th-fs-header-text';
+      const title = mk('div', '', 'Обмен фильтрами'); title.id = 'th-fs-title';
+      const subtitle = mk('div', '', report ? report.label : ''); subtitle.id = 'th-fs-subtitle';
+      headerText.appendChild(title);
+      headerText.appendChild(subtitle);
+      const closeBtn = mk('button', '', '×'); closeBtn.id = 'th-fs-close'; closeBtn.type = 'button';
+      closeBtn.setAttribute('aria-label', 'Закрыть');
+      closeBtn.addEventListener('click', closeModal);
+      header.appendChild(iconWrap);
+      header.appendChild(headerText);
+      header.appendChild(closeBtn);
+      modal.appendChild(header);
+
+      const tabs = mk('div', 'th-fs-tabs');
+      const shareTab = mk('button', 'th-fs-tab', 'Поделиться'); shareTab.type = 'button';
+      const importTab = mk('button', 'th-fs-tab', 'Добавить по коду'); importTab.type = 'button';
+      tabs.appendChild(shareTab);
+      tabs.appendChild(importTab);
+      modal.appendChild(tabs);
+
+      const sharePane = mk('div', 'th-fs-pane th-fs-pane-share');
+      const importPane = mk('div', 'th-fs-pane th-fs-pane-import');
+      modal.appendChild(sharePane);
+      modal.appendChild(importPane);
+
+      function activate(which) {
+        shareTab.classList.toggle('active', which === 'share');
+        importTab.classList.toggle('active', which === 'import');
+        sharePane.classList.toggle('active', which === 'share');
+        importPane.classList.toggle('active', which === 'import');
+      }
+      shareTab.addEventListener('click', () => activate('share'));
+      importTab.addEventListener('click', () => activate('import'));
+
+      buildSharePane(sharePane, report);
+      buildImportPane(importPane);
+      activate(tab === 'import' ? 'import' : 'share');
+
+      document.body.appendChild(overlay);
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && document.getElementById('th-fs-overlay')) closeModal();
+    });
+
+    // ── Кнопка рядом с «Saved filters» ────────────────────────────────
+
+    // Кнопку сайта ищем по иконке, а не по подписи — подпись зависит от
+    // языка сайта. Окна сайта пропускаем: там такой кнопки быть не должно.
+    function findSavedFiltersButton() {
+      for (const icon of document.querySelectorAll('.fa-sliders-h')) {
+        if (icon.closest('.modal_wrap, #th-fs-overlay')) continue;
+        const btn = icon.closest('button');
+        if (btn) return btn;
+      }
+      return null;
+    }
+
+    function ensureButton() {
+      const savedBtn = findSavedFiltersButton();
+      if (!savedBtn || !savedBtn.parentElement) return;
+      if (savedBtn.parentElement.querySelector('.th-fs-open-btn')) return;
+
+      const btn = mk('button', 'btn btn-success th-fs-open-btn');
+      btn.type = 'button';
+      btn.title = 'Обмен фильтрами: поделиться кодом или добавить фильтры коллеги';
+      btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/><line x1="15.4" y1="6.5" x2="8.6" y2="10.5"/></svg>`;
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openModal();
+      });
+      savedBtn.after(document.createTextNode(' '), btn);
+    }
+
+    ensureButton();
+    new MutationObserver(ensureButton).observe(document.body, { childList: true, subtree: true });
+
+    log('Обмен сохранёнными фильтрами включён');
+  }
+
+  // ==================================================================
   // ПАНЕЛЬ НАСТРОЕК: ВКЛЮЧЕНИЕ И ВЫКЛЮЧЕНИЕ ФУНКЦИЙ БЕЗ ПРАВКИ КОДА
   // ==================================================================
 
@@ -3797,6 +4547,7 @@
     commentTemplates: 'Шаблонные комментарии для Change ticket',
     fileButtons: 'Кнопки вместо ссылок на файлы',
     cellCopy: 'Копирование значения ячейки по клику',
+    filterShare: 'Обмен сохранёнными фильтрами',
   };
 
   // CONFIG.features задаёт дефолт при первом запуске; панель настроек и
@@ -4058,6 +4809,7 @@
     if (isFeatureEnabled('commentTemplates')) initCommentTemplates();
     if (isFeatureEnabled('fileButtons')) initFileButtons();
     if (isFeatureEnabled('cellCopy')) initCellCopy();
+    if (isFeatureEnabled('filterShare')) initFilterShare();
     log('Скрипт запущен на', window.location.pathname);
   }
 
