@@ -1190,12 +1190,13 @@
       return { value: prev.nameExternalStatus || '—', date: prev.dateEdit || '' };
     }
 
-    // Кто в работе — Admin username из самой свежей записи. В окне
-    // «История тикета» это колонка с ключом adminProcessedLogin.
+    // Кто в работе — Admin username из самой свежей записи (верхняя
+    // строка в окне «История тикета», колонка с ключом adminProcessedLogin).
+    // Только логин, без даты.
     function pickInWork(list) {
       const latest = list[0];
       if (!latest) return null;
-      return { value: String(latest.adminProcessedLogin || '').trim() || 'Не указан', date: latest.dateEdit || '' };
+      return { value: String(latest.adminProcessedLogin || '').trim() || 'Не указан' };
     }
 
     function fetchHistory(ticketId) {
@@ -1268,7 +1269,7 @@
         if (currentTicket !== ticketId) return;
         const result = list && (mode === 'prev' ? pickPrev(list) : pickInWork(list));
         if (result) {
-          render(mode, escapeHtml(result.value), escapeHtml(result.date));
+          render(mode, escapeHtml(result.value), result.date ? escapeHtml(result.date) : '');
         } else {
           render(mode, 'Не найдено');
         }
