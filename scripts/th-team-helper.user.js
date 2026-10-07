@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.30
-// @description  Десять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип «Предыдущий статус» для закрытых тикетов, поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки по клику. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @version      1.31
+// @description  Десять помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (предыдущий статус для закрытых, Admin username для тикетов в работе), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, и копирование значения любой ячейки по клику. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -29,7 +29,8 @@
     features: {
       // Превью вложений при наведении на ссылку в таблице + полноэкранный просмотр
       filePreview: true,
-      // Тултип с предыдущим статусом для закрытых тикетов
+      // Тултип на статусе: предыдущий статус для закрытых тикетов
+      // и Admin username для тикетов в работе
       prevStatus: true,
       // Поиск лимитов по странице Confluence при выделении текста
       limitsFinder: true,
@@ -73,14 +74,22 @@
       },
     },
 
-    // ── Предыдущий статус ────────────────────────────────────────────
+    // ── Предыдущий статус и кто в работе ─────────────────────────────
     prevStatus: {
-      // Для каких значений External Status показывать тултип (в нижнем регистре).
-      // Сейчас — только закрытые тикеты. Чтобы расширить, дописать статусы сюда,
-      // например: 'credited', 'credited (m)', 'duplicated ticket'.
+      // Для каких значений External Status показывать предыдущий статус
+      // (в нижнем регистре). Сейчас — только закрытые тикеты. Чтобы
+      // расширить, дописать статусы сюда, например: 'credited',
+      // 'credited (m)', 'duplicated ticket'.
       triggers: ['closed', 'closed (m)'],
+      // Для каких значений External Status показывать, у кого тикет
+      // в работе — Admin username из самой свежей записи истории
+      inWorkTriggers: ['in progress (m)'],
       // Эндпоинт истории тикета
       historyUrl: '/admin/backoffice/paymentsupporthistory',
+      // Сколько помнить ответ истории (мс). Закрытый тикет уже не меняется,
+      // а тикет в работе может перехватить другой админ — поэтому кэш
+      // не на всю сессию, а на минуту.
+      cacheTtl: 60000,
       // Задержка перед скрытием тултипа (мс)
       hideDelay: 150,
     },
@@ -1107,12 +1116,13 @@
   }
 
   // ==================================================================
-  // 2. ТУЛТИП «ПРЕДЫДУЩИЙ СТАТУС»
+  // 2. ТУЛТИП «ПРЕДЫДУЩИЙ СТАТУС» И «В РАБОТЕ У»
   // ==================================================================
 
   function initPrevStatus() {
     const CFG = CONFIG.prevStatus;
     const TRIGGERS = new Set(CFG.triggers.map(s => s.trim().toLowerCase()));
+    const IN_WORK = new Set((CFG.inWorkTriggers || []).map(s => s.trim().toLowerCase()));
 
     addStyle('th-helper-prevstatus-style', `
       #th-prevstatus-tt {
@@ -1143,33 +1153,47 @@
         font-weight: 600;
         color: ${T.textStrong};
       }
-      #th-prevstatus-tt .th-pst-date {
-        color: ${T.textDim};
-        margin-top: 3px;
-        font-size: 10.5px;
-      }
     `);
 
     const tt = document.createElement('div');
     tt.id = 'th-prevstatus-tt';
     document.body.appendChild(tt);
 
-    // ticketId -> Promise<{status, date} | null>. Один запрос на тикет за сессию.
+    // ticketId -> { at, promise: Promise<записи истории | null> }.
+    // Запись живёт CFG.cacheTtl — см. комментарий в CONFIG.
     const cache = new Map();
 
-    function render(valueHtml, dateHtml) {
+    const LABELS = { prev: 'Предыдущий статус', inWork: 'В работе у' };
+
+    function render(mode, valueHtml) {
       tt.innerHTML =
-        `<div class="th-pst-label">Предыдущий статус</div>` +
-        `<div class="th-pst-value">${valueHtml}</div>` +
-        (dateHtml ? `<div class="th-pst-date">${dateHtml}</div>` : '');
+        `<div class="th-pst-label">${LABELS[mode]}</div>` +
+        `<div class="th-pst-value">${valueHtml}</div>`;
     }
 
     function escapeHtml(s) {
       return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
+    // История идёт от новых к старым: находим запись о закрытии
+    // и берём следующую за ней — это и есть статус до закрытия.
+    function pickPrev(list) {
+      const idx = list.findIndex(r => TRIGGERS.has((r.nameExternalStatus || '').trim().toLowerCase()));
+      if (idx === -1 || idx + 1 >= list.length) return null;
+      return list[idx + 1].nameExternalStatus || '—';
+    }
+
+    // Кто в работе — Admin username из самой свежей записи (верхняя
+    // строка в окне «История тикета», колонка с ключом adminProcessedLogin).
+    function pickInWork(list) {
+      const latest = list[0];
+      if (!latest) return null;
+      return String(latest.adminProcessedLogin || '').trim() || 'Не указан';
+    }
+
     function fetchHistory(ticketId) {
-      if (cache.has(ticketId)) return cache.get(ticketId);
+      const hit = cache.get(ticketId);
+      if (hit && Date.now() - hit.at < CFG.cacheTtl) return hit.promise;
 
       const p = fetch(CFG.historyUrl, {
         method: 'POST',
@@ -1182,21 +1206,13 @@
         body: JSON.stringify({ ticketId: Number(ticketId), is_iframe: 1 }),
       })
         .then(r => r.json())
-        .then(json => {
-          const list = Array.isArray(json && json.data) ? json.data : [];
-          // История идёт от новых к старым: находим запись о закрытии
-          // и берём следующую за ней — это и есть статус до закрытия.
-          const idx = list.findIndex(r => TRIGGERS.has((r.nameExternalStatus || '').trim().toLowerCase()));
-          if (idx === -1 || idx + 1 >= list.length) return null;
-          const prev = list[idx + 1];
-          return { status: prev.nameExternalStatus || '—', date: prev.dateEdit || '' };
-        })
+        .then(json => (Array.isArray(json && json.data) ? json.data : []))
         .catch(err => {
           log('Не удалось получить историю тикета', ticketId, err);
           return null;
         });
 
-      cache.set(ticketId, p);
+      cache.set(ticketId, { at: Date.now(), promise: p });
       return p;
     }
 
@@ -1225,7 +1241,8 @@
       if (td.cellIndex !== cols.status) return;
 
       const statusText = ((td.querySelector('span') || {}).innerText || td.innerText || '').trim().toLowerCase();
-      if (!TRIGGERS.has(statusText)) return;
+      const mode = TRIGGERS.has(statusText) ? 'prev' : IN_WORK.has(statusText) ? 'inWork' : null;
+      if (!mode) return;
 
       const ticketCell = row.querySelectorAll('td')[cols.ticket];
       if (!ticketCell) return;
@@ -1235,17 +1252,18 @@
       clearTimeout(hideTimer);
       currentTicket = ticketId;
 
-      render('Загрузка…');
+      render(mode, 'Загрузка…');
       tt.classList.add('show');
       placeNearCursor(tt, e.clientX, e.clientY);
 
-      fetchHistory(ticketId).then(result => {
+      fetchHistory(ticketId).then(list => {
         // Пока грузилось, мышь могла уйти на другой тикет
         if (currentTicket !== ticketId) return;
+        const result = list && (mode === 'prev' ? pickPrev(list) : pickInWork(list));
         if (result) {
-          render(escapeHtml(result.status), escapeHtml(result.date));
+          render(mode, escapeHtml(result));
         } else {
-          render('Не найдено');
+          render(mode, 'Не найдено');
         }
         placeNearCursor(tt, e.clientX, e.clientY);
       });
@@ -1264,7 +1282,8 @@
       }, CFG.hideDelay);
     });
 
-    log('Тултип «Предыдущий статус» включён для статусов:', CFG.triggers.join(', '));
+    log('Тултип «Предыдущий статус» включён для статусов:', CFG.triggers.join(', '),
+      '| «В работе у» —', (CFG.inWorkTriggers || []).join(', '));
   }
 
   // ==================================================================
@@ -3769,7 +3788,7 @@
   // Порядок и подписи держим синхронно с CONFIG.features
   const FEATURE_LABELS = {
     filePreview: 'Превью вложений',
-    prevStatus: 'Предыдущий статус',
+    prevStatus: 'Предыдущий статус и кто в работе',
     limitsFinder: 'Поиск лимитов в Confluence',
     adminDirectory: 'Справочник админов',
     messengerId: 'Автоподстановка Reddy ID',
