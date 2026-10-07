@@ -1,0 +1,11 @@
+{
+  "name": "bulk-approve-tests",
+  "private": true,
+  "description": "jsdom-стенд для scripts/th-bulk-approve*.user.js",
+  "scripts": {
+    "test": "node run.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}
