@@ -255,7 +255,7 @@ const scenarios = {
     const block = r.copyBlocks.find((b) => /Для таблицы отчёта/.test(b.label));
     check('блок есть и подписан под Transaction ID', block && /Transaction ID/.test(block.label), JSON.stringify(r.copyBlocks.map((b) => b.label)));
     // успешно 4 (<24 ч — 3, >24 ч — 1: тикет №4), ошибок 0, сменили статус 1, дубликаты 1 (пойманное окно)
-    check('6 чисел без пустой строки', block && block.text === '4\n3\n1\n0\n1\n1', block && JSON.stringify(block.text));
+    check('числа в порядке строк таблицы, с пустой строкой', block && block.text === '4\n3\n1\n\n0\n1\n1', block && JSON.stringify(block.text));
   },
 
   async 11() {

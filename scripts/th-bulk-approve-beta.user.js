@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.14
+// @version      0.15
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -3617,8 +3617,8 @@
     // Столбик для таблицы отчёта команды: одни числа, по строке на показатель,
     // ровно в порядке строк этой таблицы — вставляется в нужную колонку одним
     // копированием. «Bulk Approve (225)» заполняет блок «Approved by agents из
-    // поля Transaction ID», «по списку (225)» — блок «из поля Inside comment»;
-    // у второго в таблице после «больше 24 часов» пустая строка, она здесь тоже.
+    // поля Transaction ID», «по списку (225)» — блок «из поля Inside comment».
+    // В обоих блоках таблицы после «больше 24 часов» пустая строка — она здесь тоже.
     // В режиме по списку все цифры — по всему списку, как и сводка выше.
     if (workflow.id === '225' || workflow.id === '225-list') {
       const isListMode = workflow.id === '225-list';
@@ -3629,14 +3629,12 @@
       const duplicatesCount = isListMode
         ? listDuplicatesAll.length
         : new Set(capturedPopups.map((p) => p.ticketId)).size;
-      const rows = isListMode
-        ? [successCount, freshCount, staleCount, '', failed.length, wrongStatusSkips.length, duplicatesCount]
-        : [successCount, freshCount, staleCount, failed.length, wrongStatusSkips.length, duplicatesCount];
+      const rows = [successCount, freshCount, staleCount, '', failed.length, wrongStatusSkips.length, duplicatesCount];
       copyBlocks.push({
         label:
           `Для таблицы отчёта — «Approved by agents из поля ` +
           `${isListMode ? 'Inside comment' : 'Transaction ID'}»: всего, меньше 24 ч, больше 24 ч, ` +
-          `${isListMode ? '(пустая строка), ' : ''}ошибок, сменили статус в процессе, дубликаты:`,
+          `(пустая строка), ошибок, сменили статус в процессе, дубликаты:`,
         text: rows.map(String).join('\n'),
       });
     }
