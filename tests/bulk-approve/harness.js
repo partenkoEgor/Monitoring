@@ -258,6 +258,17 @@ function createPage({ which = 'beta', tickets, onScreen, behaviour = {}, configO
         wrap.remove();
         renderTable();
         if (site.behaviour.onApplied) site.behaviour.onApplied(site, w);
+        // Окно сайта после сохранения (например, предупреждение о дубле в
+        // обычном 225). Само закрывается чуть позже — как его закрыл бы человек.
+        const popupText = site.behaviour.popupOnApply && site.behaviour.popupOnApply(id);
+        if (popupText) {
+          const p = d.createElement('div');
+          p.className = 'swal2-popup swal2-icon-warning';
+          p.innerHTML = `<h2 class="swal2-title"></h2><div class="swal2-html-container">${popupText}</div>` +
+            '<button class="swal2-confirm">OK</button><button class="swal2-cancel">Cancel</button>';
+          d.body.appendChild(p);
+          setTimeout(() => p.remove(), 40);
+        }
       }, 10);
     });
     wrap.querySelector('.btn-default').addEventListener('click', () => wrap.remove());

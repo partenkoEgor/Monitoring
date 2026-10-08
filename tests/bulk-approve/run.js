@@ -64,7 +64,8 @@ const scenarios = {
     check('2-й: строка про этот прогон — закрыто +8', /В этом прогоне: закрыто \+8, пропущено 0, ошибок 0/.test(r2.text), r2.text);
     check('2-й прогон не трогал закрытые в 1-м', page.site.applied.length === 12, page.site.applied.length);
     check('нет перечня успешно вписанных', !/Вписан Transaction ID \(/.test(r2.text), r2.text);
-    check('нет блока «Для таблицы»', !r2.copyBlocks.some((b) => /Для таблицы/.test(b.label)), JSON.stringify(r2.copyBlocks.map((b) => b.label)));
+    check('нет блока со списком закрытых «Для таблицы (N) — Ticket ID, Transaction ID»',
+      !r2.copyBlocks.some((b) => /Для таблицы \(\d+\) — Ticket ID/.test(b.label)), JSON.stringify(r2.copyBlocks.map((b) => b.label)));
   },
 
   async 2() {
@@ -218,6 +219,62 @@ const scenarios = {
     check('согласие — окно закрыто', !d.querySelector(`.${prefix}-report-overlay`));
     w.__t.showReportWindow('Готово.', []);
     check('без дублей кнопки нет', !d.querySelector(`.${prefix}-report-download`));
+  },
+
+  async 9() {
+    console.log('\n[9] Столбик для таблицы отчёта — «по списку (225)» (Inside comment)');
+    const { tickets, ids, listText } = makeTickets(8);
+    tickets[ids[5]].externalStatus = '225 Approved by agent'; // сменил статус в процессе
+    const behaviour = {
+      duplicateOwner: (id) => (id === ids[1] ? '22600000' : null),
+      editBroken: (id) => id === ids[6], // одна ошибка
+    };
+    const page = createPage({ tickets, onScreen: ['19999999'], behaviour });
+    const r = await page.run({ button: LIST_BTN, listText });
+    const block = r.copyBlocks.find((b) => /Для таблицы отчёта/.test(b.label));
+    check('блок есть и подписан под Inside comment', block && /Inside comment/.test(block.label), JSON.stringify(r.copyBlocks.map((b) => b.label)));
+    // успешно 5 (из них <24 ч — 3, >24 ч — 2), пустая строка, ошибок 1, сменили статус 1, дубликаты 1
+    check('числа в порядке строк таблицы, с пустой строкой', block && block.text === '5\n3\n2\n\n1\n1\n1', block && JSON.stringify(block.text));
+    check('блок — первый среди блоков для копирования', r.copyBlocks[0] === block);
+
+    // Второй прогон: ошибка ушла — столбик по всему списку
+    behaviour.editBroken = null;
+    const r2 = await page.run({ button: LIST_BTN, listText });
+    const block2 = r2.copyBlocks.find((b) => /Для таблицы отчёта/.test(b.label));
+    check('после догона — итог по всему списку', block2 && block2.text === '6\n4\n2\n\n0\n1\n1', block2 && JSON.stringify(block2.text));
+  },
+
+  async 10() {
+    console.log('\n[10] Столбик для таблицы отчёта — обычный «Bulk Approve (225)» (Transaction ID)');
+    const { tickets, ids } = makeTickets(5);
+    ids.forEach((id) => { tickets[id].txId = '555' + id; });
+    tickets[ids[2]].externalStatus = 'Closed (M)'; // сменил статус
+    const behaviour = { popupOnApply: (id) => (id === ids[0] ? 'Транзакция уже использует обращение 22600000' : null) };
+    const page = createPage({ tickets, onScreen: [...ids], behaviour });
+    const r = await page.run({ button: SCREEN_BTN, byScreen: true });
+    const block = r.copyBlocks.find((b) => /Для таблицы отчёта/.test(b.label));
+    check('блок есть и подписан под Transaction ID', block && /Transaction ID/.test(block.label), JSON.stringify(r.copyBlocks.map((b) => b.label)));
+    // успешно 4 (<24 ч — 3, >24 ч — 1: тикет №4), ошибок 0, сменили статус 1, дубликаты 1 (пойманное окно)
+    check('6 чисел без пустой строки', block && block.text === '4\n3\n1\n0\n1\n1', block && JSON.stringify(block.text));
+  },
+
+  async 11() {
+    console.log('\n[11] У Bulk Response (239) столбика нет');
+    const { tickets, ids } = makeTickets(1);
+    tickets[ids[0]].externalStatus = 'The money has not been sent, cancel it (M)';
+    tickets[ids[0]].txStatus = 'rejected';
+    tickets[ids[0]].txId = '777';
+    const page = createPage({ tickets, onScreen: [...ids] });
+    const btn = [...page.d.querySelectorAll('button')].find((b) => b.textContent === 'BETA Bulk Response (239)');
+    btn.click();
+    const end = Date.now() + 20000;
+    let report;
+    while (!(report = page.d.querySelector(`.${page.prefix}-report-overlay`)) && Date.now() < end) {
+      await new Promise((res) => setTimeout(res, 20));
+    }
+    const labels = report ? [...report.querySelectorAll(`.${page.prefix}-report-copy`)].map((a) => a.previousElementSibling.textContent) : null;
+    check('отчёт 239 показан', !!report);
+    check('блока «Для таблицы отчёта» нет', labels && !labels.some((l) => /Для таблицы отчёта/.test(l)), JSON.stringify(labels));
   },
 };
 
