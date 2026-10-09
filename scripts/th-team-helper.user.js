@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.34
-// @description  Одиннадцать помощников в одном скрипте: превью вложений при наведении — картинок и PDF (страницы PDF рисует pdf.js) — с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (предыдущий статус для закрытых, Admin username для тикетов In progress и In progress (M)), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику и обмен сохранёнными фильтрами с коллегами через текстовый код. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @version      1.35
+// @description  Одиннадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (предыдущий статус для закрытых, Admin username для тикетов In progress и In progress (M)), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику и обмен сохранёнными фильтрами с коллегами через текстовый код. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -14,8 +14,6 @@
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @connect      doc.office.lan
-// @require      https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/vendor/pdfjs-3.11.174/pdf.min.js#sha256=W1eZ5vjGgGYyB6xbQu4U7tKkBvp69I9QwVTwwLFWaUY=
-// @require      https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/vendor/pdfjs-3.11.174/pdf.worker.min.js#sha256=/qvfMJdw7SS7oxpUZ4Ns3Iz2OccFryfVK1hbBBu4Uns=
 // @updateURL    https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/scripts/th-team-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/partenkoEgor/Monitoring/main/scripts/th-team-helper.user.js
 // ==/UserScript==
@@ -76,24 +74,6 @@
         min: 1,
         // Предел увеличения
         max: 8,
-      },
-      // PDF: первая страница — в попапе при наведении, все страницы —
-      // в полноэкранном режиме с тем же поворотом и масштабом, что у картинок.
-      // Страницы рисует pdf.js (подключён через @require в шапке).
-      pdf: {
-        // Сколько страниц максимум показывать в полноэкранном режиме
-        maxPages: 10,
-        // Файлы крупнее этого не скачиваются для превью (байт)
-        maxBytes: 20 * 1024 * 1024,
-        // Ширина, в которую рисуется страница (px). С запасом под увеличение
-        // в полноэкранном режиме; в попапе картинка просто ужимается.
-        renderWidth: 1800,
-        // Пределы масштаба отрисовки и площади одной страницы (пикселей) —
-        // чтобы огромный скан не упёрся в предел размера canvas
-        maxScale: 4,
-        maxPixels: 16000000,
-        // Сколько последних PDF держать в памяти
-        cacheSize: 6,
       },
     },
 
@@ -529,14 +509,6 @@
         text-align: center;
         min-width: 160px;
       }
-      .th-preview-pdf-note {
-        padding: 6px 12px;
-        font-size: 11px;
-        color: ${T.textDim};
-        border-top: .5px solid ${T.border};
-        background: ${T.bg};
-      }
-      .th-preview-btn:disabled { opacity: .7; cursor: default; }
       #th-lightbox {
         position: fixed;
         inset: 0;
@@ -755,8 +727,6 @@
 
     let lbUrls = [];
     let lbIndex = 0;
-    // Пояснение под картинкой — например, что у PDF показаны не все страницы
-    let lbNote = '';
 
     // Состояние просмотра текущей картинки
     let rotation = 0;   // градусы, кратно 90
@@ -878,7 +848,6 @@
       if (lbImg.complete && lbImg.naturalWidth) {
         parts.push(`${lbImg.naturalWidth}×${lbImg.naturalHeight}`);
       }
-      if (lbNote) parts.push(lbNote);
       lbCounter.textContent = parts.join('  ·  ');
     }
 
@@ -893,10 +862,9 @@
       resetView();
     }
 
-    function openLightbox(urls, startIndex, note) {
+    function openLightbox(urls, startIndex) {
       lbUrls = urls;
       lbIndex = startIndex || 0;
-      lbNote = note || '';
       updateLightbox();
       lightbox.classList.add('open');
     }
@@ -1017,123 +985,6 @@
       return { previewUrl: href, filePath: href };
     }
 
-    // ── PDF: скачать, открыть pdf.js, нарисовать страницы картинками ──
-
-    // pdf.js подключён через @require и объявляет себя глобально. Если
-    // библиотека не загрузилась, PDF показывается как раньше — иконка и имя.
-    const pdfjs = (typeof pdfjsLib !== 'undefined' && pdfjsLib)
-      || pageWindow.pdfjsLib || window.pdfjsLib || null;
-
-    // url → { docPromise, pages: Map<номер, Promise<blob-URL>> }. Самый
-    // старый PDF вытесняется, когда их больше CFG.pdf.cacheSize.
-    const pdfCache = new Map();
-
-    function pdfError(err) {
-      const name = err && err.name;
-      if (name === 'PasswordException') return 'PDF защищён паролем';
-      if (name === 'InvalidPDFException') return 'файл повреждён';
-      return (err && err.message) || 'не удалось открыть PDF';
-    }
-
-    async function fetchPdfBytes(url) {
-      let r;
-      try {
-        r = await fetch(url, { credentials: 'same-origin' });
-      } catch (err) {
-        throw new Error('нет связи с сервером');
-      }
-      if (!r.ok) throw new Error(`сервер ответил ${r.status}`);
-      const declared = Number(r.headers.get('content-length')) || 0;
-      if (declared > CFG.pdf.maxBytes) throw new Error('файл слишком большой для превью');
-      const bytes = new Uint8Array(await r.arrayBuffer());
-      if (bytes.length > CFG.pdf.maxBytes) throw new Error('файл слишком большой для превью');
-      // Сигнатура %PDF должна быть в начале файла. Если пришла страница
-      // (например, вход в админку после истёкшей сессии) — это не PDF.
-      const head = String.fromCharCode.apply(null, bytes.subarray(0, 1024));
-      if (head.indexOf('%PDF') === -1) throw new Error('вместо PDF пришло что-то другое — возможно, истекла сессия');
-      return bytes;
-    }
-
-    function getPdfEntry(url) {
-      let entry = pdfCache.get(url);
-      if (entry) {
-        // Свежий доступ — в конец очереди на вытеснение
-        pdfCache.delete(url);
-        pdfCache.set(url, entry);
-        return entry;
-      }
-      entry = { pages: new Map(), docPromise: null };
-      entry.docPromise = fetchPdfBytes(url).then(data => pdfjs.getDocument({
-        data,
-        // Закрывает CVE-2024-4367: без этого специально собранный шрифт
-        // в PDF может выполнить код. Файлы приходят от пользователей.
-        isEvalSupported: false,
-        verbosity: 0,
-      }).promise);
-      // Неудачную загрузку не запоминаем — при следующем наведении попробуем снова
-      entry.docPromise.catch(() => { if (pdfCache.get(url) === entry) pdfCache.delete(url); });
-      pdfCache.set(url, entry);
-
-      while (pdfCache.size > CFG.pdf.cacheSize) {
-        const [oldUrl, old] = pdfCache.entries().next().value;
-        pdfCache.delete(oldUrl);
-        old.docPromise.then(doc => doc.destroy()).catch(() => {});
-        old.pages.forEach(p => p.then(u => URL.revokeObjectURL(u)).catch(() => {}));
-      }
-      return entry;
-    }
-
-    async function renderPdfPage(doc, n) {
-      const page = await doc.getPage(n);
-      const base = page.getViewport({ scale: 1 });
-      let scale = Math.min(CFG.pdf.maxScale, Math.max(1, CFG.pdf.renderWidth / base.width));
-      const area = base.width * base.height * scale * scale;
-      if (area > CFG.pdf.maxPixels) scale *= Math.sqrt(CFG.pdf.maxPixels / area);
-      const viewport = page.getViewport({ scale });
-
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.ceil(viewport.width);
-      canvas.height = Math.ceil(viewport.height);
-      const ctx = canvas.getContext('2d');
-      // Белый фон: у некоторых PDF страница прозрачная
-      ctx.fillStyle = '#fff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      await page.render({ canvasContext: ctx, viewport }).promise;
-      page.cleanup();
-
-      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-      canvas.width = 0;
-      canvas.height = 0;
-      if (!blob) throw new Error('не удалось нарисовать страницу');
-      return URL.createObjectURL(blob);
-    }
-
-    function getPdfPage(entry, doc, n) {
-      if (!entry.pages.has(n)) {
-        const p = renderPdfPage(doc, n);
-        p.catch(() => entry.pages.delete(n));
-        entry.pages.set(n, p);
-      }
-      return entry.pages.get(n);
-    }
-
-    async function openPdfFullscreen(url) {
-      const entry = getPdfEntry(url);
-      const doc = await entry.docPromise;
-      const count = Math.min(doc.numPages, CFG.pdf.maxPages);
-      const urls = [];
-      for (let n = 1; n <= count; n++) urls.push(await getPdfPage(entry, doc, n));
-      const note = doc.numPages > count ? `показаны первые ${count} из ${doc.numPages} стр.` : '';
-      openLightbox(urls, 0, note);
-    }
-
-    function pageWord(n) {
-      const n10 = n % 10, n100 = n % 100;
-      if (n10 === 1 && n100 !== 11) return 'страница';
-      if (n10 >= 2 && n10 <= 4 && (n100 < 10 || n100 >= 20)) return 'страницы';
-      return 'страниц';
-    }
-
     // Все картинки из той же ячейки — чтобы листать их в полноэкранном режиме
     function getCellImageUrls(anchor) {
       const td = anchor.closest('td');
@@ -1146,22 +997,16 @@
 
     // ── Сборка попапа ────────────────────────────────────────────────
 
-    // onFullscreen: true — листать картинки ячейки, функция — своё
-    // действие (у PDF — его страницы), иначе кнопки Fullscreen нет
-    function makeActions(anchor, previewUrl, onFullscreen) {
+    function makeActions(anchor, previewUrl, withFullscreen) {
       const bar = document.createElement('div');
       bar.className = 'th-preview-actions';
 
-      if (onFullscreen) {
+      if (withFullscreen) {
         const btnFull = document.createElement('button');
-        btnFull.className = 'th-preview-btn th-preview-btn-full';
+        btnFull.className = 'th-preview-btn';
         btnFull.innerHTML = `${ICON_FULLSCREEN} Fullscreen`;
         btnFull.addEventListener('click', e => {
           e.stopPropagation();
-          if (typeof onFullscreen === 'function') {
-            onFullscreen(btnFull);
-            return;
-          }
           const urls = getCellImageUrls(anchor);
           const startIdx = urls.indexOf(previewUrl);
           openLightbox(urls.length ? urls : [previewUrl], startIdx >= 0 ? startIdx : 0);
@@ -1238,71 +1083,6 @@
           loading.textContent = 'Не удалось загрузить файл';
         };
         img.src = previewUrl;
-
-      } else if (isPdf(filePath) && pdfjs) {
-        const myGeneration = ++loadGeneration;
-
-        const onFullscreen = (btn) => {
-          if (btn.disabled) return;
-          btn.disabled = true;
-          const label = btn.innerHTML;
-          btn.textContent = 'Loading...';
-          openPdfFullscreen(previewUrl)
-            .catch(err => {
-              if (myGeneration !== loadGeneration) return;
-              note.textContent = `Не удалось открыть PDF: ${pdfError(err)}`;
-              if (!note.isConnected) popup.appendChild(note);
-              positionPopup();
-            })
-            .finally(() => { btn.disabled = false; btn.innerHTML = label; });
-        };
-        const bar = makeActions(anchor, previewUrl, onFullscreen);
-        popup.appendChild(bar);
-
-        const loading = document.createElement('div');
-        loading.className = 'th-preview-loading';
-        loading.textContent = 'Loading PDF...';
-        popup.appendChild(loading);
-        const note = document.createElement('div');
-        note.className = 'th-preview-pdf-note';
-
-        const entry = getPdfEntry(previewUrl);
-        entry.docPromise
-          .then(doc => {
-            // Мышь уже ушла на другую ссылку — страницу не рисуем, но
-            // скачанный файл остаётся в кэше на следующее наведение
-            if (myGeneration !== loadGeneration) return null;
-            return getPdfPage(entry, doc, 1).then(url => ({ url, total: doc.numPages }));
-          })
-          .then(res => {
-            if (!res || myGeneration !== loadGeneration) return;
-            const img = new Image();
-            img.onload = () => {
-              if (myGeneration !== loadGeneration) return;
-              loading.replaceWith(img);
-              note.textContent = res.total > 1
-                ? `PDF · ${res.total} ${pageWord(res.total)} — все в Fullscreen`
-                : 'PDF · 1 страница';
-              popup.appendChild(note);
-              positionPopup();
-            };
-            img.onerror = () => {
-              if (myGeneration !== loadGeneration) return;
-              loading.textContent = 'Не удалось показать страницу';
-            };
-            img.src = res.url;
-          })
-          .catch(err => {
-            if (myGeneration !== loadGeneration) return;
-            // Превью не вышло — показываем как раньше: иконка и имя файла,
-            // плюс причина. Fullscreen без страниц не нужен.
-            const fallbackBar = makeActions(anchor, previewUrl, false);
-            bar.replaceWith(fallbackBar);
-            loading.replaceWith(makeFileRow(ICON_PDF, getFileName(filePath)));
-            note.textContent = `Превью недоступно: ${pdfError(err)}`;
-            popup.appendChild(note);
-            positionPopup();
-          });
 
       } else if (isPdf(filePath)) {
         popup.appendChild(makeActions(anchor, previewUrl, false));
