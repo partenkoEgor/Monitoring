@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.35
+// @version      1.36
 // @description  Одиннадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (предыдущий статус для закрытых, Admin username для тикетов In progress и In progress (M)), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику и обмен сохранёнными фильтрами с коллегами через текстовый код. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -355,6 +355,9 @@
       codePrefix: 'TH-FILTERS:',
       // Сколько фильтров максимум принимается из одного кода
       maxFilters: 200,
+      // Пауза между сохранениями фильтров при добавлении по коду (мс):
+      // фильтры уходят на сервер по одному, а не десятками подряд
+      saveDelay: 500,
     },
 
     // Подробный лог в консоль (F12 → Console)
@@ -4405,10 +4408,12 @@
         results.innerHTML = '';
         let ok = 0;
 
-        for (const row of chosen) {
-          const f = row.filter;
+        for (let i = 0; i < chosen.length; i++) {
+          if (i > 0 && CFG.saveDelay > 0) await new Promise(r => setTimeout(r, CFG.saveDelay));
+          if (myToken === token) addBtn.textContent = `Сохраняю ${i + 1} из ${chosen.length}…`;
+          const f = chosen[i].filter;
           const taken = takenByReport[f.reportId] || new Set();
-          let name = row.nameInp.value.trim() || f.name;
+          let name = chosen[i].nameInp.value.trim() || f.name;
           // Имя могли поправить руками на уже занятое — проверяем ещё раз
           if (taken.has(name)) name = uniqueName(name, taken);
           try {
