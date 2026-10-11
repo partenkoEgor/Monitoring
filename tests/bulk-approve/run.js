@@ -1,12 +1,16 @@
 // Сценарии для режима «по списку (225)». Запуск: npm test (или node run.js).
 // ONLY=1,3 node run.js — только названные сценарии. DEBUG=1 — консоль скрипта.
+// TARGET=main node run.js — те же сценарии на основном скрипте (по умолчанию бета).
 'use strict';
 
 const fs = require('fs');
 const { createPage } = require('./harness');
 
-const LIST_BTN = 'BETA Bulk Approve по списку (225)';
-const SCREEN_BTN = 'BETA Bulk Approve (225)';
+const IS_BETA = (process.env.TARGET || 'beta') === 'beta';
+const LABEL = IS_BETA ? 'BETA ' : '';
+const LIST_BTN = `${LABEL}Bulk Approve по списку (225)`;
+const SCREEN_BTN = `${LABEL}Bulk Approve (225)`;
+const TX_LIST_KEY = `th-bulk-approve:tx-list:v1${IS_BETA ? '-beta' : ''}`;
 
 let passed = 0;
 let failed = 0;
@@ -100,7 +104,7 @@ const scenarios = {
       // После третьего Apply снимаем копию памяти — как будто вкладку закрыли здесь
       onApplied: (site, w) => {
         if (site.applied.length === 3 && !midRun) {
-          midRun = w.localStorage.getItem('th-bulk-approve:tx-list:v1-beta');
+          midRun = w.localStorage.getItem(TX_LIST_KEY);
         }
       },
     };
@@ -117,7 +121,7 @@ const scenarios = {
       if (mem.done.includes(id)) t.externalStatus = '225 Approved by agent';
     });
     const page2 = createPage({ tickets: fresh.tickets, onScreen: ['19999999'] });
-    page2.w.localStorage.setItem('th-bulk-approve:tx-list:v1-beta', midRun);
+    page2.w.localStorage.setItem(TX_LIST_KEY, midRun);
     const r = await page2.run({ button: LIST_BTN, listText });
     check('после перезагрузки закрытые до сбоя не запрашивались',
       page2.site.filterApplies.flat().every((id) => !mem.done.includes(id)), JSON.stringify(page2.site.filterApplies));
@@ -126,19 +130,19 @@ const scenarios = {
   },
 
   async 4() {
-    console.log('\n[4] Память старого формата (до 0.13) — закрытые из неё входят в итог');
+    console.log('\n[4] Память старого формата (до 0.13 в бете, до 3.2 в основном) — закрытые из неё входят в итог');
     const { tickets, ids, listText } = makeTickets(5);
     tickets[ids[0]].externalStatus = '225 Approved by agent';
     tickets[ids[1]].externalStatus = '225 Approved by agent';
     const page = createPage({ tickets, onScreen: ['19999999'] });
-    page.w.localStorage.setItem('th-bulk-approve:tx-list:v1-beta', JSON.stringify({
+    page.w.localStorage.setItem(TX_LIST_KEY, JSON.stringify({
       savedAt: Date.now(), text: listText, done: [ids[0], ids[1]], needsAttention: [], duplicates: [], dropped: [],
     }));
     const r = await page.run({ button: LIST_BTN, listText });
     check('успешно 5 (2 из старой памяти + 3 сейчас)', /^Успешно: 5$/m.test(r.text), line(r.text, /^Успешно.*$/m));
     check('в этом прогоне +3', /В этом прогоне: закрыто \+3/.test(r.text), r.text);
     check('у восстановленных — своя строка про возраст, а не «нечитаемая дата»',
-      /закрыты до версии 0\.13 — возраст не сохранился: 2/.test(r.text) && !/нечитаемой Processing Date/.test(r.text), r.text);
+      /закрыты до версии (0\.13|3\.2) — возраст не сохранился: 2/.test(r.text) && !/нечитаемой Processing Date/.test(r.text), r.text);
     check('старые закрытые не запрашивались', page.site.filterApplies.flat().every((id) => id !== ids[0] && id !== ids[1]),
       JSON.stringify(page.site.filterApplies));
   },
@@ -265,7 +269,7 @@ const scenarios = {
     tickets[ids[0]].txStatus = 'rejected';
     tickets[ids[0]].txId = '777';
     const page = createPage({ tickets, onScreen: [...ids] });
-    const btn = [...page.d.querySelectorAll('button')].find((b) => b.textContent === 'BETA Bulk Response (239)');
+    const btn = [...page.d.querySelectorAll('button')].find((b) => b.textContent === `${LABEL}Bulk Response (239)`);
     btn.click();
     const end = Date.now() + 20000;
     let report;
