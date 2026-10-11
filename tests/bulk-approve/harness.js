@@ -74,7 +74,7 @@ function processingDate(hoursAgo) {
 //   tickets: Map ticketId → { externalStatus, txId, txStatus, hoursAgo }
 //   onScreen: массив Ticket ID, видимых в таблице
 //   behaviour: поведение, которое сценарий может менять между прогонами
-function createPage({ which = 'beta', tickets, onScreen, behaviour = {}, configOverrides } = {}) {
+function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, behaviour = {}, configOverrides } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
     <form id="filter_form">
       <button type="button" class="btn-settings-columns">Quick filters</button>
