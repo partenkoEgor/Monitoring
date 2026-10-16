@@ -280,6 +280,128 @@ const scenarios = {
     check('отчёт 239 показан', !!report);
     check('блока «Для таблицы отчёта» нет', labels && !labels.some((l) => /Для таблицы отчёта/.test(l)), JSON.stringify(labels));
   },
+
+  // ---------- 0.16: проверка списка на сайте и сессия (только бета) ----------
+
+  async 12() {
+    console.log('\n[12] Проверка списка на сайте до прогона — «по списку (225)»');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids, listText } = makeTickets(10);
+    tickets[ids[1]].externalStatus = '225 Approved by agent'; // уже закрыт кем-то
+    tickets[ids[2]].externalStatus = 'Closed (M)';
+    const wantedTx = (i) => `2385${String(i).padStart(7, '0')}`;
+    tickets[ids[4]].txId = wantedTx(4); // номер уже стоит, тот же
+    tickets[ids[5]].txId = '999';       // стоит чужой номер
+    const behaviour = { listApi: true, hiddenFromFilter: [ids[3]] };
+    const fast = { autopilotChunkSize: 4, precheckChunkSize: 4, precheckBetweenRequestsDelay: 1 };
+    const page = createPage({ tickets, onScreen: ['19999999'], behaviour, configOverrides: fast });
+
+    const win = await page.run({ button: LIST_BTN, listText, onlyWindow: true });
+    const t = win.precheckText;
+    check('окно: проверено 10', /Проверено на сайте: 10/.test(t), t);
+    check('окно: к прогону 7', /к прогону \(статус Approved \(M\)\): 7/.test(t), t);
+    check('окно: другой статус 2 с разбивкой',
+      /другой статус — пропущу, не открывая: 2/.test(t) && /225 Approved by agent: 1/.test(t) && /Closed \(M\): 1/.test(t), t);
+    check('окно: сайт не нашёл 1, с номером', /сайт не нашёл по фильтру: 1/.test(t) && t.includes(ids[3]), t);
+    check('окно: Transaction ID — пусто 5, тот же 1, другой 1',
+      /Transaction ID у тикетов к прогону: пусто 5, тот же 1, другой 1/.test(t), t);
+    check('окно: чужой номер назван', t.includes(`${ids[5]}: в тикете 999, в списке ${wantedTx(5)}`), t);
+    check('запуск не заблокирован', !win.startDisabled);
+    check('запрос страницы подхвачен одним нажатием Apply', page.site.filterApplies.length === 1,
+      JSON.stringify(page.site.filterApplies));
+    check('проверка шла пачками по 4 (3 запроса)', page.site.listQueries.length === 3,
+      JSON.stringify(page.site.listQueries.map((q) => q.ids.length)));
+    check('заголовки страницы ушли с запросом (токен)',
+      page.site.listQueries.every((q) => q.headers && q.headers['X-CSRF-TOKEN'] === 'test-token'),
+      JSON.stringify(page.site.listQueries[0].headers));
+
+    const r = await page.run({ button: LIST_BTN, listText });
+    const opened = new Set(page.site.modalOpens);
+    const requested = new Set(page.site.filterApplies.flat());
+    check('чужой статус и ненайденный не открывались', ![ids[1], ids[2], ids[3]].some((id) => opened.has(id)),
+      JSON.stringify(page.site.modalOpens));
+    check('и в фильтр не подставлялись', ![ids[1], ids[2], ids[3]].some((id) => requested.has(id)),
+      JSON.stringify(page.site.filterApplies));
+    check('успешно 6 (7 к прогону минус чужой номер без галочки)', /^Успешно: 6$/m.test(r.text), line(r.text, /^Успешно.*$/m));
+    check('пропуски по статусу посчитаны как обычно', /^Пропущено \(не тот External Status\): 2$/m.test(r.text), r.text);
+    check('строка проверки в отчёте',
+      /Проверка списка на сайте до прогона: проверено 10 — к прогону 7, другой статус 2 \(пропущены без открытия\), сайт не нашёл 1; в тикете уже другой Transaction ID: 1/.test(r.text), r.text);
+    check('память: чужой статус — выбыли', [ids[1], ids[2]].every((id) => r.memory.dropped.some((d) => d.ticketId === id)),
+      JSON.stringify(r.memory.dropped));
+    check('память: ненайденный — «сайт не показал»', r.memory.notShown.includes(ids[3]), JSON.stringify(r.memory.notShown));
+
+    // Повтор того же списка: в работе остались ненайденный и тикет с чужим номером
+    const queriesBefore = page.site.listQueries.length;
+    const win2 = await page.run({ button: LIST_BTN, listText, onlyWindow: true });
+    check('повтор: проверяются только оставшиеся 2', /Проверено на сайте: 2/.test(win2.precheckText), win2.precheckText);
+    check('повтор: запрос страницы уже был — без нового Apply', page.site.filterApplies.length === 1 + 2,
+      JSON.stringify(page.site.filterApplies));
+    check('повтор: один запрос проверки', page.site.listQueries.length === queriesBefore + 1);
+  },
+
+  async 13() {
+    console.log('\n[13] Проверка списка — обычный «Bulk Approve (225)» со списком Ticket ID');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids } = makeTickets(3);
+    ids.forEach((id) => { tickets[id].txId = '555' + id; });
+    tickets[ids[1]].externalStatus = 'Closed (M)';
+    const page = createPage({ tickets, onScreen: ['19999999'], behaviour: { listApi: true } });
+    const r = await page.run({ button: SCREEN_BTN, listText: ids.join('\n') });
+    check('окно: к прогону 2, другой статус 1',
+      /к прогону \(статус Approved \(M\)\): 2/.test(r.precheckText) && /другой статус — пропущу, не открывая: 1/.test(r.precheckText),
+      r.precheckText);
+    check('окно: про Transaction ID ни слова — в этом режиме его не вписывают', !/Transaction ID/.test(r.precheckText), r.precheckText);
+    check('отчёт: успешно 2', /^Успешно: 2$/m.test(r.text), r.text);
+    check('тикет в чужом статусе не открывался', !page.site.modalOpens.includes(ids[1]), JSON.stringify(page.site.modalOpens));
+  },
+
+  async 14() {
+    console.log('\n[14] Сессия истекла до прогона — запуск закрыт, причина в окне');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, listText } = makeTickets(3);
+    const page = createPage({ tickets, onScreen: ['19999999'], behaviour: { listApi: true, sessionExpired: true } });
+    const win = await page.run({ button: LIST_BTN, listText, onlyWindow: true });
+    check('окно: СЕССИЯ ИСТЕКЛА', /СЕССИЯ ИСТЕКЛА/.test(win.precheckText), win.precheckText);
+    check('кнопка запуска заблокирована', win.startDisabled === true);
+    check('ни одного окна Edit', page.site.modalOpens.length === 0);
+  },
+
+  async 15() {
+    console.log('\n[15] Сессия истекла посреди прогона — остановка с понятной причиной');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids, listText } = makeTickets(10);
+    const behaviour = {
+      listApi: true,
+      onApplied: (site) => { if (site.applied.length === 2) site.behaviour.sessionExpired = true; },
+    };
+    const page = createPage({
+      tickets, onScreen: ['19999999'], behaviour,
+      configOverrides: { keepaliveInterval: 20, sessionRecheckDelay: 10 },
+    });
+    const r = await page.run({ button: LIST_BTN, listText });
+    check('остановлен автоматически из-за сессии',
+      /ПРОГОН ОСТАНОВЛЕН АВТОМАТИЧЕСКИ\.\nСЕССИЯ ИСТЕКЛА/.test(r.text), r.text.slice(0, 400));
+    check('остановился рано, а не дошёл до конца', page.site.applied.length < 10, page.site.applied.length);
+    check('сделанное сохранено в памяти списка', r.memory && r.memory.done.length === page.site.applied.length,
+      JSON.stringify(r.memory && r.memory.done));
+    check('остановился после тикета в работе, а не посреди него', /Прогон остановлен после тикета, который был в работе/.test(r.text), r.text.slice(0, 400));
+    check('подсказка: войти заново и запустить тот же список', /войди заново и запусти тот же список/.test(r.text), r.text.slice(0, 400));
+  },
+
+  async 16() {
+    console.log('\n[16] Сайт не ответил на проверку — прогон идёт как раньше, без ложной остановки');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, listText } = makeTickets(4);
+    const page = createPage({
+      tickets, onScreen: ['19999999'], behaviour: { listApi: true, listApiStatus: 503 },
+      configOverrides: { precheckRetries: 1, precheckRetryDelay: 5, keepaliveInterval: 20, sessionRecheckDelay: 10 },
+    });
+    const r = await page.run({ button: LIST_BTN, listText });
+    check('окно: проверка не удалась, с кодом', /Проверка списка на сайте не удалась: сайт ответил 503/.test(r.precheckText), r.precheckText);
+    check('прогон прошёл весь список', /^Успешно: 4$/m.test(r.text), r.text);
+    check('503 при продлении сессии не остановил прогон', !/СЕССИЯ ИСТЕКЛА/.test(r.text) && /^Готово\./.test(r.text), r.text.slice(0, 300));
+    check('строки проверки в отчёте нет — проверки не было', !/Проверка списка на сайте до прогона/.test(r.text), r.text);
+  },
 };
 
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map((x) => x.trim())) : null;
