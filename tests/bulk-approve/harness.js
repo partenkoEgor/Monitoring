@@ -80,6 +80,8 @@ function processingDate(hoursAgo) {
 //     listApiStatus: код ответа на запрос списка (например, 503)
 //     dupCheckStatus: код ответа на проверку дубля (например, 503)
 //     dupCheckOwnId: Set тикетов, на которые проверка дубля называет сам тикет
+//     dupCheck529At: Set порядковых номеров запросов проверки дубля (с 1),
+//       на которые сайт отвечает 529 «слишком много запросов»
 function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, behaviour = {}, configOverrides } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
     <form id="filter_form">
@@ -119,6 +121,8 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
     storageTrace: [],     // снимки памяти списка после каждого Apply в окне Edit
     listQueries: [],      // запросы списка, которые скрипт отправил сам (fetch)
     dupChecks: [],        // запросы проверки дубля, которые скрипт отправил сам
+    dupInFlight: 0,       // сколько проверок дубля идёт прямо сейчас
+    dupMaxInFlight: 0,    // и сколько шло одновременно максимум
   };
 
   w.alert = (t) => site.alerts.push(String(t));
@@ -173,7 +177,18 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
       try { body = JSON.parse(init.body); } catch (e) { /* не наш запрос */ }
       // Проверка «занята ли транзакция» — как у окна Edit после ввода номера
       if (String(url).includes('checkPaymentSupportRequestByTrxId')) {
-        site.dupChecks.push({ url, ...body });
+        const entry = { url, ...body, at: Date.now() };
+        site.dupChecks.push(entry);
+        const n = site.dupChecks.length; // порядковый номер — до ожидания, пока соседи не вклинились
+        site.dupInFlight++;
+        site.dupMaxInFlight = Math.max(site.dupMaxInFlight, site.dupInFlight);
+        await new Promise((r) => setTimeout(r, 8));
+        site.dupInFlight--;
+        if (site.behaviour.dupCheck529At && site.behaviour.dupCheck529At.has(n)) {
+          entry.status = 529;
+          entry.answeredAt = Date.now();
+          return textResponse(529, '');
+        }
         if (site.behaviour.sessionExpired) {
           return textResponse(200, '<!DOCTYPE html><html><body>Login</body></html>');
         }
