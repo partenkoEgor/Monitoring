@@ -325,7 +325,7 @@ const scenarios = {
     check('успешно 6 (7 к прогону минус чужой номер без галочки)', /^Успешно: 6$/m.test(r.text), line(r.text, /^Успешно.*$/m));
     check('пропуски по статусу посчитаны как обычно', /^Пропущено \(не тот External Status\): 2$/m.test(r.text), r.text);
     check('строка проверки в отчёте',
-      /Проверка списка на сайте до прогона: проверено 10 — к прогону 7, другой статус 2 \(пропущены без открытия\), сайт не нашёл 1; в тикете уже другой Transaction ID: 1/.test(r.text), r.text);
+      /Проверка списка на сайте до прогона: проверено 10 — к прогону 7, другой статус 2 \(пропущены без открытия\), сайт не нашёл 1, транзакция занята 0 \(не открывались\); в тикете уже другой Transaction ID: 1/.test(r.text), r.text);
     check('память: чужой статус — выбыли', [ids[1], ids[2]].every((id) => r.memory.dropped.some((d) => d.ticketId === id)),
       JSON.stringify(r.memory.dropped));
     check('память: ненайденный — «сайт не показал»', r.memory.notShown.includes(ids[3]), JSON.stringify(r.memory.notShown));
@@ -401,6 +401,67 @@ const scenarios = {
     check('прогон прошёл весь список', /^Успешно: 4$/m.test(r.text), r.text);
     check('503 при продлении сессии не остановил прогон', !/СЕССИЯ ИСТЕКЛА/.test(r.text) && /^Готово\./.test(r.text), r.text.slice(0, 300));
     check('строки проверки в отчёте нет — проверки не было', !/Проверка списка на сайте до прогона/.test(r.text), r.text);
+  },
+
+  async 17() {
+    console.log('\n[17] Дубли находятся до прогона и не открываются (0.17)');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids, listText } = makeTickets(6);
+    const wantedTx = (i) => `2385${String(i).padStart(7, '0')}`;
+    const behaviour = {
+      listApi: true,
+      duplicateOwner: (id) => (id === ids[1] ? '22600001' : id === ids[4] ? '22600004' : null),
+      dupCheckOwnId: new Set([ids[2]]), // сайт назвал сам тикет — это не дубль
+    };
+    tickets[ids[3]].txId = wantedTx(3); // номер уже стоит — спрашивать не о чем
+    const page = createPage({ tickets, onScreen: ['19999999'], behaviour });
+    const r = await page.run({ button: LIST_BTN, listText, closeReport: false });
+    const t = r.precheckText;
+    check('окно: занято 2, с номерами владельцев',
+      /транзакция уже занята другим обращением: 2/.test(t) &&
+      t.includes(`${ids[1]} → ${wantedTx(1)} уже у обращения 22600001`) &&
+      t.includes(`${ids[4]} → ${wantedTx(4)} уже у обращения 22600004`), t);
+    check('окно: к прогону 4', /к прогону \(статус Approved \(M\)\): 4/.test(t), t);
+    check('окно: строка автопилота — по итогам проверки',
+      /Автопилот прогонит 4 тикета одной пачкой \(по итогам проверки на сайте\)\./.test(r.windowText), r.windowText);
+    check('проверка дублей: тот, где номер уже стоит, не спрашивался',
+      page.site.dupChecks.length === 5 && !page.site.dupChecks.some((c) => String(c.requestId) === ids[3]),
+      JSON.stringify(page.site.dupChecks.map((c) => c.requestId)));
+    const c0 = page.site.dupChecks[0];
+    check('проверка дублей: поля как у сайта (trxId строкой, paymentTypeId и requestId числами)',
+      typeof c0.trxId === 'string' && c0.paymentTypeId === 1 && typeof c0.requestId === 'number', JSON.stringify(c0));
+    check('дубли не открывались', ![ids[1], ids[4]].some((id) => page.site.modalOpens.includes(id)),
+      JSON.stringify(page.site.modalOpens));
+    check('успешно 4', /^Успешно: 4$/m.test(r.text), line(r.text, /^Успешно.*$/m));
+    check('раздел дублей: оба, «по списку», с владельцами',
+      /ТРАНЗАКЦИЯ ЗАНЯТА ДРУГИМ ОБРАЩЕНИЕМ \(2\)/.test(r.text) &&
+      r.text.includes(`${ids[1]} — по списку "${wantedTx(1)}", транзакция уже у обращения 22600001`), r.text);
+    check('строка проверки: занята 2', /транзакция занята 2 \(не открывались\)/.test(r.text), r.text);
+    check('кнопка Excel есть', r.hasDownload);
+    const block = r.copyBlocks.find((b) => /Для таблицы отчёта/.test(b.label));
+    check('столбик для таблицы: дубликаты 2', block && block.text.split('\n')[6] === '2', block && JSON.stringify(block.text));
+    check('память: дубли отложены', r.memory.duplicates.length === 2 && r.memory.duplicates.every((d) => d.fromPrecheck),
+      JSON.stringify(r.memory.duplicates));
+  },
+
+  async 18() {
+    console.log('\n[18] Проверка дублей не ответила — тикеты идут в прогон, дубль ловит окно Edit');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids, listText } = makeTickets(3);
+    const behaviour = {
+      listApi: true, dupCheckStatus: 503,
+      duplicateOwner: (id) => (id === ids[0] ? '22600001' : null),
+    };
+    const page = createPage({
+      tickets, onScreen: ['19999999'], behaviour,
+      configOverrides: { precheckRetries: 1, precheckRetryDelay: 5 },
+    });
+    const r = await page.run({ button: LIST_BTN, listText });
+    check('окно: проверить не удалось 3', /дубли проверить не удалось: 3/.test(r.precheckText), r.precheckText);
+    check('окно: к прогону все 3', /к прогону \(статус Approved \(M\)\): 3/.test(r.precheckText), r.precheckText);
+    check('дубль пойман окном сайта, как раньше', page.site.modalOpens.includes(ids[0]) &&
+      r.text.includes(`${ids[0]} — вписывали`), r.text);
+    check('успешно 2', /^Успешно: 2$/m.test(r.text), line(r.text, /^Успешно.*$/m));
   },
 };
 
