@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.15
+// @version      0.16
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -111,6 +111,31 @@
     autopilotMaxEmptyChunks: 3,
     // Пауза между пачками
     autopilotBetweenChunksDelay: 1500,
+
+    // ── Проверка списка на сайте до прогона (с 0.16) ──────────────────
+    // Скрипт повторяет запрос, которым страница грузит таблицу, подставив в
+    // него номера из списка, и до первого окна Edit узнаёт статус каждого
+    // тикета. Пачка та же, что у автопилота: столько строк сайт отдаёт на
+    // одну страницу выдачи (perPage в запросе страницы).
+    precheckChunkSize: 100,
+    // Пауза между запросами проверки — чтобы не долбить сайт подряд
+    precheckBetweenRequestsDelay: 300,
+    // Сколько раз повторить запрос, если сайт ответил «перегружен» (429/5xx)
+    // или ещё собирает выдачу; пауза растёт с каждой попыткой
+    precheckRetries: 3,
+    precheckRetryDelay: 1000,
+    // Предохранитель от бесконечного листания одной пачки
+    precheckMaxPages: 20,
+    // Сколько ждать, пока страница отправит свой запрос после нажатия Apply
+    precheckTemplateTimeout: 10000,
+
+    // ── Сессия во время прогона (с 0.16) ──────────────────────────────
+    // Длинный прогон идёт часами. Раз в столько скрипт делает лёгкий запрос
+    // к сайту: он и продлевает сессию, и показывает, что она ещё жива.
+    keepaliveInterval: 180000,
+    // Ответ «страница входа» перепроверяется через столько, прежде чем
+    // остановить прогон: один странный ответ — ещё не истёкшая сессия
+    sessionRecheckDelay: 5000,
   };
 
   // ------------------------------------------------------------------
@@ -323,15 +348,31 @@
 
     const origOpen = XMLHttpRequest.prototype.open;
     const origSend = XMLHttpRequest.prototype.send;
+    const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
 
     XMLHttpRequest.prototype.open = function (method, url, ...rest) {
       try {
         this.__bulkApproveUrl = url;
+        this.__bulkApproveMethod = method;
       } catch (e) {
         /* журнал не имеет права мешать запросу */
       }
       return origOpen.call(this, method, url, ...rest);
     };
+
+    // Заголовки запроса нужны только запросу списка тикетов: с ними (в том
+    // числе с защитным токеном) скрипт потом повторяет его сам
+    if (typeof origSetHeader === 'function') {
+      XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+        try {
+          if (!this.__bulkApproveHeaders) this.__bulkApproveHeaders = {};
+          this.__bulkApproveHeaders[name] = value;
+        } catch (e) {
+          /* см. выше */
+        }
+        return origSetHeader.call(this, name, value);
+      };
+    }
 
     XMLHttpRequest.prototype.send = function (...args) {
       try {
@@ -339,6 +380,7 @@
         this.addEventListener('loadend', () => {
           entry.finishedAt = Date.now();
         });
+        noteListRequest(this.__bulkApproveMethod, this.__bulkApproveUrl, args[0], this.__bulkApproveHeaders);
       } catch (e) {
         /* см. выше */
       }
@@ -347,10 +389,21 @@
 
     const origFetch = window.fetch;
     if (typeof origFetch === 'function') {
+      // Свои запросы (проверка списка, продление сессии) скрипт шлёт мимо
+      // журнала: иначе ожидание «сайт догрузил таблицу» приняло бы их за
+      // запросы страницы.
+      window.__bulkApproveNativeFetch = origFetch;
       window.fetch = function (input, ...rest) {
         let entry = null;
         try {
           entry = noteRequestStart(input && input.url ? input.url : input);
+          const init = rest[0] || {};
+          noteListRequest(
+            init.method || (input && input.method) || 'GET',
+            input && input.url ? input.url : input,
+            init.body,
+            headersToObject(init.headers)
+          );
         } catch (e) {
           /* см. выше */
         }
@@ -402,6 +455,328 @@
         e.id > mark &&
         CONFIG.transactionLoadEndpoints.some((needle) => matchesEndpoint(e.url, needle))
     );
+  }
+
+  // ------------------------------------------------------------------
+  // ЗАПРОС СПИСКА ТИКЕТОВ (с 0.16).
+  //
+  // Таблицу страница грузит одним POST-запросом: в теле все фильтры, номера
+  // Ticket ID — строкой через перенос (idTicket), страница (page) и размер
+  // (perPage). Ответ — JSON со строками таблицы: idTicket,
+  // nameExternalStatus, idTransaction и остальные колонки.
+  //
+  // Сам запрос скрипт не собирает: он запоминает тот, что отправила
+  // страница, — со всеми заголовками и защитным токеном — и повторяет его,
+  // меняя только номера и страницу. Добавит сайт в запрос новое поле — оно
+  // подтянется само, угадывать ничего не надо.
+  //
+  // Через этот запрос скрипт только ЧИТАЕТ. Закрытие тикета по-прежнему идёт
+  // через окно Edit со всеми проверками.
+  // ------------------------------------------------------------------
+  let listRequestTemplate = null; // { url, body, headers, capturedAt }
+
+  function headersToObject(h) {
+    if (!h) return {};
+    if (Array.isArray(h)) return Object.fromEntries(h);
+    if (typeof h.forEach === 'function') {
+      const out = {};
+      h.forEach((value, key) => {
+        out[key] = value;
+      });
+      return out;
+    }
+    return typeof h === 'object' ? { ...h } : {};
+  }
+
+  // Узнаёт запрос списка по телу, а не по адресу: адрес у него пустой
+  // (страница шлёт его «на себя», см. requestsInFlightSince).
+  function noteListRequest(method, url, body, headers) {
+    if (String(method || '').toUpperCase() !== 'POST' || typeof body !== 'string') return;
+    if (body.indexOf('idTicket') === -1) return;
+    let parsed;
+    try {
+      parsed = JSON.parse(body);
+    } catch (e) {
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    if (!('idTicket' in parsed) || !('page' in parsed) || !('perPage' in parsed)) return;
+    let resolved;
+    try {
+      resolved = new URL(url == null ? '' : String(url), window.location.href);
+    } catch (e) {
+      return;
+    }
+    resolved.hash = '';
+    listRequestTemplate = {
+      url: resolved.href,
+      body: parsed,
+      headers: { ...(headers || {}) },
+      capturedAt: Date.now(),
+    };
+  }
+
+  function siteQueryAvailable() {
+    return typeof window.__bulkApproveNativeFetch === 'function';
+  }
+
+  function listRequestHeaders() {
+    const h = { ...listRequestTemplate.headers };
+    const has = (name) => Object.keys(h).some((k) => k.toLowerCase() === name.toLowerCase());
+    if (!has('Content-Type')) h['Content-Type'] = 'application/json';
+    if (!has('Accept')) h.Accept = 'application/json, text/plain, */*';
+    if (!has('X-Requested-With')) h['X-Requested-With'] = 'XMLHttpRequest';
+    if (!has('X-CSRF-TOKEN')) {
+      const meta = document.querySelector('meta[name="csrf-token"]');
+      if (meta && meta.getAttribute('content')) h['X-CSRF-TOKEN'] = meta.getAttribute('content');
+    }
+    return h;
+  }
+
+  // Статусы, при которых сайт просто перегружен и запрос стоит повторить
+  const RETRYABLE_HTTP = [429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529];
+
+  // Одна страница выдачи для набора Ticket ID. Возвращает:
+  //   { kind: 'ok', rows, hasMore } — данные;
+  //   { kind: 'expired', detail }   — вместо данных страница входа;
+  //   { kind: 'retry', detail }     — сайт перегружен или ещё считает;
+  //   { kind: 'error', detail }     — что-то непонятное, дальше не идём.
+  async function fetchListPage(ids, page) {
+    const body = {
+      ...listRequestTemplate.body,
+      idTicket: ids.join('\n'),
+      page,
+      perPage: CONFIG.precheckChunkSize,
+    };
+    let resp;
+    try {
+      resp = await window.__bulkApproveNativeFetch.call(window, listRequestTemplate.url, {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: listRequestHeaders(),
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      return { kind: 'retry', detail: `запрос не дошёл до сайта (${(e && e.message) || e})` };
+    }
+    let text = '';
+    try {
+      text = await resp.text();
+    } catch (e) {
+      return { kind: 'retry', detail: 'ответ сайта оборвался' };
+    }
+    if (resp.status === 401 || resp.status === 419) {
+      return { kind: 'expired', detail: `сайт ответил ${resp.status}` };
+    }
+    if (!resp.ok) {
+      return RETRYABLE_HTTP.includes(resp.status)
+        ? { kind: 'retry', detail: `сайт ответил ${resp.status}` }
+        : { kind: 'error', detail: `сайт ответил ${resp.status}` };
+    }
+    // Данные приходят JSON'ом. HTML с кодом 200 — это страница входа, на
+    // которую сайт перенаправляет, когда сессия кончилась.
+    if (/^\s*</.test(text)) {
+      return { kind: 'expired', detail: 'вместо данных пришла страница входа' };
+    }
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      return { kind: 'error', detail: 'ответ сайта не читается' };
+    }
+    if (json && json.is_polling) {
+      return { kind: 'retry', detail: 'сайт ещё собирает выдачу' };
+    }
+    if (!json || json.success === false || !Array.isArray(json.data)) {
+      return { kind: 'error', detail: 'сайт ответил не в том виде, который знает скрипт' };
+    }
+    const rows = json.data
+      .flat()
+      .filter((r) => r && typeof r === 'object')
+      .map((r) => ({
+        ticketId: String(r.idTicket == null ? '' : r.idTicket).trim(),
+        externalStatus: String(r.nameExternalStatus == null ? '' : r.nameExternalStatus).trim(),
+        transactionId: r.idTransaction == null ? '' : String(r.idTransaction).trim(),
+      }))
+      .filter((r) => r.ticketId !== '');
+    return { kind: 'ok', rows, hasMore: !!(json.otherData && json.otherData.hasMore) };
+  }
+
+  // Строки сайта для списка Ticket ID — пачками, со страницами и повторами.
+  // { ok: true, rows: Map ticketId → строка } или { ok: false, expired, detail }.
+  async function queryTicketsOnSite(ids, { onProgress, isCancelled } = {}) {
+    const rows = new Map();
+    const chunks = chunkArray(ids, CONFIG.precheckChunkSize);
+    let done = 0;
+    for (let c = 0; c < chunks.length; c++) {
+      for (let page = 1; ; page++) {
+        if (page > CONFIG.precheckMaxPages) {
+          return { ok: false, detail: 'сайт отдаёт слишком много страниц выдачи' };
+        }
+        let res;
+        for (let attempt = 0; ; attempt++) {
+          if (isCancelled && isCancelled()) return { ok: false, cancelled: true };
+          res = await fetchListPage(chunks[c], page);
+          if (res.kind !== 'retry' || attempt >= CONFIG.precheckRetries) break;
+          await sleep(CONFIG.precheckRetryDelay * (attempt + 1));
+        }
+        if (res.kind === 'expired') return { ok: false, expired: true, detail: res.detail };
+        if (res.kind !== 'ok') return { ok: false, detail: res.detail };
+        res.rows.forEach((r) => rows.set(r.ticketId, r));
+        if (!res.hasMore) break;
+        await sleep(CONFIG.precheckBetweenRequestsDelay);
+      }
+      done += chunks[c].length;
+      if (onProgress) onProgress(done, ids.length);
+      if (c < chunks.length - 1) await sleep(CONFIG.precheckBetweenRequestsDelay);
+    }
+    return { ok: true, rows };
+  }
+
+  // Своего запроса у скрипта нет, пока страница не отправила свой. Таблица
+  // при открытии страницы грузится раньше, чем запускается скрипт, поэтому
+  // первый раз скрипт сам жмёт Apply у фильтров — ровно то, что сделал бы
+  // человек. Фильтры страницы при этом не меняются.
+  async function ensureListRequestTemplate(isCancelled) {
+    if (listRequestTemplate) return true;
+    if (!siteQueryAvailable()) return false;
+    const btn = getFilterApplyButton();
+    if (!btn) return false;
+    fireClick(btn);
+    const end = Date.now() + CONFIG.precheckTemplateTimeout;
+    while (!listRequestTemplate && Date.now() < end) {
+      if (isCancelled && isCancelled()) return false;
+      await sleep(100);
+    }
+    return !!listRequestTemplate;
+  }
+
+  // Итог проверки списка: что прогонять, что пропустить, не открывая, и
+  // чего сайт не нашёл. Статус сравнивается тем же правилом, что и в прогоне.
+  function summarizePrecheck(workflow, ids, pairs, rows) {
+    const ready = [];
+    const wrongStatus = [];
+    const notFound = [];
+    const txOther = [];
+    let txEmpty = 0;
+    let txSame = 0;
+    ids.forEach((id) => {
+      const row = rows.get(id);
+      if (!row) {
+        notFound.push(id);
+        return;
+      }
+      if (!matchesRequiredExternalStatus(workflow, row.externalStatus)) {
+        wrongStatus.push({ ticketId: id, externalStatus: row.externalStatus });
+        return;
+      }
+      ready.push(id);
+      if (workflow.fillTransactionIdFromList) {
+        const wanted = String(pairs.get(id) == null ? '' : pairs.get(id));
+        if (row.transactionId === '') txEmpty++;
+        else if (row.transactionId === wanted) txSame++;
+        else txOther.push({ ticketId: id, current: row.transactionId, wanted });
+      }
+    });
+    return {
+      checkedAt: Date.now(),
+      checked: ids.length,
+      pairsMode: !!workflow.fillTransactionIdFromList,
+      ready,
+      wrongStatus,
+      notFound,
+      txEmpty,
+      txSame,
+      txOther,
+    };
+  }
+
+  // «Статус — сколько» по убыванию: для сводки, а не для поштучного списка
+  function countByStatus(items) {
+    const counts = new Map();
+    items.forEach((w) => {
+      const name = w.externalStatus || '(пусто)';
+      counts.set(name, (counts.get(name) || 0) + 1);
+    });
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  }
+
+  // ------------------------------------------------------------------
+  // СЕССИЯ ВО ВРЕМЯ ПРОГОНА (с 0.16).
+  //
+  // Прогон на сотни тикетов идёт часами, и сессия сайта может кончиться
+  // посреди него. Тогда тикеты просто перестают сохраняться, а в отчёте
+  // остаются «три ошибки подряд» без внятной причины. Раз в несколько минут
+  // скрипт запрашивает один тикет тем же запросом списка: это продлевает
+  // сессию, а страница входа вместо данных значит, что она уже кончилась.
+  // ------------------------------------------------------------------
+  let keepaliveTimer = null;
+  let keepaliveBusy = false;
+  // Причина остановки из-за сессии. Прогон смотрит на неё между тикетами, а
+  // не обрывает текущий на полуслове: оборванный после Apply тикет остался
+  // бы непроверенным, а доведённый до конца честно попадёт в отчёт.
+  let sessionExpiredReason = null;
+
+  function pickPingTicketId() {
+    if (currentListPairs && currentListPairs.size > 0) return currentListPairs.keys().next().value;
+    const row = getTicketRows()[0];
+    return row ? getTicketIdFromRow(row) : null;
+  }
+
+  async function sessionExpiredDetail(ticketId) {
+    const res = await fetchListPage([ticketId], 1);
+    return res.kind === 'expired' ? res.detail : null;
+  }
+
+  async function keepalivePing(workflow) {
+    if (!state.isRunning) {
+      stopKeepalive();
+      return;
+    }
+    if (keepaliveBusy || state.stopRequested || sessionExpiredReason) return;
+    // Без запомненного запроса пинговать нечем. При автопилоте он есть
+    // всегда — пачки подставляются через тот же Apply.
+    if (!listRequestTemplate || !siteQueryAvailable()) return;
+    const ticketId = pickPingTicketId();
+    if (!ticketId) return;
+    keepaliveBusy = true;
+    try {
+      let detail = await sessionExpiredDetail(ticketId);
+      if (!detail) return;
+      // Один странный ответ — ещё не повод бросать прогон
+      await sleep(CONFIG.sessionRecheckDelay);
+      if (!state.isRunning || state.stopRequested) return;
+      detail = await sessionExpiredDetail(ticketId);
+      if (!detail) return;
+      sessionExpiredReason =
+        `СЕССИЯ ИСТЕКЛА: сайт вместо данных отвечает страницей входа (${detail}). ` +
+        `Прогон остановлен после тикета, который был в работе. ` +
+        (currentListPairs
+          ? `Обнови страницу, войди заново и запусти тот же список — сделанное сохранено.`
+          : `Обнови страницу, войди заново и запусти прогон снова.`);
+      console.error(`[BulkApproveBETA/${workflow.id}] ${sessionExpiredReason}`);
+      setProgress({ action: 'сессия истекла — останавливаюсь после этого тикета' });
+    } catch (e) {
+      console.warn(`[BulkApproveBETA/${workflow.id}] Проверка сессии не удалась:`, e);
+    } finally {
+      keepaliveBusy = false;
+    }
+  }
+
+  function startKeepalive(workflow) {
+    stopKeepalive();
+    sessionExpiredReason = null;
+    keepaliveTimer = setInterval(() => {
+      keepalivePing(workflow);
+    }, CONFIG.keepaliveInterval);
+  }
+
+  function stopKeepalive() {
+    if (keepaliveTimer) {
+      clearInterval(keepaliveTimer);
+      keepaliveTimer = null;
+    }
   }
 
   function checkStop() {
@@ -2307,6 +2682,8 @@
     currentOverwriteTx = false;
     let autopilot = false;
     let askedInWindow = false;
+    // Итог проверки списка на сайте из окна ввода (null — проверки не было)
+    let listPrecheck = null;
     if (workflow.fillTransactionIdFromList || workflow.allowTicketIdList) {
       const entered = await showTicketListWindow(workflow);
       if (!entered) return; // отмена — молча выходим, ничего не трогая
@@ -2321,6 +2698,7 @@
       );
       autopilot = entered.autopilot;
       currentOverwriteTx = !!entered.overwriteTx;
+      listPrecheck = autopilot ? entered.precheck || null : null;
       if (currentOverwriteTx) {
         console.warn(
           `[BulkApproveBETA/${workflow.id}] Включена галочка «Переписывать Transaction ID»: ` +
@@ -2364,6 +2742,11 @@
     // фильтр страницы скрипт не трогает.
     const listDone = new Set(currentListState ? currentListState.done : []);
     let chunks;
+    // По итогам проверки списка: тикеты в чужом статусе пропускаются, не
+    // открываясь, а те, которых сайт не нашёл, в пачки этого прогона не идут
+    // (и остаются в списке на следующий — как «сайт не показал по фильтру»).
+    const precheckWrongStatus = [];
+    const precheckNotFound = [];
 
     if (autopilot) {
       const missing = autopilotMissingControls();
@@ -2379,7 +2762,7 @@
 
       // В пачки не идут отложенные дубли (сайт на них уже ответил) и
       // выбывшие тикеты (их статус сменился, пока шла обработка списка)
-      const remaining = [...currentListPairs.keys()].filter(
+      let remaining = [...currentListPairs.keys()].filter(
         (id) => !listDone.has(id) && !currentListDuplicates.has(id) && !currentListDropped.has(id)
       );
       if (remaining.length === 0) {
@@ -2408,6 +2791,21 @@
         );
         window.__bulkApproveDuplicates = parked;
         return;
+      }
+      if (listPrecheck) {
+        const wrong = new Map(listPrecheck.wrongStatus.map((w) => [w.ticketId, w]));
+        const missing = new Set(listPrecheck.notFound);
+        remaining = remaining.filter((id) => {
+          if (wrong.has(id)) {
+            precheckWrongStatus.push(wrong.get(id));
+            return false;
+          }
+          if (missing.has(id)) {
+            precheckNotFound.push(id);
+            return false;
+          }
+          return true;
+        });
       }
       chunks = chunkArray(remaining, CONFIG.autopilotChunkSize);
     } else {
@@ -2452,6 +2850,7 @@
     state.isRunning = true;
     state.stopRequested = false;
     updateButtonsUI();
+    startKeepalive(workflow);
 
     // Все тикеты, которые прогон собирался посмотреть — накапливаются по
     // пачкам. По ним в конце считается, до кого прогон не дошёл.
@@ -2649,6 +3048,26 @@
       return { merged, done, needsAttention, duplicates, dropped, droppedNew, remaining, notShown };
     };
 
+    // Итог проверки списка — в результаты, как если бы прогон дошёл до этих
+    // тикетов сам: те же причины, те же разделы отчёта и та же память.
+    if (precheckWrongStatus.length > 0 || precheckNotFound.length > 0) {
+      precheckWrongStatus.forEach((w) =>
+        results.push({
+          ticketId: w.ticketId,
+          status: 'skipped',
+          reason: 'wrong-external-status',
+          externalStatus: w.externalStatus,
+          fromPrecheck: true,
+        })
+      );
+      requestedTicketIds.push(...precheckNotFound);
+      listSnapshot();
+      console.log(
+        `[BulkApproveBETA/${workflow.id}] По проверке списка: пропущено без открытия ` +
+        `${precheckWrongStatus.length} (другой статус), сайт не нашёл ${precheckNotFound.length}.`
+      );
+    }
+
     let consecutiveFailures = 0;
     // Отдельный счётчик: тикет обработался успешно, но сумма не сохранилась.
     // Это не «ошибка тикета», поэтому в consecutiveFailures не попадает.
@@ -2677,6 +3096,11 @@
 
     for (let chunkNo = 0; chunkNo < chunks.length; chunkNo++) {
       if (state.stopRequested) {
+        stoppedEarly = true;
+        break;
+      }
+      if (sessionExpiredReason) {
+        runAbortReason = sessionExpiredReason;
         stoppedEarly = true;
         break;
       }
@@ -2747,6 +3171,11 @@
 
       for (let i = 0; i < total; i++) {
         if (state.stopRequested) {
+          stoppedEarly = true;
+          break;
+        }
+        if (sessionExpiredReason) {
+          runAbortReason = sessionExpiredReason;
           stoppedEarly = true;
           break;
         }
@@ -2970,8 +3399,16 @@
       }
     }
 
+    // Сессия кончилась на последнем тикете — прогон дошёл до конца, но
+    // человеку всё равно надо войти заново, и отчёт должен об этом сказать
+    if (sessionExpiredReason && !stoppedEarly) {
+      runAbortReason = sessionExpiredReason;
+      stoppedEarly = true;
+    }
+
     state.isRunning = false;
     state.stopRequested = false;
+    stopKeepalive();
     updateButtonsUI();
     hideProgress();
 
@@ -3519,6 +3956,17 @@
             (emptyChunks > 0 ? `, из них пустых ${emptyChunks}` : '')
           : '')
       );
+      if (listPrecheck) {
+        summaryLines.push(
+          `Проверка списка на сайте до прогона: проверено ${listPrecheck.checked} — ` +
+          `к прогону ${listPrecheck.ready.length}, ` +
+          `другой статус ${listPrecheck.wrongStatus.length} (пропущены без открытия), ` +
+          `сайт не нашёл ${listPrecheck.notFound.length}` +
+          (listPrecheck.pairsMode && listPrecheck.txOther.length > 0
+            ? `; в тикете уже другой Transaction ID: ${listPrecheck.txOther.length}`
+            : '')
+        );
+      }
     }
 
     // Поимённый список упавших тикетов с причиной. Без него оператор видел
@@ -4107,12 +4555,25 @@
           body.appendChild(overwriteWarn);
           overwriteBox.addEventListener('change', () => {
             overwriteWarn.style.display = overwriteBox.checked ? 'block' : 'none';
+            // В итоге проверки подсказка про чужие номера зависит от галочки.
+            // renderPrecheck объявлена ниже, но к первому клику уже есть.
+            renderPrecheck();
           });
         }
 
         const status = document.createElement('div');
         status.style.cssText = 'margin-top:10px;white-space:pre-wrap';
         body.appendChild(status);
+
+        // Проверка списка на сайте (с 0.16): только при автопилоте — без него
+        // прогон берёт то, что оператор вывел на экран сам, и статус каждой
+        // строки и так виден в таблице.
+        const precheckBox = document.createElement('div');
+        precheckBox.className = 'bulk-approve-beta-precheck';
+        precheckBox.style.cssText =
+          'margin-top:10px;white-space:pre-wrap;display:none;padding:8px 10px;' +
+          'border-radius:4px;background:#f4f8fb;border:1px solid #d6e4ee';
+        body.appendChild(precheckBox);
 
         const footer = document.createElement('div');
         footer.style.cssText =
@@ -4158,6 +4619,178 @@
         footer.appendChild(runBtn);
 
         let parsed = null;
+        let lastBlocked = true;
+
+        // status: idle | running | done | failed | expired | unavailable
+        const precheck = { key: null, gen: 0, status: 'idle', progress: '', result: null, detail: '' };
+
+        const updateRunButton = () => {
+          const disabled =
+            lastBlocked || precheck.status === 'running' || precheck.status === 'expired';
+          runBtn.disabled = disabled;
+          runBtn.style.opacity = disabled ? '0.5' : '1';
+          runBtn.style.cursor = disabled ? 'default' : 'pointer';
+          runBtn.title = precheck.status === 'running' ? 'Дождись конца проверки списка на сайте' : '';
+        };
+
+        const renderPrecheck = () => {
+          if (precheck.status === 'idle') {
+            precheckBox.style.display = 'none';
+            precheckBox.textContent = '';
+            return;
+          }
+          const lines = [];
+          let color = '#1f3a4d';
+          if (precheck.status === 'running') {
+            lines.push(`Проверяю список на сайте… ${precheck.progress}`);
+          } else if (precheck.status === 'unavailable') {
+            lines.push('Проверка списка на сайте здесь недоступна — прогон пойдёт как раньше.');
+            color = '#555';
+          } else if (precheck.status === 'failed') {
+            lines.push(`Проверка списка на сайте не удалась: ${precheck.detail}.`);
+            lines.push('Прогон пойдёт как раньше — каждый тикет проверится, когда до него дойдёт очередь.');
+            color = '#8a5a00';
+          } else if (precheck.status === 'expired') {
+            lines.push(`СЕССИЯ ИСТЕКЛА: ${precheck.detail}.`);
+            lines.push(
+              'Обнови страницу, войди заново и открой это окно снова. Запуск заблокирован: ' +
+              'с истёкшей сессией сайт не сохранит ни одного тикета.'
+            );
+            color = '#B00020';
+          } else if (precheck.status === 'done') {
+            const r = precheck.result;
+            lines.push(`Проверено на сайте: ${r.checked}`);
+            lines.push(
+              `  • к прогону (статус ${workflow.requiredExternalStatuses.join(' / ')}): ${r.ready.length}`
+            );
+            if (r.wrongStatus.length > 0) {
+              lines.push(`  • другой статус — пропущу, не открывая: ${r.wrongStatus.length}`);
+              const byStatus = countByStatus(r.wrongStatus);
+              byStatus.slice(0, 5).forEach(([name, count]) => lines.push(`      ${name}: ${count}`));
+              if (byStatus.length > 5) {
+                const rest = byStatus.slice(5).reduce((sum, [, c]) => sum + c, 0);
+                lines.push(`      прочие (${byStatus.length - 5} статусов): ${rest}`);
+              }
+            }
+            if (r.notFound.length > 0) {
+              lines.push(
+                `  • сайт не нашёл по фильтру: ${r.notFound.length} — в этот прогон не пойдут, ` +
+                'останутся в списке на следующий'
+              );
+              lines.push(
+                `      ${r.notFound.slice(0, 10).join(', ')}` +
+                (r.notFound.length > 10 ? ` … и ещё ${r.notFound.length - 10}` : '')
+              );
+            }
+            if (r.pairsMode && r.ready.length > 0) {
+              lines.push(
+                `Transaction ID у тикетов к прогону: пусто ${r.txEmpty}, тот же ${r.txSame}, ` +
+                `другой ${r.txOther.length}`
+              );
+              if (r.txOther.length > 0) {
+                r.txOther.slice(0, 10).forEach((t) =>
+                  lines.push(`  ${t.ticketId}: в тикете ${t.current}, в списке ${t.wanted}`)
+                );
+                if (r.txOther.length > 10) lines.push(`  … и ещё ${r.txOther.length - 10}`);
+                lines.push(
+                  overwriteBox.checked
+                    ? '  Галочка «Переписывать» включена — номер из списка заменит стоящий в тикете.'
+                    : '  Без галочки «Переписывать Transaction ID» такие тикеты пропустятся.'
+                );
+              }
+            }
+            if (r.ready.length === 0) {
+              lines.push('Прогонять нечего — запуск только запишет итог проверки в отчёт и память списка.');
+            }
+          }
+          precheckBox.textContent = lines.join('\n');
+          precheckBox.style.color = color;
+          precheckBox.style.display = 'block';
+        };
+
+        const runPrecheck = async (gen, ids, pairs) => {
+          const cancelled = () => settled || gen !== precheck.gen;
+          try {
+            if (!listRequestTemplate) {
+              precheck.progress = '(нажимаю Apply на странице, чтобы подхватить запрос сайта)';
+              renderPrecheck();
+            }
+            const hasTemplate = await ensureListRequestTemplate(cancelled);
+            if (cancelled()) return;
+            if (!hasTemplate) {
+              precheck.status = 'failed';
+              precheck.detail = 'не удалось подхватить запрос, которым страница грузит таблицу';
+              return;
+            }
+            precheck.progress = `0 из ${ids.length}`;
+            renderPrecheck();
+            const res = await queryTicketsOnSite(ids, {
+              isCancelled: cancelled,
+              onProgress: (done, total) => {
+                if (cancelled()) return;
+                precheck.progress = `${done} из ${total}`;
+                renderPrecheck();
+              },
+            });
+            if (cancelled()) return;
+            if (!res.ok) {
+              precheck.status = res.expired ? 'expired' : 'failed';
+              precheck.detail = res.expired
+                ? `сайт вместо данных отвечает страницей входа (${res.detail})`
+                : res.detail || 'неизвестная ошибка';
+              return;
+            }
+            precheck.result = summarizePrecheck(workflow, ids, pairs, res.rows);
+            precheck.status = 'done';
+            window.__bulkApprovePrecheck = precheck.result;
+          } catch (e) {
+            console.warn('[BulkApproveBETA] Проверка списка на сайте упала:', e);
+            if (!cancelled()) {
+              precheck.status = 'failed';
+              precheck.detail = String((e && e.message) || e);
+            }
+          } finally {
+            if (!cancelled()) {
+              renderPrecheck();
+              updateRunButton();
+            }
+          }
+        };
+
+        // Проверка запускается сама, как только список разобран без ошибок,
+        // и перезапускается, только если изменился набор пар.
+        const updatePrecheck = (remainingIds) => {
+          const wanted =
+            !lastBlocked && autoBox.checked && !autoBox.disabled && remainingIds.length > 0;
+          if (!wanted) {
+            if (precheck.key !== null || precheck.status !== 'idle') {
+              precheck.gen++;
+              precheck.key = null;
+              precheck.status = 'idle';
+              precheck.result = null;
+            }
+            renderPrecheck();
+            return;
+          }
+          const key = remainingIds.map((id) => `${id}:${parsed.pairs.get(id)}`).join(',');
+          if (key === precheck.key) {
+            renderPrecheck();
+            return;
+          }
+          precheck.key = key;
+          precheck.gen++;
+          precheck.result = null;
+          precheck.detail = '';
+          if (!siteQueryAvailable()) {
+            precheck.status = 'unavailable';
+            renderPrecheck();
+            return;
+          }
+          precheck.status = 'running';
+          precheck.progress = '';
+          renderPrecheck();
+          runPrecheck(precheck.gen, remainingIds.slice(), new Map(parsed.pairs));
+        };
 
         // Тот же список, что лежит в памяти? Счётчики обработанного имеют
         // смысл только для него, и от этого же зависит, сколько тикетов
@@ -4179,9 +4812,10 @@
               ? [...saved.duplicates, ...saved.dropped].map((d) => d.ticketId)
               : []
           );
-          const remainingCount = [...parsed.pairs.keys()].filter(
+          const remainingIds = [...parsed.pairs.keys()].filter(
             (id) => !doneIds.has(id) && !parkedIds.has(id)
-          ).length;
+          );
+          const remainingCount = remainingIds.length;
 
           lines.push(needsPairs
             ? `Распознано пар: ${parsed.pairs.size}`
@@ -4253,9 +4887,9 @@
 
           status.textContent = lines.join('\n');
           status.style.color = blocked && parsed.pairs.size > 0 ? '#B00020' : '#555';
-          runBtn.disabled = blocked;
-          runBtn.style.opacity = blocked ? '0.5' : '1';
-          runBtn.style.cursor = blocked ? 'default' : 'pointer';
+          lastBlocked = blocked;
+          updatePrecheck(remainingIds);
+          updateRunButton();
 
           // По экрану запускать нечего, если экран пуст
           screenBtn.disabled = rowsOnScreen === 0;
@@ -4299,6 +4933,7 @@
             state,
             autopilot: autoBox.checked && !autoBox.disabled,
             overwriteTx: needsPairs && overwriteBox.checked,
+            precheck: precheck.status === 'done' ? precheck.result : null,
           });
         });
 
@@ -4834,7 +5469,10 @@
         boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
       });
       btn.addEventListener('click', () => {
-        runBulkApprove(workflow).catch((e) => console.error(`[BulkApproveBETA/${workflow.id}] Fatal error:`, e));
+        runBulkApprove(workflow).catch((e) => {
+          stopKeepalive();
+          console.error(`[BulkApproveBETA/${workflow.id}] Fatal error:`, e);
+        });
       });
       container.appendChild(btn);
       return btn;

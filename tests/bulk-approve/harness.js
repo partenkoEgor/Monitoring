@@ -74,6 +74,10 @@ function processingDate(hoursAgo) {
 //   tickets: Map ticketId → { externalStatus, txId, txStatus, hoursAgo }
 //   onScreen: массив Ticket ID, видимых в таблице
 //   behaviour: поведение, которое сценарий может менять между прогонами
+//     listApi: true — таблица грузится JSON-запросом, как на настоящем сайте,
+//       и у страницы есть fetch, которым скрипт может повторить этот запрос
+//     sessionExpired: true — на запрос списка сайт отвечает страницей входа
+//     listApiStatus: код ответа на запрос списка (например, 503)
 function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, behaviour = {}, configOverrides } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
     <form id="filter_form">
@@ -111,6 +115,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
     downloads: [],
     blobs: [],
     storageTrace: [],     // снимки памяти списка после каждого Apply в окне Edit
+    listQueries: [],      // запросы списка, которые скрипт отправил сам (fetch)
   };
 
   w.alert = (t) => site.alerts.push(String(t));
@@ -121,8 +126,9 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
 
   // Фальшивый XHR: завершается сам через duration мс и шлёт loadend.
   class FakeXHR extends w.EventTarget {
-    open(method, url) { this.url = url; }
-    send() {
+    open(method, url) { this.method = method; this.url = url; }
+    send(body) {
+      this.body = body;
       const duration = this.__duration || 5;
       setTimeout(() => {
         this.readyState = 4;
@@ -133,12 +139,56 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
     setRequestHeader() {}
   }
   w.XMLHttpRequest = FakeXHR;
-  const fire = (url, duration) => {
+  const fire = (url, duration, body) => {
     const x = new w.XMLHttpRequest();
     x.open('POST', url);
     x.__duration = duration;
-    x.send();
+    if (body !== undefined) {
+      x.setRequestHeader('Content-Type', 'application/json');
+      x.setRequestHeader('X-CSRF-TOKEN', 'test-token');
+    }
+    x.send(body);
   };
+
+  // Тело запроса списка — поля как у настоящей страницы (см. README, 0.16)
+  const listBody = (idTicket) => JSON.stringify({
+    adminSelect: [], agentId: [], countryIds: [], dateFrom: '', dateTo: '',
+    externalStatus: [], idTicket, isVip: false, myTickets: false, orderBy: -1,
+    page: 1, perPage: 100, transactionId: null,
+  });
+
+  // Ответ на запрос списка тем, что сейчас лежит в модели сайта
+  const textResponse = (status, text) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => text,
+  });
+  if (behaviour.listApi) {
+    w.fetch = async (url, init = {}) => {
+      await new Promise((r) => setTimeout(r, 2));
+      let body = {};
+      try { body = JSON.parse(init.body); } catch (e) { /* не наш запрос */ }
+      const ids = String(body.idTicket || '').split('\n').filter(Boolean);
+      site.listQueries.push({ url, ids, page: body.page, perPage: body.perPage, headers: init.headers });
+      if (site.behaviour.sessionExpired) {
+        return textResponse(200, '<!DOCTYPE html><html><body>Login</body></html>');
+      }
+      if (site.behaviour.listApiStatus) return textResponse(site.behaviour.listApiStatus, 'Service Unavailable');
+      const found = ids.filter((id) => site.tickets.has(id) && !(site.behaviour.hiddenFromFilter || []).includes(id));
+      const per = body.perPage || 100;
+      const pageNo = body.page || 1;
+      const slice = found.slice((pageNo - 1) * per, pageNo * per);
+      return textResponse(200, JSON.stringify({
+        count: found.length,
+        data: slice.map((id) => {
+          const t = site.tickets.get(id);
+          return { idTicket: Number(id), nameExternalStatus: t.externalStatus, idTransaction: t.txId || null };
+        }),
+        otherData: { hasMore: pageNo * per < found.length },
+        success: true,
+      }));
+    };
+  }
 
   // ---------- таблица ----------
   const headRow = d.querySelector('thead tr');
@@ -180,7 +230,8 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
     const ids = d.querySelector('textarea[placeholder="Ticket ID"]').value
       .split(/\s+/).filter(Boolean);
     site.filterApplies.push(ids);
-    fire('', 30); // выдача таблицы — у настоящего сайта запрос без адреса
+    // выдача таблицы — у настоящего сайта запрос без адреса
+    fire('', 30, site.behaviour.listApi ? listBody(ids.join('\n')) : undefined);
     setTimeout(() => {
       site.onScreen = ids.filter((id) => site.tickets.has(id) && !(site.behaviour.hiddenFromFilter || []).includes(id));
       renderTable();
@@ -305,7 +356,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
 
   // Один прогон, как его делает оператор: кнопка → окно списка → запуск →
   // отчёт. Возвращает текст отчёта, блоки для копирования и память после.
-  async function run({ button, listText, autopilot = true, byScreen = false, closeReport = true }) {
+  async function run({ button, listText, autopilot = true, byScreen = false, closeReport = true, onlyWindow = false, overwrite = false }) {
     const btn = [...d.querySelectorAll('button')].find((b) => b.textContent === button);
     if (!btn) throw new Error('нет кнопки ' + button);
     btn.click();
@@ -320,9 +371,24 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
       auto.checked = autopilot;
       auto.dispatchEvent(new w.Event('change', { bubbles: true }));
     }
-    const windowText = overlay.textContent;
+    const over = overlay.querySelector(`.${prefix}-overwrite-tx`);
+    if (over && over.checked !== overwrite) {
+      over.checked = overwrite;
+      over.dispatchEvent(new w.Event('change', { bubbles: true }));
+    }
     const start = [...overlay.querySelectorAll('button')].find((b) =>
       byScreen ? /Запустить по экрану/.test(b.textContent) : b.textContent === 'Запустить по списку');
+    // Проверка списка на сайте идёт сама; пока она не кончилась, запуск закрыт
+    const precheckBox = overlay.querySelector(`.${prefix}-precheck`);
+    await until(() => !(precheckBox && /Проверяю список/.test(precheckBox.textContent)), 5000)
+      .catch(() => { throw new Error('проверка списка не закончилась: ' + overlay.textContent); });
+    const windowText = overlay.textContent;
+    const precheckText = precheckBox ? precheckBox.textContent : '';
+    if (onlyWindow) {
+      const startDisabled = start.disabled;
+      [...overlay.querySelectorAll('button')].find((b) => b.textContent === 'Отмена').click();
+      return { windowText, precheckText, startDisabled };
+    }
     if (start.disabled) throw new Error('кнопка запуска заблокирована: ' + windowText);
     start.click();
     const report = await until(() => d.querySelector(`.${prefix}-report-overlay`), 60000);
@@ -336,7 +402,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
     if (closeReport) {
       [...report.querySelectorAll('button')].find((b) => b.textContent === 'Закрыть').click();
     }
-    return { text, copyBlocks, windowText, hasDownload: !!download, memory: readMemory('pairs') };
+    return { text, copyBlocks, windowText, precheckText, hasDownload: !!download, memory: readMemory('pairs') };
   }
 
   function readMemory(mode) {
