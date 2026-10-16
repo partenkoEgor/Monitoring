@@ -485,6 +485,105 @@ const scenarios = {
     check('отбитый запрос повторён: все 10 проверены', checks.length === 11 && !/проверить не удалось/.test(win.precheckText),
       `${checks.length}\n${win.precheckText}`);
   },
+
+  // ---------- 0.19: проверка запроса сохранения ----------
+
+  async 20() {
+    console.log('\n[20] Сохранение подтверждает сервер — 225 по списку и 239 (0.19)');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, listText } = makeTickets(3);
+    const page = createPage({ tickets, onScreen: ['19999999'] });
+    const r = await page.run({ button: LIST_BTN, listText });
+    check('225: все сохранения дошли до сервера', page.site.saves.length === 3 && page.site.applied.length === 3,
+      `${page.site.saves.length} / ${page.site.applied.length}`);
+    check('225: в сохранении статус id 212', page.site.saves.every((x) => String(x.externalStatusId) === '212'),
+      JSON.stringify(page.site.saves));
+    check('225: строка «подтвердил сервер 3 из 3»', /Сохранение подтвердил сервер \(этот прогон\): 3 из 3/.test(r.text), r.text);
+
+    const t2 = makeTickets(1);
+    const id239 = t2.ids[0];
+    t2.tickets[id239].externalStatus = 'The money has not been sent, cancel it (M)';
+    t2.tickets[id239].txStatus = 'rejected';
+    t2.tickets[id239].txId = '777';
+    const page2 = createPage({ tickets: t2.tickets, onScreen: [id239] });
+    [...page2.d.querySelectorAll('button')].find((b) => b.textContent === `${LABEL}Bulk Response (239)`).click();
+    const end = Date.now() + 20000;
+    let report;
+    while (!(report = page2.d.querySelector(`.${page2.prefix}-report-overlay`)) && Date.now() < end) {
+      await new Promise((res) => setTimeout(res, 20));
+    }
+    const text239 = report ? report.querySelector(`.${page2.prefix}-report-text`).textContent : '';
+    check('239: сохранение со статусом id 219 пропущено и подтверждено',
+      page2.site.saves.length === 1 && String(page2.site.saves[0].externalStatusId) === '219' &&
+      /Сохранение подтвердил сервер \(этот прогон\): 1 из 1/.test(text239), text239);
+  },
+
+  async 21() {
+    console.log('\n[21] Страница отправила сохранение ДРУГОГО тикета — запрос не уходит, прогон стоп');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids, listText } = makeTickets(4);
+    const behaviour = { saveTamper: (id, f) => { if (id === ids[1]) f.requestId = '22600099'; } };
+    const page = createPage({ tickets, onScreen: ['19999999'], behaviour });
+    const r = await page.run({ button: LIST_BTN, listText });
+    check('остановлен защитой сохранения, с номерами обоих тикетов',
+      /ПРОГОН ОСТАНОВЛЕН АВТОМАТИЧЕСКИ\.\nЗАЩИТА СОХРАНЕНИЯ: уходило сохранение тикета 22600099, а в работе тикет 22700002/.test(r.text),
+      r.text.slice(0, 500));
+    check('подменённый запрос до сервера не дошёл', !page.site.saves.some((x) => x.requestId === '22600099'),
+      JSON.stringify(page.site.saves));
+    check('тикет не изменён', page.site.tickets.get(ids[1]).externalStatus === 'Approved (M)');
+    check('дальше прогон не пошёл', !page.site.modalOpens.includes(ids[2]), JSON.stringify(page.site.modalOpens));
+    check('окно Edit закрыто', !page.d.querySelector('.modal_wrap'));
+    check('в отчёте тикет с причиной', r.text.includes(`${ids[1]} — защита сохранения не пропустила запрос`), r.text);
+  },
+
+  async 22() {
+    console.log('\n[22] В сохранении не тот Transaction ID или не тот статус — запрос не уходит');
+    if (!IS_BETA) return console.log('  — только бета');
+    const a = makeTickets(2);
+    const pageA = createPage({
+      tickets: a.tickets, onScreen: ['19999999'],
+      behaviour: { saveTamper: (id, f) => { if (id === a.ids[0]) f.transactionId = '999'; } },
+    });
+    const rA = await pageA.run({ button: LIST_BTN, listText: a.listText });
+    check('чужой Transaction ID: стоп с обоими номерами',
+      /ЗАЩИТА СОХРАНЕНИЯ: тикет 22700001: уходил Transaction ID "999", а по списку должен быть "23850000000"/.test(rA.text),
+      rA.text.slice(0, 400));
+    check('чужой Transaction ID: до сервера не дошло', pageA.site.saves.length === 0, JSON.stringify(pageA.site.saves));
+
+    const b = makeTickets(2);
+    const pageB = createPage({
+      tickets: b.tickets, onScreen: ['19999999'],
+      behaviour: { saveTamper: (id, f) => { f.externalStatusId = '388'; } }, // «212 Another project (M)»
+    });
+    const rB = await pageB.run({ button: LIST_BTN, listText: b.listText });
+    check('не тот статус: стоп с id', /ЗАЩИТА СОХРАНЕНИЯ: тикет 22700001: уходил статус с id 388, а нужен id 212/.test(rB.text),
+      rB.text.slice(0, 400));
+    check('не тот статус: до сервера не дошло', pageB.site.saves.length === 0);
+  },
+
+  async 23() {
+    console.log('\n[23] Сервер не принял сохранение — тикет в ошибках с текстом сайта');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids, listText } = makeTickets(3);
+    const page = createPage({ tickets, onScreen: ['19999999'], behaviour: { saveRejected: (id) => id === ids[1] } });
+    const r = await page.run({ button: LIST_BTN, listText });
+    check('ошибок 1, успешно 2', /^Ошибок: 1$/m.test(r.text) && /^Успешно: 2$/m.test(r.text), r.text);
+    check('причина и текст сайта в отчёте',
+      r.text.includes(`${ids[1]} — сервер ответил, что сохранение не прошло — ПРОВЕРЬ ВРУЧНУЮ («Ошибка сохранения»)`), r.text);
+    check('подтверждено 2 из 2 закрытых', /Сохранение подтвердил сервер \(этот прогон\): 2 из 2/.test(r.text), r.text);
+  },
+
+  async 24() {
+    console.log('\n[24] Вне прогона сохранение не трогается — человек работает руками');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids } = makeTickets(1);
+    const page = createPage({ tickets, onScreen: [ids[0]] });
+    // click() у ссылок стенд подменяет ради скачивания Excel — шлём событие
+    page.d.querySelector('tbody tr a').dispatchEvent(new page.w.MouseEvent('click', { bubbles: true, cancelable: true }));
+    page.d.querySelector('.modal_wrap .btn-success').click();
+    await new Promise((res) => setTimeout(res, 60));
+    check('сохранение ушло на сервер', page.site.saves.length === 1, JSON.stringify(page.site.saves));
+  },
 };
 
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map((x) => x.trim())) : null;

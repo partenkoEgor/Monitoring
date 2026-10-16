@@ -62,6 +62,8 @@ const COLUMNS = [
 ];
 
 const STATUS_OPTIONS = ['225 Approved by agent', '239 Response to user (M)', '238 Revision needed (M)'];
+// id статусов в запросе сохранения — как в GetRequestStatusesExternal сайта
+const STATUS_IDS = { '225 Approved by agent': 212, '239 Response to user (M)': 219, '238 Revision needed (M)': 218 };
 
 const pad = (n) => String(n).padStart(2, '0');
 function processingDate(hoursAgo) {
@@ -82,6 +84,9 @@ function processingDate(hoursAgo) {
 //     dupCheckOwnId: Set тикетов, на которые проверка дубля называет сам тикет
 //     dupCheck529At: Set порядковых номеров запросов проверки дубля (с 1),
 //       на которые сайт отвечает 529 «слишком много запросов»
+//     saveTamper(id, fields): поправить поля запроса сохранения перед
+//       отправкой — как если бы страница отправила не то
+//     saveRejected(id): сервер отвечает на сохранение success: false
 function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, behaviour = {}, configOverrides } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
     <form id="filter_form">
@@ -120,6 +125,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
     blobs: [],
     storageTrace: [],     // снимки памяти списка после каждого Apply в окне Edit
     listQueries: [],      // запросы списка, которые скрипт отправил сам (fetch)
+    saves: [],            // запросы сохранения, которые дошли до «сервера»
     dupChecks: [],        // запросы проверки дубля, которые скрипт отправил сам
     dupInFlight: 0,       // сколько проверок дубля идёт прямо сейчас
     dupMaxInFlight: 0,    // и сколько шло одновременно максимум
@@ -138,7 +144,10 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
       this.body = body;
       const duration = this.__duration || 5;
       setTimeout(() => {
+        if (this.__onServer) this.__onServer(this);
         this.readyState = 4;
+        this.status = this.status || 200;
+        this.responseText = this.responseText || '';
         this.dispatchEvent(new w.Event('load'));
         this.dispatchEvent(new w.Event('loadend'));
       }, duration);
@@ -336,10 +345,37 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
 
     wrap.querySelector('.btn-success').addEventListener('click', () => {
       const tx = txInput.value.trim();
-      site.applied.push({ ticketId: id, status: chosen, transactionId: tx });
-      t.externalStatus = chosen || t.externalStatus;
-      if (!(site.behaviour.dropsTransactionId && site.behaviour.dropsTransactionId(id))) t.txId = tx;
-      setTimeout(() => {
+      // Сохранение — как у настоящей страницы: форма в RequestsProceed. Тикет
+      // меняется, только если запрос дошёл до «сервера».
+      const fields = {
+        requestId: id,
+        externalStatusId: STATUS_IDS[chosen] || '',
+        transactionId: tx,
+        initialTransactionId: t.txId || '',
+      };
+      if (site.behaviour.saveTamper) site.behaviour.saveTamper(id, fields);
+      const fd = new w.FormData();
+      Object.entries(fields).forEach(([k, v]) => fd.append(k, String(v)));
+      const x = new w.XMLHttpRequest();
+      x.open('POST', '/admin/backoffice/RequestsProceed');
+      x.__duration = 5;
+      x.__onServer = (req) => {
+        const rejected = site.behaviour.saveRejected && site.behaviour.saveRejected(id);
+        site.saves.push({ ...fields, rejected: !!rejected });
+        req.responseText = JSON.stringify(rejected
+          ? { data: { success: false, message: 'Ошибка сохранения' }, success: true }
+          : { data: { success: true, message: 'ОК!' }, success: true });
+        if (rejected) {
+          setTimeout(() => wrap.remove(), 10);
+          return;
+        }
+        site.applied.push({ ticketId: id, status: chosen, transactionId: tx });
+        t.externalStatus = chosen || t.externalStatus;
+        if (!(site.behaviour.dropsTransactionId && site.behaviour.dropsTransactionId(id))) t.txId = tx;
+        afterSave();
+      };
+      x.send(fd);
+      const afterSave = () => setTimeout(() => {
         wrap.remove();
         renderTable();
         if (site.behaviour.onApplied) site.behaviour.onApplied(site, w);

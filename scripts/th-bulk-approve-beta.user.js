@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.18
+// @version      0.19
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -139,6 +139,14 @@
     // Пауза после каждого запроса у каждого из одновременных потоков
     duplicateCheckDelay: 150,
 
+    // ── Проверка запроса сохранения (с 0.19) ──────────────────────────
+    // Apply в окне Edit отправляет POST …/admin/backoffice/RequestsProceed
+    // (форма: requestId, externalStatusId, transactionId, …). Во время прогона
+    // скрипт сверяет его до отправки и не пропускает несовпадающий.
+    saveEndpoint: 'RequestsProceed',
+    // Сколько после закрытия окна ждать ответа сервера на сохранение
+    saveResponseWait: 3000,
+
     // ── Сессия во время прогона (с 0.16) ──────────────────────────────
     // Длинный прогон идёт часами. Раз в столько скрипт делает лёгкий запрос
     // к сайту: он и продлевает сессию, и показывает, что она ещё жива.
@@ -180,6 +188,11 @@
       statusMatch: MATCH_225,
       // Только для текста в диалогах подтверждения/отчёта
       targetStatusLabel: '225 Approved by agent',
+      // id статуса в запросе сохранения (externalStatusId) — по списку
+      // статусов сайта GetRequestStatusesExternal: «225 Approved by agent (M)»
+      // = id 212. Не путать с «212 Another project (M)»: у того 212 — это
+      // код в названии, а id 388.
+      saveStatusId: 212,
     },
     {
       id: '239',
@@ -211,6 +224,8 @@
         return t.includes('239') && t.includes('response to user');
       },
       targetStatusLabel: '239 Response to user (M)',
+      // «239 Response to user (M)» = id 219 в списке статусов сайта
+      saveStatusId: 219,
       // У части тикетов 239 в колонке Amount стоит 0. Раньше их просто
       // пропускали, и оператор доделывал руками: копировал сумму из колонки
       // Transaction Amount в поле "Amount by receipt" и менял статус. Теперь
@@ -236,6 +251,11 @@
       searchTerm: '225',
       statusMatch: MATCH_225,
       targetStatusLabel: '225 Approved by agent',
+      // id статуса в запросе сохранения (externalStatusId) — по списку
+      // статусов сайта GetRequestStatusesExternal: «225 Approved by agent (M)»
+      // = id 212. Не путать с «212 Another project (M)»: у того 212 — это
+      // код в названии, а id 388.
+      saveStatusId: 212,
       fillTransactionIdFromList: true,
     },
   ];
@@ -296,6 +316,8 @@
     'dropdown-not-opened-or-no-match': 'не открылся список статусов или нужного статуса в нём нет',
     'no-apply-button': 'не найдена кнопка Apply',
     'modal-not-closed': 'нажали Apply, но окно не закрылось — ПРОВЕРЬ ВРУЧНУЮ, сохранился ли статус',
+    'save-blocked': 'защита сохранения не пропустила запрос: он ушёл бы не с тем тикетом, статусом или номером — тикет НЕ изменён',
+    'save-rejected': 'сервер ответил, что сохранение не прошло — ПРОВЕРЬ ВРУЧНУЮ',
     'blocking-popup': 'на экране висело незакрытое окно сайта',
     'stale-modal-before-edit': 'не закрылось окно от предыдущего тикета',
     exception: 'непредвиденная ошибка скрипта (подробности в консоли)',
@@ -385,6 +407,22 @@
     }
 
     XMLHttpRequest.prototype.send = function (...args) {
+      // Сохранение тикета во время прогона — сначала сверка. Не прошло —
+      // запрос не уходит на сервер вовсе.
+      let save = null;
+      try {
+        save = inspectSaveRequest(this.__bulkApproveMethod, this.__bulkApproveUrl, args[0]);
+      } catch (e) {
+        /* см. выше */
+      }
+      if (save && save.block) return undefined;
+      if (save && save.guard) {
+        const xhr = this;
+        const guard = save.guard;
+        this.addEventListener('loadend', () => {
+          noteSaveResponse(guard, xhr.status, typeof xhr.responseText === 'string' ? xhr.responseText : '');
+        });
+      }
       try {
         const entry = noteRequestStart(this.__bulkApproveUrl);
         this.addEventListener('loadend', () => {
@@ -404,6 +442,20 @@
       // запросы страницы.
       window.__bulkApproveNativeFetch = origFetch;
       window.fetch = function (input, ...rest) {
+        let save = null;
+        try {
+          const init0 = rest[0] || {};
+          save = inspectSaveRequest(
+            init0.method || (input && input.method) || 'GET',
+            input && input.url ? input.url : input,
+            init0.body
+          );
+        } catch (e) {
+          /* см. выше */
+        }
+        if (save && save.block) {
+          return Promise.reject(new TypeError('Bulk Approve: сохранение остановлено защитой скрипта'));
+        }
         let entry = null;
         try {
           entry = noteRequestStart(input && input.url ? input.url : input);
@@ -428,6 +480,12 @@
           throw e;
         }
         if (result && typeof result.then === 'function') {
+          if (save && save.guard) {
+            const guard = save.guard;
+            result
+              .then((r) => r.clone().text().then((t) => noteSaveResponse(guard, r.status, t)))
+              .catch(() => noteSaveResponse(guard, 0, ''));
+          }
           // Возвращаем ИСХОДНЫЙ промис: цепочка вызывающего не меняется
           result.then(done, done);
         } else {
@@ -465,6 +523,135 @@
         e.id > mark &&
         CONFIG.transactionLoadEndpoints.some((needle) => matchesEndpoint(e.url, needle))
     );
+  }
+
+  // ------------------------------------------------------------------
+  // ПРОВЕРКА ЗАПРОСА СОХРАНЕНИЯ (с 0.19).
+  //
+  // Apply в окне Edit отправляет RequestsProceed: номер тикета (requestId),
+  // статус (externalStatusId — id из списка статусов сайта) и Transaction ID.
+  // Это то, что реально уйдёт на сервер, — и последняя точка, где ещё можно
+  // не дать чужой транзакции уехать не в тот тикет.
+  //
+  // Во время прогона скрипт ВЗВОДИТ проверку перед своим нажатием Apply и
+  // пропускает сохранение, только если в нём ровно тот тикет, нужный статус
+  // и (в режиме «по списку») номер из списка. Иначе запрос не отправляется
+  // вовсе, тикет остаётся нетронутым, прогон останавливается. Сохранение во
+  // время прогона, которого скрипт не начинал, тоже не уходит.
+  //
+  // Вне прогона (человек работает руками) скрипт этот запрос не трогает.
+  // Сам скрипт этот запрос не отправляет никогда.
+  // ------------------------------------------------------------------
+  let saveGuard = null; // { ticketId, statusId, expectedTx, seen, response, blocked }
+
+  function armSaveGuard(ticketId, workflow, expectedTx) {
+    saveGuard = {
+      ticketId: String(ticketId),
+      statusId: String(workflow.saveStatusId),
+      expectedTx: expectedTx == null || expectedTx === '' ? null : String(expectedTx),
+      seen: [],
+      response: null,
+      blocked: null,
+    };
+    return saveGuard;
+  }
+
+  function disarmSaveGuard(guard) {
+    if (saveGuard === guard) saveGuard = null;
+  }
+
+  // Значение поля из тела запроса: форма, строка параметров или JSON.
+  // undefined — тело прочитать не удалось.
+  function readRequestField(body, name) {
+    if (body == null) return undefined;
+    if (typeof FormData !== 'undefined' && body instanceof FormData) {
+      const v = body.get(name);
+      return v == null ? null : String(v);
+    }
+    if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+      const v = body.get(name);
+      return v == null ? null : String(v);
+    }
+    if (typeof body === 'string') {
+      try {
+        const obj = JSON.parse(body);
+        if (obj && typeof obj === 'object') return obj[name] == null ? null : String(obj[name]);
+      } catch (e) {
+        const v = new URLSearchParams(body).get(name);
+        return v == null ? null : String(v);
+      }
+    }
+    return undefined;
+  }
+
+  // null — не наш запрос или прогон не идёт; { block: true } — не пускать;
+  // { guard } — пропущен, ответ запишется в guard.
+  function inspectSaveRequest(method, url, body) {
+    if (String(method || '').toUpperCase() !== 'POST') return null;
+    if (!matchesEndpoint(String(url == null ? '' : url), CONFIG.saveEndpoint)) return null;
+    if (!state.isRunning) return null;
+
+    const block = (why) => {
+      const text =
+        `ЗАЩИТА СОХРАНЕНИЯ: ${why}. Запрос на сервер НЕ отправлен — тикет не изменён. ` +
+        `Прогон остановлен: проверь этот тикет вручную, обнови страницу и запусти заново.`;
+      console.error(`[BulkApproveBETA] ${text}`);
+      if (saveGuard) {
+        // Остановку оформит обработка тикета: ей надо сначала закрыть окно
+        saveGuard.blocked = text;
+      } else {
+        if (!runAbortReason) runAbortReason = text;
+        state.stopRequested = true;
+        updateButtonsUI();
+      }
+      return { block: true };
+    };
+
+    const requestId = readRequestField(body, 'requestId');
+    if (!saveGuard) {
+      return block(
+        `во время прогона страница отправила сохранение тикета ${requestId || '(не прочитал номер)'}, ` +
+        `хотя скрипт ничего не сохранял`
+      );
+    }
+    const g = saveGuard;
+    if (requestId === undefined) return block(`не смог прочитать запрос сохранения тикета ${g.ticketId}`);
+    if (extractTicketNumber(requestId) !== extractTicketNumber(g.ticketId)) {
+      return block(`уходило сохранение тикета ${requestId || '(пусто)'}, а в работе тикет ${g.ticketId}`);
+    }
+    const statusId = readRequestField(body, 'externalStatusId');
+    if (String(statusId).trim() !== g.statusId) {
+      return block(
+        `тикет ${g.ticketId}: уходил статус с id ${statusId == null ? '(нет поля)' : statusId}, ` +
+        `а нужен id ${g.statusId}`
+      );
+    }
+    if (g.expectedTx !== null) {
+      const tx = readRequestField(body, 'transactionId');
+      if (String(tx == null ? '' : tx).trim() !== g.expectedTx) {
+        return block(
+          `тикет ${g.ticketId}: уходил Transaction ID "${tx == null ? '' : tx}", ` +
+          `а по списку должен быть "${g.expectedTx}"`
+        );
+      }
+    }
+    g.seen.push({ requestId, statusId, at: Date.now() });
+    return { guard: g };
+  }
+
+  // Ответ сервера на пропущенное сохранение: { data: { success: true,
+  // message: "ОК!" }, success: true } — принято, всё остальное — нет.
+  function noteSaveResponse(guard, status, text) {
+    let ok = false;
+    let message = '';
+    try {
+      const json = JSON.parse(text);
+      ok = !!(json && json.success === true && json.data && json.data.success === true);
+      message = (json && json.data && json.data.message) || (json && json.message) || '';
+    } catch (e) {
+      message = status ? `сайт ответил ${status}` : 'ответа нет';
+    }
+    guard.response = { ok, status, message: String(message) };
   }
 
   // ------------------------------------------------------------------
@@ -2808,22 +2995,65 @@
       return result;
     }
 
-    setProgress({ action: 'жму Apply' });
-    fireClick(applyBtn);
-
-    // Ждём, пока модалка закроется (AJAX). Если по дороге появится swal2-окно —
-    // отдельный наблюдатель (swalObserver) сам его залогирует и, если это
-    // безопасно (нет кнопки отмены), закроет, не мешая этому ожиданию.
+    // Проверка запроса сохранения: в режиме «по списку» в тикет должен уйти
+    // номер из списка — при любом пути (вписали, уже стоял, переписали)
+    const expectedTx =
+      workflow.fillTransactionIdFromList && currentListPairs
+        ? currentListPairs.get(String(ticketId))
+        : null;
+    const guard = armSaveGuard(ticketId, workflow, expectedTx);
     try {
-      await waitForGone(() => getOpenModal());
-    } catch (e) {
-      if (e instanceof StopSignal) throw e;
-      const relatedPopups = capturedPopups.filter((p) => p.ticketId === ticketId);
-      console.warn(
-        `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: модалка не закрылась после Apply — возможно, ошибка сохранения.` +
-        (relatedPopups.length > 0 ? ' См. пойманные окна для этого тикета в отчёте.' : '')
-      );
-      return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'modal-not-closed' });
+      setProgress({ action: 'жму Apply' });
+      fireClick(applyBtn);
+
+      // Ждём, пока модалка закроется (AJAX). Если по дороге появится swal2-окно —
+      // отдельный наблюдатель (swalObserver) сам его залогирует и, если это
+      // безопасно (нет кнопки отмены), закроет, не мешая этому ожиданию.
+      // Защита сохранения, не пропустившая запрос, тоже прерывает ожидание:
+      // окно в этом случае так и останется открытым.
+      try {
+        await waitFor(() => !getOpenModal() || guard.blocked, CONFIG.waitTimeout);
+      } catch (e) {
+        if (e instanceof StopSignal) throw e;
+        const relatedPopups = capturedPopups.filter((p) => p.ticketId === ticketId);
+        console.warn(
+          `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: модалка не закрылась после Apply — возможно, ошибка сохранения.` +
+          (relatedPopups.length > 0 ? ' См. пойманные окна для этого тикета в отчёте.' : '')
+        );
+        return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'modal-not-closed' });
+      }
+
+      if (guard.blocked) {
+        // Порядок как у других остановок: сначала закрыть окно, потом флаг
+        runAbortReason = guard.blocked;
+        const blockedResult = await failTicket(ticketId, workflow, {
+          ticketId,
+          status: 'failed',
+          reason: 'save-blocked',
+        });
+        state.stopRequested = true;
+        return blockedResult;
+      }
+
+      // Окно закрылось — ответ сервера обычно уже есть, но подождём немного
+      if (guard.seen.length > 0 && !guard.response) {
+        const end = Date.now() + CONFIG.saveResponseWait;
+        while (!guard.response && Date.now() < end) await sleep(50);
+      }
+      if (guard.response && !guard.response.ok) {
+        console.error(
+          `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: сервер не принял сохранение — ` +
+          `${guard.response.message || `код ${guard.response.status}`}.`
+        );
+        return {
+          ticketId,
+          status: 'failed',
+          reason: 'save-rejected',
+          saveMessage: guard.response.message || `код ${guard.response.status}`,
+        };
+      }
+    } finally {
+      disarmSaveGuard(guard);
     }
 
     console.log(
@@ -2834,6 +3064,8 @@
     );
 
     const success = { ticketId, status: 'success' };
+    // Что сказал сервер на сохранение: подтвердил / запроса не видели
+    success.serverSave = guard.response ? 'confirmed' : guard.seen.length > 0 ? 'no-answer' : 'not-seen';
     if (amountFilled) success.amountFilled = amountFilled;
     if (transactionIdFilled) success.transactionIdFilled = transactionIdFilled;
     if (transactionLoadNote) success.transactionLoadNote = transactionLoadNote;
@@ -4137,6 +4369,20 @@
     failureBreakdown.forEach(([reason, count]) => {
       summaryLines.push(`  • ${describeReason(reason)}: ${count}`);
     });
+    // Что сервер ответил на сохранения ЭТОГО прогона (с 0.19)
+    const runSaved = results.filter((r) => r && r.status === 'success' && r.serverSave);
+    if (runSaved.length > 0) {
+      const confirmedSaves = runSaved.filter((r) => r.serverSave === 'confirmed').length;
+      summaryLines.push(`Сохранение подтвердил сервер (этот прогон): ${confirmedSaves} из ${runSaved.length}`);
+      const unseenSaves = runSaved.filter((r) => r.serverSave !== 'confirmed');
+      if (unseenSaves.length > 0) {
+        summaryLines.push(
+          `  • ⚠ без ответа сервера на сохранение (${unseenSaves.length}) — проверь глазами: ` +
+          unseenSaves.slice(0, 20).map((r) => r.ticketId).join(', ') +
+          (unseenSaves.length > 20 ? ` … и ещё ${unseenSaves.length - 20}` : '')
+        );
+      }
+    }
     // Одна строка про сам этот запуск — всё остальное выше по всему списку
     if (listSnap) {
       const runList = results.filter((r) => currentListPairs.has(r.ticketId));
@@ -4168,7 +4414,9 @@
 
     // Поимённый список упавших тикетов с причиной. Без него оператор видел
     // только счётчик и не знал, какие именно тикеты перезапускать.
-    const failedList = failed.map((r) => `${r.ticketId} — ${describeReason(r.reason)}`);
+    const failedList = failed.map(
+      (r) => `${r.ticketId} — ${describeReason(r.reason)}` + (r.saveMessage ? ` («${r.saveMessage}»)` : '')
+    );
     window.__bulkApproveFailed = failed;
 
     const failedText =
