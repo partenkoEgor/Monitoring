@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.16
+// @version      0.17
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -128,6 +128,13 @@
     precheckMaxPages: 20,
     // Сколько ждать, пока страница отправит свой запрос после нажатия Apply
     precheckTemplateTimeout: 10000,
+    // Проверка дублей до прогона (с 0.17): тот же запрос, которым окно Edit
+    // спрашивает сайт, не занята ли транзакция, — сразу после ввода номера.
+    // Ответ { data: { id: null } } — свободна, { data: { id: N } } — уже у
+    // обращения N. Запрос только спрашивает и ничего не меняет.
+    duplicateCheckUrl: '/admin/paymentconsultant/checkPaymentSupportRequestByTrxId',
+    // Сколько таких запросов держать в работе одновременно
+    duplicateCheckConcurrency: 4,
 
     // ── Сессия во время прогона (с 0.16) ──────────────────────────────
     // Длинный прогон идёт часами. Раз в столько скрипт делает лёгкий запрос
@@ -598,6 +605,8 @@
         ticketId: String(r.idTicket == null ? '' : r.idTicket).trim(),
         externalStatus: String(r.nameExternalStatus == null ? '' : r.nameExternalStatus).trim(),
         transactionId: r.idTransaction == null ? '' : String(r.idTransaction).trim(),
+        // Нужен проверке дублей: сайт спрашивает о транзакции с её типом
+        paymentTypeId: r.idTypePayment == null ? null : String(r.idTypePayment).trim(),
       }))
       .filter((r) => r.ticketId !== '');
     return { kind: 'ok', rows, hasMore: !!(json.otherData && json.otherData.hasMore) };
@@ -652,13 +661,136 @@
     return !!listRequestTemplate;
   }
 
+  // Занята ли транзакция другим обращением — тем же запросом, что шлёт окно
+  // Edit после ввода номера. Возвращает:
+  //   { kind: 'free' }               — свободна ({ data: { id: null } });
+  //   { kind: 'duplicate', owner }   — уже у обращения owner;
+  //   { kind: 'own' }                — сайт назвал этот же тикет: не дубль;
+  //   { kind: 'expired' | 'retry' | 'error', detail }.
+  // Дублем считается ТОЛЬКО ответ, где назван другой тикет. Всё непонятное —
+  // не дубль: такой тикет пойдёт в прогон, и окно Edit проверит его само.
+  async function checkDuplicateOnSite(ticketId, transactionId, paymentTypeId) {
+    let resp;
+    try {
+      resp = await window.__bulkApproveNativeFetch.call(
+        window,
+        new URL(CONFIG.duplicateCheckUrl, window.location.href).href,
+        {
+          method: 'POST',
+          credentials: 'same-origin',
+          cache: 'no-store',
+          headers: listRequestHeaders(),
+          body: JSON.stringify({
+            trxId: String(transactionId),
+            paymentTypeId: Number(paymentTypeId),
+            requestId: Number(ticketId),
+          }),
+        }
+      );
+    } catch (e) {
+      return { kind: 'retry', detail: `запрос не дошёл до сайта (${(e && e.message) || e})` };
+    }
+    let text = '';
+    try {
+      text = await resp.text();
+    } catch (e) {
+      return { kind: 'retry', detail: 'ответ сайта оборвался' };
+    }
+    if (resp.status === 401 || resp.status === 419) {
+      return { kind: 'expired', detail: `сайт ответил ${resp.status}` };
+    }
+    if (!resp.ok) {
+      return RETRYABLE_HTTP.includes(resp.status)
+        ? { kind: 'retry', detail: `сайт ответил ${resp.status}` }
+        : { kind: 'error', detail: `сайт ответил ${resp.status}` };
+    }
+    if (/^\s*</.test(text)) {
+      return { kind: 'expired', detail: 'вместо данных пришла страница входа' };
+    }
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      return { kind: 'error', detail: 'ответ сайта не читается' };
+    }
+    if (!json || json.success !== true || !json.data || typeof json.data !== 'object' || !('id' in json.data)) {
+      return { kind: 'error', detail: 'сайт ответил не в том виде, который знает скрипт' };
+    }
+    const owner = json.data.id;
+    if (owner === null) return { kind: 'free' };
+    const ownerId = String(owner).trim();
+    if (!/^\d+$/.test(ownerId)) {
+      return { kind: 'error', detail: `непонятный номер обращения в ответе: ${ownerId}` };
+    }
+    if (extractTicketNumber(ownerId) === extractTicketNumber(ticketId)) return { kind: 'own' };
+    return { kind: 'duplicate', owner: ownerId };
+  }
+
+  // Проверка дублей для набора { ticketId, transactionId, paymentTypeId }:
+  // несколько запросов одновременно, с повторами при перегрузке сайта.
+  // { ok: true, results: Map ticketId → результат } или { ok: false, expired, detail }.
+  async function checkDuplicatesOnSite(items, { onProgress, isCancelled } = {}) {
+    const results = new Map();
+    let next = 0;
+    let done = 0;
+    let stop = null;
+    const worker = async () => {
+      while (!stop && next < items.length) {
+        const item = items[next++];
+        let res;
+        for (let attempt = 0; ; attempt++) {
+          if (isCancelled && isCancelled()) {
+            stop = stop || { ok: false, cancelled: true };
+            return;
+          }
+          res = await checkDuplicateOnSite(item.ticketId, item.transactionId, item.paymentTypeId);
+          if (res.kind !== 'retry' || attempt >= CONFIG.precheckRetries) break;
+          await sleep(CONFIG.precheckRetryDelay * (attempt + 1));
+        }
+        if (res.kind === 'expired') {
+          stop = stop || { ok: false, expired: true, detail: res.detail };
+          return;
+        }
+        results.set(item.ticketId, res);
+        done++;
+        if (onProgress) onProgress(done, items.length);
+      }
+    };
+    const workers = [];
+    for (let i = 0; i < Math.max(1, CONFIG.duplicateCheckConcurrency); i++) workers.push(worker());
+    await Promise.all(workers);
+    return stop || { ok: true, results };
+  }
+
+  // Каких тикетов касается проверка дублей: подходящий статус, а номер в
+  // тикете пуст или другой — то есть прогон стал бы его вписывать. Тот же
+  // номер уже в тикете: вписывать нечего, и окно Edit сайт не спросит.
+  function precheckDuplicateCandidates(workflow, ids, pairs, rows) {
+    if (!workflow.fillTransactionIdFromList) return [];
+    return ids
+      .map((id) => ({ id, row: rows.get(id), wanted: String(pairs.get(id) == null ? '' : pairs.get(id)) }))
+      .filter(
+        ({ row, wanted }) =>
+          row &&
+          wanted !== '' &&
+          row.paymentTypeId &&
+          /^\d+$/.test(row.paymentTypeId) &&
+          matchesRequiredExternalStatus(workflow, row.externalStatus) &&
+          row.transactionId !== wanted
+      )
+      .map(({ id, row, wanted }) => ({ ticketId: id, transactionId: wanted, paymentTypeId: row.paymentTypeId }));
+  }
+
   // Итог проверки списка: что прогонять, что пропустить, не открывая, и
   // чего сайт не нашёл. Статус сравнивается тем же правилом, что и в прогоне.
-  function summarizePrecheck(workflow, ids, pairs, rows) {
+  // dupChecks — ответы проверки дублей (Map ticketId → результат) или null.
+  function summarizePrecheck(workflow, ids, pairs, rows, dupChecks) {
     const ready = [];
     const wrongStatus = [];
     const notFound = [];
     const txOther = [];
+    const duplicates = [];
+    let dupUnchecked = 0;
     let txEmpty = 0;
     let txSame = 0;
     ids.forEach((id) => {
@@ -671,6 +803,18 @@
         wrongStatus.push({ ticketId: id, externalStatus: row.externalStatus });
         return;
       }
+      const dup = dupChecks ? dupChecks.get(id) : null;
+      if (dup && dup.kind === 'duplicate') {
+        duplicates.push({
+          ticketId: id,
+          transactionId: String(pairs.get(id)),
+          ownerTicketId: dup.owner,
+        });
+        return;
+      }
+      // Ответ не «свободна» и не «этот же тикет» (перегрузка, ошибка, непонятный
+      // ответ) — проверить не удалось; тикет идёт в прогон, его проверит окно Edit
+      if (dup && dup.kind !== 'free' && dup.kind !== 'own') dupUnchecked++;
       ready.push(id);
       if (workflow.fillTransactionIdFromList) {
         const wanted = String(pairs.get(id) == null ? '' : pairs.get(id));
@@ -683,13 +827,26 @@
       checkedAt: Date.now(),
       checked: ids.length,
       pairsMode: !!workflow.fillTransactionIdFromList,
+      dupChecked: !!dupChecks,
       ready,
       wrongStatus,
       notFound,
+      duplicates,
+      dupUnchecked,
       txEmpty,
       txSame,
       txOther,
     };
+  }
+
+  // 1 тикет, 2 тикета, 5 тикетов
+  function pluralRu(n, one, few, many) {
+    const n100 = Math.abs(n) % 100;
+    const n10 = n100 % 10;
+    if (n100 > 10 && n100 < 20) return many;
+    if (n10 === 1) return one;
+    if (n10 >= 2 && n10 <= 4) return few;
+    return many;
   }
 
   // «Статус — сколько» по убыванию: для сводки, а не для поштучного списка
@@ -2747,6 +2904,7 @@
     // (и остаются в списке на следующий — как «сайт не показал по фильтру»).
     const precheckWrongStatus = [];
     const precheckNotFound = [];
+    const precheckDuplicates = [];
 
     if (autopilot) {
       const missing = autopilotMissingControls();
@@ -2795,9 +2953,14 @@
       if (listPrecheck) {
         const wrong = new Map(listPrecheck.wrongStatus.map((w) => [w.ticketId, w]));
         const missing = new Set(listPrecheck.notFound);
+        const taken = new Map((listPrecheck.duplicates || []).map((d) => [d.ticketId, d]));
         remaining = remaining.filter((id) => {
           if (wrong.has(id)) {
             precheckWrongStatus.push(wrong.get(id));
+            return false;
+          }
+          if (taken.has(id)) {
+            precheckDuplicates.push(taken.get(id));
             return false;
           }
           if (missing.has(id)) {
@@ -3050,7 +3213,20 @@
 
     // Итог проверки списка — в результаты, как если бы прогон дошёл до этих
     // тикетов сам: те же причины, те же разделы отчёта и та же память.
-    if (precheckWrongStatus.length > 0 || precheckNotFound.length > 0) {
+    if (precheckWrongStatus.length > 0 || precheckNotFound.length > 0 || precheckDuplicates.length > 0) {
+      // Дубль из проверки — та же запись, что дало бы окно сайта в окне Edit,
+      // только без открытого окна: в блок дублей, в Excel и в память списка
+      precheckDuplicates.forEach((d) =>
+        results.push({
+          ticketId: d.ticketId,
+          status: 'skipped',
+          reason: 'transaction-duplicate',
+          attemptedTransactionId: d.transactionId,
+          ownerTicketId: d.ownerTicketId,
+          popupText: `проверка до прогона: транзакция уже у обращения ${d.ownerTicketId}`,
+          fromPrecheck: true,
+        })
+      );
       precheckWrongStatus.forEach((w) =>
         results.push({
           ticketId: w.ticketId,
@@ -3064,7 +3240,8 @@
       listSnapshot();
       console.log(
         `[BulkApproveBETA/${workflow.id}] По проверке списка: пропущено без открытия ` +
-        `${precheckWrongStatus.length} (другой статус), сайт не нашёл ${precheckNotFound.length}.`
+        `${precheckWrongStatus.length} (другой статус) и ${precheckDuplicates.length} (дубли), ` +
+        `сайт не нашёл ${precheckNotFound.length}.`
       );
     }
 
@@ -3680,7 +3857,7 @@
           listWithTail(
             listDuplicatesAll,
             (d) =>
-              `${d.ticketId} — вписывали "${d.transactionId}"` +
+              `${d.ticketId} — ${d.fromPrecheck ? 'по списку' : 'вписывали'} "${d.transactionId}"` +
               (d.ownerTicketId ? `, транзакция уже у обращения ${d.ownerTicketId}` : '') +
               (d.replacedTransactionId
                 ? ` (переписывали по галочке — в тикете должен остаться "${d.replacedTransactionId}")`
@@ -3962,6 +4139,9 @@
           `к прогону ${listPrecheck.ready.length}, ` +
           `другой статус ${listPrecheck.wrongStatus.length} (пропущены без открытия), ` +
           `сайт не нашёл ${listPrecheck.notFound.length}` +
+          (listPrecheck.dupChecked
+            ? `, транзакция занята ${(listPrecheck.duplicates || []).length} (не открывались)`
+            : '') +
           (listPrecheck.pairsMode && listPrecheck.txOther.length > 0
             ? `; в тикете уже другой Transaction ID: ${listPrecheck.txOther.length}`
             : '')
@@ -4187,6 +4367,8 @@
       ownerTicketId: r.ownerTicketId || null,
       popupText: r.popupText || '',
       replacedTransactionId: r.replacedTransactionId || null,
+      // Найден проверкой до прогона, а не окном сайта в окне Edit
+      fromPrecheck: !!r.fromPrecheck,
       at: r.at || Date.now(),
       fromThisRun: !!fromThisRun,
     };
@@ -4624,6 +4806,9 @@
         // status: idle | running | done | failed | expired | unavailable
         const precheck = { key: null, gen: 0, status: 'idle', progress: '', result: null, detail: '' };
 
+        // Набор пар, который проверялся: сменится хоть один номер — проверка заново
+        const precheckKeyFor = (ids) => ids.map((id) => `${id}:${parsed.pairs.get(id)}`).join(',');
+
         const updateRunButton = () => {
           const disabled =
             lastBlocked || precheck.status === 'running' || precheck.status === 'expired';
@@ -4680,6 +4865,21 @@
               lines.push(
                 `      ${r.notFound.slice(0, 10).join(', ')}` +
                 (r.notFound.length > 10 ? ` … и ещё ${r.notFound.length - 10}` : '')
+              );
+            }
+            if (r.duplicates.length > 0) {
+              lines.push(
+                `  • транзакция уже занята другим обращением: ${r.duplicates.length} — не открою, ` +
+                'уйдут в блок дублей и в файл Excel'
+              );
+              r.duplicates.slice(0, 10).forEach((d) =>
+                lines.push(`      ${d.ticketId} → ${d.transactionId} уже у обращения ${d.ownerTicketId}`)
+              );
+              if (r.duplicates.length > 10) lines.push(`      … и ещё ${r.duplicates.length - 10}`);
+            }
+            if (r.dupUnchecked > 0) {
+              lines.push(
+                `  • дубли проверить не удалось: ${r.dupUnchecked} — проверятся в окне Edit, как раньше`
               );
             }
             if (r.pairsMode && r.ready.length > 0) {
@@ -4740,7 +4940,32 @@
                 : res.detail || 'неизвестная ошибка';
               return;
             }
-            precheck.result = summarizePrecheck(workflow, ids, pairs, res.rows);
+            // Дубли — только в режиме пар и только для тикетов, в которые
+            // прогон стал бы вписывать номер
+            let dupChecks = null;
+            const candidates = precheckDuplicateCandidates(workflow, ids, pairs, res.rows);
+            if (candidates.length > 0) {
+              precheck.progress = `— ищу дубли: 0 из ${candidates.length}`;
+              renderPrecheck();
+              const dupRes = await checkDuplicatesOnSite(candidates, {
+                isCancelled: cancelled,
+                onProgress: (done, total) => {
+                  if (cancelled()) return;
+                  precheck.progress = `— ищу дубли: ${done} из ${total}`;
+                  renderPrecheck();
+                },
+              });
+              if (cancelled()) return;
+              if (!dupRes.ok && dupRes.expired) {
+                precheck.status = 'expired';
+                precheck.detail = `сайт вместо данных отвечает страницей входа (${dupRes.detail})`;
+                return;
+              }
+              dupChecks = dupRes.ok ? dupRes.results : new Map();
+            } else if (workflow.fillTransactionIdFromList) {
+              dupChecks = new Map();
+            }
+            precheck.result = summarizePrecheck(workflow, ids, pairs, res.rows, dupChecks);
             precheck.status = 'done';
             window.__bulkApprovePrecheck = precheck.result;
           } catch (e) {
@@ -4750,10 +4975,9 @@
               precheck.detail = String((e && e.message) || e);
             }
           } finally {
-            if (!cancelled()) {
-              renderPrecheck();
-              updateRunButton();
-            }
+            // refresh, а не только блок проверки: строка «Автопилот прогонит»
+            // выше считается по итогу проверки
+            if (!cancelled()) refresh();
           }
         };
 
@@ -4772,7 +4996,7 @@
             renderPrecheck();
             return;
           }
-          const key = remainingIds.map((id) => `${id}:${parsed.pairs.get(id)}`).join(',');
+          const key = precheckKeyFor(remainingIds);
           if (key === precheck.key) {
             renderPrecheck();
             return;
@@ -4844,10 +5068,19 @@
           }
 
           if (autoBox.checked && remainingCount > 0) {
-            const chunkCount = Math.ceil(remainingCount / CONFIG.autopilotChunkSize);
+            // После проверки на сайте — сколько реально пойдёт в пачки
+            const checked =
+              precheck.status === 'done' && precheck.key === precheckKeyFor(remainingIds);
+            const toRun = checked ? precheck.result.ready.length : remainingCount;
+            const chunkCount = Math.ceil(toRun / CONFIG.autopilotChunkSize);
             lines.push(
-              `Автопилот прогонит ${remainingCount} ` +
-              `${chunkCount === 1 ? 'тикет(ов) одной пачкой' : `тикетов за ${chunkCount} пачек`}.`
+              toRun === 0
+                ? 'Автопилот: по итогам проверки на сайте прогонять нечего.'
+                : `Автопилот прогонит ${toRun} ${pluralRu(toRun, 'тикет', 'тикета', 'тикетов')} ` +
+                  (chunkCount === 1
+                    ? 'одной пачкой'
+                    : `за ${chunkCount} ${pluralRu(chunkCount, 'пачку', 'пачки', 'пачек')}`) +
+                  (checked ? ' (по итогам проверки на сайте).' : '.')
             );
           }
 

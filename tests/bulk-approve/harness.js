@@ -78,6 +78,8 @@ function processingDate(hoursAgo) {
 //       и у страницы есть fetch, которым скрипт может повторить этот запрос
 //     sessionExpired: true — на запрос списка сайт отвечает страницей входа
 //     listApiStatus: код ответа на запрос списка (например, 503)
+//     dupCheckStatus: код ответа на проверку дубля (например, 503)
+//     dupCheckOwnId: Set тикетов, на которые проверка дубля называет сам тикет
 function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, behaviour = {}, configOverrides } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
     <form id="filter_form">
@@ -116,6 +118,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
     blobs: [],
     storageTrace: [],     // снимки памяти списка после каждого Apply в окне Edit
     listQueries: [],      // запросы списка, которые скрипт отправил сам (fetch)
+    dupChecks: [],        // запросы проверки дубля, которые скрипт отправил сам
   };
 
   w.alert = (t) => site.alerts.push(String(t));
@@ -168,6 +171,19 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
       await new Promise((r) => setTimeout(r, 2));
       let body = {};
       try { body = JSON.parse(init.body); } catch (e) { /* не наш запрос */ }
+      // Проверка «занята ли транзакция» — как у окна Edit после ввода номера
+      if (String(url).includes('checkPaymentSupportRequestByTrxId')) {
+        site.dupChecks.push({ url, ...body });
+        if (site.behaviour.sessionExpired) {
+          return textResponse(200, '<!DOCTYPE html><html><body>Login</body></html>');
+        }
+        if (site.behaviour.dupCheckStatus) return textResponse(site.behaviour.dupCheckStatus, 'Service Unavailable');
+        const id = String(body.requestId);
+        const owner = (site.behaviour.dupCheckOwnId && site.behaviour.dupCheckOwnId.has(id))
+          ? Number(id)
+          : site.behaviour.duplicateOwner && site.behaviour.duplicateOwner(id, body.trxId);
+        return textResponse(200, JSON.stringify({ data: { id: owner ? Number(owner) : null }, success: true }));
+      }
       const ids = String(body.idTicket || '').split('\n').filter(Boolean);
       site.listQueries.push({ url, ids, page: body.page, perPage: body.perPage, headers: init.headers });
       if (site.behaviour.sessionExpired) {
@@ -182,7 +198,10 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
         count: found.length,
         data: slice.map((id) => {
           const t = site.tickets.get(id);
-          return { idTicket: Number(id), nameExternalStatus: t.externalStatus, idTransaction: t.txId || null };
+          return {
+            idTicket: Number(id), nameExternalStatus: t.externalStatus,
+            idTransaction: t.txId || null, idTypePayment: '1',
+          };
         }),
         otherData: { hasMore: pageNo * per < found.length },
         success: true,
