@@ -463,6 +463,28 @@ const scenarios = {
       r.text.includes(`${ids[0]} — вписывали`), r.text);
     check('успешно 2', /^Успешно: 2$/m.test(r.text), line(r.text, /^Успешно.*$/m));
   },
+
+  async 19() {
+    console.log('\n[19] Проверка дублей бережёт сайт: не больше 2 запросов, при 529 пауза у всех (0.18)');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, listText } = makeTickets(10);
+    const behaviour = { listApi: true, dupCheck529At: new Set([3]) };
+    const page = createPage({
+      tickets, onScreen: ['19999999'], behaviour,
+      configOverrides: { precheckRetryDelay: 120, duplicateCheckDelay: 5 },
+    });
+    const win = await page.run({ button: LIST_BTN, listText, onlyWindow: true });
+    const checks = page.site.dupChecks;
+    check('одновременно не больше 2 запросов', page.site.dupMaxInFlight <= 2, page.site.dupMaxInFlight);
+    const failed = checks.find((c) => c.status === 529);
+    const failedAt = failed ? failed.answeredAt : Infinity;
+    const after = checks.filter((c) => c.at > failedAt);
+    check('после 529 следующий запрос — не раньше общей паузы',
+      after.length > 0 && after.every((c) => c.at - failedAt >= 100),
+      JSON.stringify(after.map((c) => c.at - failedAt)));
+    check('отбитый запрос повторён: все 10 проверены', checks.length === 11 && !/проверить не удалось/.test(win.precheckText),
+      `${checks.length}\n${win.precheckText}`);
+  },
 };
 
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map((x) => x.trim())) : null;

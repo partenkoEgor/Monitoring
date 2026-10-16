@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.17
+// @version      0.18
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -133,8 +133,11 @@
     // Ответ { data: { id: null } } — свободна, { data: { id: N } } — уже у
     // обращения N. Запрос только спрашивает и ничего не меняет.
     duplicateCheckUrl: '/admin/paymentconsultant/checkPaymentSupportRequestByTrxId',
-    // Сколько таких запросов держать в работе одновременно
-    duplicateCheckConcurrency: 4,
+    // Сколько таких запросов держать в работе одновременно. На 0.17 было 4 —
+    // и сайт отбивал часть из них ответом 529 «слишком много запросов».
+    duplicateCheckConcurrency: 2,
+    // Пауза после каждого запроса у каждого из одновременных потоков
+    duplicateCheckDelay: 150,
 
     // ── Сессия во время прогона (с 0.16) ──────────────────────────────
     // Длинный прогон идёт часами. Раз в столько скрипт делает лёгкий запрос
@@ -729,23 +732,36 @@
   // Проверка дублей для набора { ticketId, transactionId, paymentTypeId }:
   // несколько запросов одновременно, с повторами при перегрузке сайта.
   // { ok: true, results: Map ticketId → результат } или { ok: false, expired, detail }.
+  //
+  // Перегрузка (529, 429, 5xx) — общая для всех потоков: если сайт отбил
+  // один запрос, он отобьёт и соседний, поэтому на паузу встают все сразу,
+  // а не только тот, кому не повезло.
   async function checkDuplicatesOnSite(items, { onProgress, isCancelled } = {}) {
     const results = new Map();
     let next = 0;
     let done = 0;
     let stop = null;
+    let pauseUntil = 0;
+    const waitForPause = async () => {
+      for (;;) {
+        const wait = pauseUntil - Date.now();
+        if (wait <= 0) return;
+        await sleep(wait);
+      }
+    };
     const worker = async () => {
       while (!stop && next < items.length) {
         const item = items[next++];
         let res;
         for (let attempt = 0; ; attempt++) {
+          await waitForPause();
           if (isCancelled && isCancelled()) {
             stop = stop || { ok: false, cancelled: true };
             return;
           }
           res = await checkDuplicateOnSite(item.ticketId, item.transactionId, item.paymentTypeId);
           if (res.kind !== 'retry' || attempt >= CONFIG.precheckRetries) break;
-          await sleep(CONFIG.precheckRetryDelay * (attempt + 1));
+          pauseUntil = Math.max(pauseUntil, Date.now() + CONFIG.precheckRetryDelay * (attempt + 1));
         }
         if (res.kind === 'expired') {
           stop = stop || { ok: false, expired: true, detail: res.detail };
@@ -754,6 +770,7 @@
         results.set(item.ticketId, res);
         done++;
         if (onProgress) onProgress(done, items.length);
+        await sleep(CONFIG.duplicateCheckDelay);
       }
     };
     const workers = [];
