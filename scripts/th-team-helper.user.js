@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.36
+// @version      1.37
 // @description  Одиннадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (предыдущий статус для закрытых, Admin username для тикетов In progress и In progress (M)), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику и обмен сохранёнными фильтрами с коллегами через текстовый код. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -157,6 +157,11 @@
       // Время начала и конца диапазона [часы, минуты]
       startTime: [0, 0],
       endTime: [23, 59],
+      // Окно «Saved filters» — дата подставляется только после Apply в нём.
+      // Узнаём окно по полю выбора сохранённого фильтра (id не зависит от
+      // языка сайта), а если его нет — по заголовку окна (нижний регистр).
+      savedFiltersMarker: '#js-settings',
+      savedFiltersTitle: 'saved filters',
       // Пауза после нажатия Apply, прежде чем искать поле даты (мс)
       applyDelay: 300,
       // Сколько ещё пытаться, если поле не появилось сразу
@@ -1991,21 +1996,27 @@
       return true;
     }
 
-    // Кнопка Apply в модалке сохранённых фильтров
-    function isApplyButton(el) {
-      if (!el) return false;
-      const isSuccess = el.classList.contains('btn-success');
-      const isSubmit = el.type === 'submit';
-      const textMatch = el.textContent.trim() === 'Apply';
-      const inModal = !!el.closest('.modal_content, .wrap-white');
-      return isSuccess && (isSubmit || textMatch) && inModal;
+    function isSavedFiltersModal(modal) {
+      if (modal.querySelector(CFG.savedFiltersMarker)) return true;
+      const title = modal.querySelector('.title');
+      return !!title && title.textContent.trim().toLowerCase() === CFG.savedFiltersTitle;
+    }
+
+    // Apply в окне «Saved filters» — и только там. Apply основного фильтра
+    // страницы и Apply в окне тикета дату не трогают. Зелёная кнопка в этом
+    // окне одна (рядом Delete и Cancel), поэтому подпись не сверяем —
+    // на другом языке сайта она будет другой.
+    function isSavedFiltersApply(el) {
+      if (!el || !el.classList.contains('btn-success')) return false;
+      const modal = el.closest('.modal_content');
+      return !!modal && isSavedFiltersModal(modal);
     }
 
     document.addEventListener('click', e => {
       const btn = e.target instanceof Element ? e.target.closest('button') : null;
-      if (!isApplyButton(btn)) return;
+      if (!isSavedFiltersApply(btn)) return;
 
-      log('Нажат Apply — ждём перерисовку фильтров');
+      log('Нажат Apply в «Saved filters» — ждём перерисовку фильтров');
 
       setTimeout(() => {
         if (trySetDate()) return;
