@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.37
-// @description  Одиннадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (предыдущий статус для закрытых, Admin username для тикетов In progress и In progress (M)), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику и обмен сохранёнными фильтрами с коллегами через текстовый код. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @version      1.38
+// @description  Двенадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (предыдущий статус для закрытых, Admin username для тикетов In progress и In progress (M)), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке и обмен сохранёнными фильтрами с коллегами через текстовый код. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -53,6 +53,9 @@
       // Кнопка рядом с «Saved filters»: поделиться сохранёнными фильтрами
       // кодом и добавить фильтры коллеги по его коду
       filterShare: true,
+      // Кнопка на заголовке столбца: копирует все значения столбца
+      // с текущей страницы, по одному в строке
+      columnCopy: true,
     },
 
     // ── Превью вложений ──────────────────────────────────────────────
@@ -363,6 +366,17 @@
       // Пауза между сохранениями фильтров при добавлении по коду (мс):
       // фильтры уходят на сервер по одному, а не десятками подряд
       saveDelay: 500,
+    },
+
+    // ── Копирование столбца ──────────────────────────────────────────
+    columnCopy: {
+      // Чем разделять значения: перенос строки — при вставке в таблицу
+      // каждое значение встаёт в свою строку одного столбца
+      separator: '\n',
+      // Сколько показывать «Скопировано: N» на кнопке (мс)
+      doneDuration: 1500,
+      // Задержка перед скрытием кнопки, когда мышь ушла с заголовка (мс)
+      hideDelay: 150,
     },
 
     // Подробный лог в консоль (F12 → Console)
@@ -4548,6 +4562,188 @@
   }
 
   // ==================================================================
+  // 12. КОПИРОВАНИЕ СТОЛБЦА ЦЕЛИКОМ
+  // ==================================================================
+
+  // При наведении на заголовок столбца появляется кнопка; клик копирует
+  // значения этого столбца из всех строк текущей страницы, по одному
+  // в строке. Кнопка — отдельный элемент поверх заголовка, а не внутри
+  // него: заголовки сайта перетаскиваются и сортируют таблицу по клику,
+  // и чужой элемент внутри них мешал бы и тому, и другому.
+  function initColumnCopy() {
+    const CFG = CONFIG.columnCopy;
+
+    addStyle('th-helper-colcopy-style', `
+      #th-colcopy-btn {
+        position: fixed;
+        z-index: 100000;
+        display: none;
+        align-items: center;
+        gap: 4px;
+        height: 22px;
+        padding: 0 7px;
+        border: none;
+        border-radius: 5px;
+        background: ${ACCENT};
+        color: #fff;
+        font: 600 11px/1 "Open Sans", Tahoma, Arial, sans-serif;
+        white-space: nowrap;
+        cursor: pointer;
+        box-shadow: ${T.shadow};
+      }
+      #th-colcopy-btn.show { display: inline-flex; }
+      #th-colcopy-btn:hover { background: ${ACCENT_HOVER}; }
+      #th-colcopy-btn.th-colcopy-done { background: #3fb950; }
+      #th-colcopy-btn.th-colcopy-empty { background: ${T.textDim}; }
+      #th-colcopy-btn svg { flex-shrink: 0; }
+    `);
+
+    const ICON = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'th-colcopy-btn';
+    document.body.appendChild(btn);
+
+    let currentTh = null;
+    let hideTimer = null;
+    let doneTimer = null;
+
+    function headerName(th) {
+      return th.textContent.replace(/\s+/g, ' ').trim();
+    }
+
+    function setIdle() {
+      btn.className = 'show';
+      btn.innerHTML = ICON;
+      btn.title = currentTh
+        ? `Скопировать все значения столбца «${headerName(currentTh)}» с этой страницы`
+        : '';
+    }
+
+    // Кнопка стоит прямо над заголовком, у его правого края — внутри
+    // узкого заголовка она закрывала бы название столбца. Если сверху
+    // нет места (заголовок у края окна), встаёт внутрь, по центру.
+    // Ширина кнопки меняется с надписью, поэтому считаем после каждой смены.
+    function place() {
+      if (!currentTh || !currentTh.isConnected) return;
+      const r = currentTh.getBoundingClientRect();
+      const w = btn.offsetWidth;
+      const h = btn.offsetHeight;
+      const left = Math.max(4, Math.min(r.right - w, window.innerWidth - w - 4));
+      const above = r.top - h;
+      const top = above >= 4 ? above : r.top + (r.height - h) / 2;
+      btn.style.left = `${left}px`;
+      btn.style.top = `${top}px`;
+    }
+
+    function hide() {
+      clearTimeout(doneTimer);
+      btn.className = '';
+      currentTh = null;
+    }
+
+    // Заголовок таблицы с данными: th в thead, и у таблицы есть строки.
+    // Таблица окна «История тикета» без thead сюда не попадает.
+    function dataHeader(el) {
+      const th = el.closest('thead th');
+      if (!th) return null;
+      const table = th.closest('table');
+      if (!table || !table.tBodies.length || !table.tBodies[0].rows.length) return null;
+      return th;
+    }
+
+    // Значения столбца по строкам текущей страницы, в порядке таблицы.
+    // Ячейки со ссылками и кнопками (Ticket history, файлы) не копируются —
+    // как и при копировании одной ячейки; пустые пропускаются.
+    function columnValues(th) {
+      const table = th.closest('table');
+      const idx = th.cellIndex;
+      const values = [];
+      let empty = 0;
+      let withLinks = 0;
+      Array.from(table.tBodies).forEach(body => {
+        Array.from(body.rows).forEach(row => {
+          const cell = row.cells[idx];
+          // Строка-заглушка вроде «нет данных» с одной ячейкой на всю ширину
+          if (!cell || cell.tagName !== 'TD' || cell.colSpan > 1) return;
+          if (cell.querySelector('a, button')) { withLinks++; return; }
+          const value = cell.textContent.replace(/\s+/g, ' ').trim();
+          if (value) values.push(value);
+          else empty++;
+        });
+      });
+      return { values, empty, withLinks };
+    }
+
+    function flash(cls, html, title) {
+      clearTimeout(doneTimer);
+      btn.className = `show ${cls}`;
+      btn.innerHTML = html;
+      btn.title = title;
+      place();
+      doneTimer = setTimeout(() => {
+        if (!currentTh) return;
+        setIdle();
+        place();
+      }, CFG.doneDuration);
+    }
+
+    document.addEventListener('mouseover', e => {
+      const target = e.target instanceof Element ? e.target : null;
+      if (!target) return;
+      if (target === btn || btn.contains(target)) {
+        clearTimeout(hideTimer);
+        return;
+      }
+      const th = dataHeader(target);
+      if (th) {
+        clearTimeout(hideTimer);
+        if (th !== currentTh) {
+          currentTh = th;
+          setIdle();
+        }
+        place();
+        return;
+      }
+      if (currentTh) {
+        clearTimeout(hideTimer);
+        hideTimer = setTimeout(hide, CFG.hideDelay);
+      }
+    });
+
+    // Таблица прокручивается и вбок, и вместе со страницей — кнопка
+    // осталась бы висеть над чужим заголовком
+    window.addEventListener('scroll', () => { if (currentTh) hide(); }, true);
+
+    // Нажатие не должно доходить до сайта: ни начинать перетаскивание
+    // столбца, ни сортировать таблицу
+    btn.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+    btn.addEventListener('click', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!currentTh || !currentTh.isConnected) { hide(); return; }
+      const name = headerName(currentTh);
+      const { values, empty, withLinks } = columnValues(currentTh);
+      if (!values.length) {
+        flash('th-colcopy-empty', 'Нечего копировать',
+          withLinks ? `В столбце «${name}» ссылки и кнопки — их значения не копируются` : `Столбец «${name}» пуст`);
+        return;
+      }
+      const notes = [];
+      if (empty) notes.push(`пустых пропущено: ${empty}`);
+      if (withLinks) notes.push(`со ссылками пропущено: ${withLinks}`);
+      copyText(values.join(CFG.separator)).then(() => {
+        flash('th-colcopy-done', `✓ Скопировано: ${values.length}${empty ? ` · пустых: ${empty}` : ''}`,
+          `«${name}»: скопировано ${values.length}${notes.length ? ` (${notes.join(', ')})` : ''}`);
+        log(`Столбец «${name}» скопирован:`, values.length, notes.join(', '));
+      });
+    });
+
+    log('Копирование столбца включено');
+  }
+
+  // ==================================================================
   // ПАНЕЛЬ НАСТРОЕК: ВКЛЮЧЕНИЕ И ВЫКЛЮЧЕНИЕ ФУНКЦИЙ БЕЗ ПРАВКИ КОДА
   // ==================================================================
 
@@ -4564,6 +4760,7 @@
     fileButtons: 'Кнопки вместо ссылок на файлы',
     cellCopy: 'Копирование значения ячейки по клику',
     filterShare: 'Обмен сохранёнными фильтрами',
+    columnCopy: 'Копирование столбца целиком',
   };
 
   // CONFIG.features задаёт дефолт при первом запуске; панель настроек и
@@ -4826,6 +5023,7 @@
     if (isFeatureEnabled('fileButtons')) initFileButtons();
     if (isFeatureEnabled('cellCopy')) initCellCopy();
     if (isFeatureEnabled('filterShare')) initFilterShare();
+    if (isFeatureEnabled('columnCopy')) initColumnCopy();
     log('Скрипт запущен на', window.location.pathname);
   }
 
