@@ -281,11 +281,10 @@ const scenarios = {
     check('блока «Для таблицы отчёта» нет', labels && !labels.some((l) => /Для таблицы отчёта/.test(l)), JSON.stringify(labels));
   },
 
-  // ---------- 0.16: проверка списка на сайте и сессия (только бета) ----------
+  // ---------- с 0.16 / 3.3: проверка списка на сайте и сессия ----------
 
   async 12() {
     console.log('\n[12] Проверка списка на сайте до прогона — «по списку (225)»');
-    if (!IS_BETA) return console.log('  — только бета');
     const { tickets, ids, listText } = makeTickets(10);
     tickets[ids[1]].externalStatus = '225 Approved by agent'; // уже закрыт кем-то
     tickets[ids[2]].externalStatus = 'Closed (M)';
@@ -341,7 +340,6 @@ const scenarios = {
 
   async 13() {
     console.log('\n[13] Проверка списка — обычный «Bulk Approve (225)» со списком Ticket ID');
-    if (!IS_BETA) return console.log('  — только бета');
     const { tickets, ids } = makeTickets(3);
     ids.forEach((id) => { tickets[id].txId = '555' + id; });
     tickets[ids[1]].externalStatus = 'Closed (M)';
@@ -357,7 +355,6 @@ const scenarios = {
 
   async 14() {
     console.log('\n[14] Сессия истекла до прогона — запуск закрыт, причина в окне');
-    if (!IS_BETA) return console.log('  — только бета');
     const { tickets, listText } = makeTickets(3);
     const page = createPage({ tickets, onScreen: ['19999999'], behaviour: { listApi: true, sessionExpired: true } });
     const win = await page.run({ button: LIST_BTN, listText, onlyWindow: true });
@@ -368,7 +365,6 @@ const scenarios = {
 
   async 15() {
     console.log('\n[15] Сессия истекла посреди прогона — остановка с понятной причиной');
-    if (!IS_BETA) return console.log('  — только бета');
     const { tickets, ids, listText } = makeTickets(10);
     const behaviour = {
       listApi: true,
@@ -390,7 +386,6 @@ const scenarios = {
 
   async 16() {
     console.log('\n[16] Сайт не ответил на проверку — прогон идёт как раньше, без ложной остановки');
-    if (!IS_BETA) return console.log('  — только бета');
     const { tickets, listText } = makeTickets(4);
     const page = createPage({
       tickets, onScreen: ['19999999'], behaviour: { listApi: true, listApiStatus: 503 },
@@ -405,7 +400,6 @@ const scenarios = {
 
   async 17() {
     console.log('\n[17] Дубли находятся до прогона и не открываются (0.17)');
-    if (!IS_BETA) return console.log('  — только бета');
     const { tickets, ids, listText } = makeTickets(6);
     const wantedTx = (i) => `2385${String(i).padStart(7, '0')}`;
     const behaviour = {
@@ -446,7 +440,6 @@ const scenarios = {
 
   async 18() {
     console.log('\n[18] Проверка дублей не ответила — тикеты идут в прогон, дубль ловит окно Edit');
-    if (!IS_BETA) return console.log('  — только бета');
     const { tickets, ids, listText } = makeTickets(3);
     const behaviour = {
       listApi: true, dupCheckStatus: 503,
@@ -466,7 +459,6 @@ const scenarios = {
 
   async 19() {
     console.log('\n[19] Проверка дублей бережёт сайт: не больше 2 запросов, при 529 пауза у всех (0.18)');
-    if (!IS_BETA) return console.log('  — только бета');
     const { tickets, listText } = makeTickets(10);
     const behaviour = { listApi: true, dupCheck529At: new Set([3]) };
     const page = createPage({
@@ -486,11 +478,10 @@ const scenarios = {
       `${checks.length}\n${win.precheckText}`);
   },
 
-  // ---------- 0.19: проверка запроса сохранения ----------
+  // ---------- с 0.19 / 3.3: проверка запроса сохранения ----------
 
   async 20() {
     console.log('\n[20] Сохранение подтверждает сервер — 225 по списку и 239 (0.19)');
-    if (!IS_BETA) return console.log('  — только бета');
     const { tickets, listText } = makeTickets(3);
     const page = createPage({ tickets, onScreen: ['19999999'] });
     const r = await page.run({ button: LIST_BTN, listText });
@@ -520,7 +511,6 @@ const scenarios = {
 
   async 21() {
     console.log('\n[21] Страница отправила сохранение ДРУГОГО тикета — запрос не уходит, прогон стоп');
-    if (!IS_BETA) return console.log('  — только бета');
     const { tickets, ids, listText } = makeTickets(4);
     const behaviour = { saveTamper: (id, f) => { if (id === ids[1]) f.requestId = '22600099'; } };
     const page = createPage({ tickets, onScreen: ['19999999'], behaviour });
@@ -538,7 +528,6 @@ const scenarios = {
 
   async 22() {
     console.log('\n[22] В сохранении не тот Transaction ID или не тот статус — запрос не уходит');
-    if (!IS_BETA) return console.log('  — только бета');
     const a = makeTickets(2);
     const pageA = createPage({
       tickets: a.tickets, onScreen: ['19999999'],
@@ -563,7 +552,6 @@ const scenarios = {
 
   async 23() {
     console.log('\n[23] Сервер не принял сохранение — тикет в ошибках с текстом сайта');
-    if (!IS_BETA) return console.log('  — только бета');
     const { tickets, ids, listText } = makeTickets(3);
     const page = createPage({ tickets, onScreen: ['19999999'], behaviour: { saveRejected: (id) => id === ids[1] } });
     const r = await page.run({ button: LIST_BTN, listText });
@@ -575,7 +563,6 @@ const scenarios = {
 
   async 24() {
     console.log('\n[24] Вне прогона сохранение не трогается — человек работает руками');
-    if (!IS_BETA) return console.log('  — только бета');
     const { tickets, ids } = makeTickets(1);
     const page = createPage({ tickets, onScreen: [ids[0]] });
     // click() у ссылок стенд подменяет ради скачивания Excel — шлём событие
