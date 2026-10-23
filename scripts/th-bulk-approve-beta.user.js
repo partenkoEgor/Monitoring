@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.19
+// @version      0.20
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -797,6 +797,9 @@
         transactionId: r.idTransaction == null ? '' : String(r.idTransaction).trim(),
         // Нужен проверке дублей: сайт спрашивает о транзакции с её типом
         paymentTypeId: r.idTypePayment == null ? null : String(r.idTypePayment).trim(),
+        // Колонка Agent's files — для кнопки проверки (с 0.20). undefined —
+        // поля в ответе нет вовсе: это не «пусто», а «не знаю».
+        agentFiles: 'documentsExternal' in r ? (r.documentsExternal == null ? '' : String(r.documentsExternal)) : undefined,
       }))
       .filter((r) => r.ticketId !== '');
     return { kind: 'ok', rows, hasMore: !!(json.otherData && json.otherData.hasMore) };
@@ -5816,6 +5819,275 @@
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
+  // ------------------------------------------------------------------
+  // ПРОВЕРКА AGENT'S FILES (с 0.20).
+  //
+  // Отдельная кнопка, которая только ЧИТАЕТ: по списку Ticket ID (или по
+  // тикетам на экране) спрашивает сайт тем же запросом списка, что и
+  // проверка до прогона, и делит тикеты на «Agent's files пусто» и
+  // «заполнено». Окна Edit не открываются, в тикетах ничего не меняется,
+  // память списков прогонов не трогается.
+  // ------------------------------------------------------------------
+
+  // Что лежит в колонке Agent's files (documentsExternal). Сайт отдаёт её
+  // HTML-ссылками на файлы, как соседнюю колонку файлов поддержки; на случай
+  // другого вида понимаем и JSON-массив, и просто текст.
+  function parseAgentFiles(raw) {
+    if (raw === undefined) return { state: 'missing', count: 0, names: [] };
+    const text = String(raw).trim();
+    if (text === '' || text === '[]' || text.toLowerCase() === 'null') {
+      return { state: 'empty', count: 0, names: [] };
+    }
+    const baseName = (v) => String(v).split('/').pop().trim();
+    if (text.startsWith('[')) {
+      try {
+        const list = JSON.parse(text);
+        if (Array.isArray(list)) {
+          const names = list.map((x) => baseName(typeof x === 'string' ? x : JSON.stringify(x))).filter(Boolean);
+          return names.length > 0
+            ? { state: 'filled', count: names.length, names }
+            : { state: 'empty', count: 0, names: [] };
+        }
+      } catch (e) {
+        /* не JSON — разбираем как HTML/текст ниже */
+      }
+    }
+    const anchors = text.match(/<a\b[\s\S]*?<\/a>/gi) || [];
+    if (anchors.length > 0) {
+      const names = anchors.map((a) => baseName(a.replace(/<[^>]*>/g, ''))).filter(Boolean);
+      return { state: 'filled', count: anchors.length, names };
+    }
+    const plain = text.replace(/<[^>]*>/g, '').trim();
+    return plain === ''
+      ? { state: 'empty', count: 0, names: [] }
+      : { state: 'filled', count: 1, names: [baseName(plain)] };
+  }
+
+  // Окно проверки: список Ticket ID или «по экрану», ход проверки, ошибки.
+  // Закрывается само, когда готов отчёт.
+  function runAgentFilesCheck() {
+    if (state.isRunning) return;
+    // Номера тикетов с экрана читаются по карте колонок — она должна быть свежей
+    refreshColumnIndexMap();
+    const existing = document.querySelector('.bulk-approve-beta-check-overlay');
+    if (existing) existing.remove();
+
+    let busy = false;
+    let closed = false;
+    const overlay = document.createElement('div');
+    // Не .modal_wrap и не .swal2-popup — см. окно ввода списка
+    overlay.className = 'bulk-approve-beta-check-overlay';
+    overlay.style.cssText = [
+      'position:fixed', 'inset:0', 'z-index:2147483600',
+      'background:rgba(0,0,0,.5)', 'display:flex',
+      'align-items:center', 'justify-content:center', 'padding:20px',
+    ].join(';');
+    const panel = document.createElement('div');
+    panel.style.cssText = [
+      'background:#fff', 'color:#222', 'border-radius:8px',
+      'box-shadow:0 10px 40px rgba(0,0,0,.35)', 'max-width:640px', 'width:100%',
+      'max-height:90vh', 'display:flex', 'flex-direction:column',
+      'font-family:system-ui,Arial,sans-serif', 'font-size:14px', 'line-height:1.45',
+    ].join(';');
+    const body = document.createElement('div');
+    body.style.cssText = 'padding:18px 20px;overflow:auto;flex:1';
+    const title = document.createElement('div');
+    title.textContent = "Проверка Agent's files";
+    title.style.cssText = 'font-weight:600;font-size:16px;margin-bottom:6px';
+    const hint = document.createElement('div');
+    hint.style.cssText = 'color:#555;margin-bottom:10px';
+    hint.textContent =
+      "Скрипт только читает: спросит сайт о каждом тикете и разделит их на «Agent's files пусто» " +
+      'и «заполнено». Окна Edit не открываются, в тикетах ничего не меняется. Вставь список ' +
+      'Ticket ID — по одному в строке — или проверь тикеты, которые сейчас на экране.';
+    const area = document.createElement('textarea');
+    area.rows = 10;
+    area.placeholder = '22708318\n22707583';
+    area.style.cssText = [
+      'width:100%', 'box-sizing:border-box', 'font-family:Consolas,monospace',
+      'font-size:13px', 'padding:8px', 'border:1px solid #ccc', 'border-radius:4px',
+      'resize:vertical', 'white-space:pre',
+    ].join(';');
+    const status = document.createElement('div');
+    status.className = 'bulk-approve-beta-check-status';
+    status.style.cssText = 'margin-top:10px;white-space:pre-wrap;color:#555';
+    body.appendChild(title);
+    body.appendChild(hint);
+    body.appendChild(area);
+    body.appendChild(status);
+
+    const footer = document.createElement('div');
+    footer.style.cssText =
+      'padding:12px 20px;border-top:1px solid #eee;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap';
+    const mkBtn = (text, primary) => {
+      const b = document.createElement('button');
+      b.textContent = text;
+      b.style.cssText = [
+        'padding:8px 18px', 'border-radius:4px', 'font-size:14px', 'cursor:pointer',
+        primary ? 'border:none;background:#6A5ACD;color:#fff' : 'border:1px solid #bbb;background:#f5f5f5',
+      ].join(';');
+      return b;
+    };
+    const cancelBtn = mkBtn('Отмена', false);
+    const screenIds = () => getTicketRows().map((r) => getTicketIdFromRow(r)).filter(Boolean);
+    const screenBtn = mkBtn(`Проверить экран (${screenIds().length})`, false);
+    screenBtn.className = 'bulk-approve-beta-check-screen';
+    const listBtn = mkBtn('Проверить список', true);
+    listBtn.className = 'bulk-approve-beta-check-list';
+    footer.appendChild(cancelBtn);
+    footer.appendChild(screenBtn);
+    footer.appendChild(listBtn);
+    panel.appendChild(body);
+    panel.appendChild(footer);
+    overlay.appendChild(panel);
+
+    const close = () => {
+      closed = true;
+      document.removeEventListener('keydown', onKey);
+      overlay.remove();
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape' && !busy) close();
+    };
+    document.addEventListener('keydown', onKey);
+    cancelBtn.addEventListener('click', close); // во время проверки — прерывает её
+
+    const setBusy = (on) => {
+      busy = on;
+      [screenBtn, listBtn, area].forEach((el) => {
+        el.disabled = on;
+        el.style.opacity = on ? '0.5' : '1';
+      });
+    };
+    const say = (text, color) => {
+      status.textContent = text;
+      status.style.color = color || '#555';
+    };
+
+    const check = async (ids, sourceLabel) => {
+      if (ids.length === 0) {
+        say('Проверять нечего.', '#B00020');
+        return;
+      }
+      if (!siteQueryAvailable()) {
+        say('Проверка через сайт в этом браузере недоступна.', '#B00020');
+        return;
+      }
+      setBusy(true);
+      const cancelled = () => closed;
+      try {
+        if (!listRequestTemplate) say('Нажимаю Apply на странице, чтобы подхватить запрос сайта…');
+        const hasTemplate = await ensureListRequestTemplate(cancelled);
+        if (cancelled()) return;
+        if (!hasTemplate) {
+          say('Не удалось подхватить запрос, которым страница грузит таблицу. Нажми Apply у фильтров и попробуй снова.', '#B00020');
+          return;
+        }
+        say(`Проверяю на сайте… 0 из ${ids.length}`);
+        const res = await queryTicketsOnSite(ids, {
+          isCancelled: cancelled,
+          onProgress: (done, total) => {
+            if (!cancelled()) say(`Проверяю на сайте… ${done} из ${total}`);
+          },
+        });
+        if (cancelled()) return;
+        if (!res.ok) {
+          say(
+            res.expired
+              ? `СЕССИЯ ИСТЕКЛА: сайт вместо данных отвечает страницей входа (${res.detail}). Обнови страницу и войди заново.`
+              : `Проверка не удалась: ${res.detail}.`,
+            '#B00020'
+          );
+          return;
+        }
+        close();
+        showAgentFilesReport(ids, res.rows, sourceLabel);
+      } catch (e) {
+        console.error('[BulkApproveBETA] Проверка Agent\'s files упала:', e);
+        if (!closed) say(`Проверка упала: ${(e && e.message) || e}`, '#B00020');
+      } finally {
+        if (!closed) setBusy(false);
+      }
+    };
+
+    screenBtn.addEventListener('click', () => {
+      if (!busy) check(screenIds(), 'тикеты на экране');
+    });
+    listBtn.addEventListener('click', () => {
+      if (busy) return;
+      const parsed = parseTicketIdList(area.value);
+      if (parsed.badLines.length > 0) {
+        say(
+          `Не разобрал строк: ${parsed.badLines.length}\n` +
+            parsed.badLines.slice(0, 10).map((b) => `  строка ${b.line}: ${b.why} — «${b.text}»`).join('\n'),
+          '#B00020'
+        );
+        return;
+      }
+      check([...parsed.pairs.keys()], 'список');
+    });
+
+    document.body.appendChild(overlay);
+    area.focus();
+  }
+
+  function showAgentFilesReport(ids, rows, sourceLabel) {
+    const empty = [];
+    const filled = [];
+    const missing = [];
+    const notFound = [];
+    ids.forEach((id) => {
+      const row = rows.get(id);
+      if (!row) {
+        notFound.push(id);
+        return;
+      }
+      const files = parseAgentFiles(row.agentFiles);
+      if (files.state === 'empty') empty.push(id);
+      else if (files.state === 'filled') filled.push({ ticketId: id, ...files });
+      else missing.push(id);
+    });
+    window.__bulkApproveAgentFiles = { empty, filled, missing, notFound };
+
+    const lines = [
+      "ПРОВЕРКА AGENT'S FILES",
+      `Проверено: ${ids.length} (${sourceLabel})`,
+      `  • Agent's files пусто: ${empty.length}`,
+      `  • Agent's files заполнено: ${filled.length}`,
+    ];
+    if (notFound.length > 0) {
+      lines.push(
+        `  • сайт не нашёл по фильтру: ${notFound.length} — проверь, не стоит ли на странице ` +
+          'ещё какой-то фильтр (даты, статус, отдел)'
+      );
+    }
+    if (missing.length > 0) {
+      lines.push(
+        `  • ⚠ колонки Agent's files нет в ответе сайта: ${missing.length} — про эти тикеты ` +
+          'скрипт ничего не знает; включи колонку в настройках таблицы и проверь снова'
+      );
+    }
+    lines.push('', 'Скрипт только читал — в тикетах ничего не менялось.');
+
+    const blocks = [];
+    if (empty.length > 0) {
+      blocks.push({ label: `Agent's files ПУСТО (${empty.length}) — Ticket ID:`, text: empty.join('\n') });
+    }
+    if (filled.length > 0) {
+      blocks.push({
+        label: `Agent's files заполнено (${filled.length}) — Ticket ID, файлов, файлы:`,
+        text: filled.map((f) => `${f.ticketId}\t${f.count}\t${f.names.join(', ')}`).join('\n'),
+      });
+    }
+    if (notFound.length > 0) {
+      blocks.push({ label: `Сайт не нашёл (${notFound.length}) — Ticket ID:`, text: notFound.join('\n') });
+    }
+    if (missing.length > 0) {
+      blocks.push({ label: `Нет колонки в ответе (${missing.length}) — Ticket ID:`, text: missing.join('\n') });
+    }
+    showReportWindow(lines.join('\n'), blocks, {});
+  }
+
   function showReportWindow(reportText, copyBlocks, options) {
     // Если что-то пойдёт не так с вёрсткой — отчёт всё равно должен дойти
     // до человека, поэтому любой сбой откатывается на обычный alert.
@@ -5975,6 +6247,32 @@
       container.appendChild(btn);
       return btn;
     });
+
+    // Проверка Agent's files (с 0.20) — только читает, но во время прогона
+    // недоступна, как и кнопки запуска: обе работают с фильтром страницы
+    const agentFilesBtn = document.createElement('button');
+    agentFilesBtn.id = 'bulk-approve-beta-btn-agent-files';
+    agentFilesBtn.textContent = "BETA Проверка Agent's files";
+    Object.assign(agentFilesBtn.style, {
+      padding: '12px 18px',
+      background: '#6A5ACD',
+      color: '#fff',
+      border: 'none',
+      borderRadius: '8px',
+      fontSize: '14px',
+      fontWeight: '600',
+      cursor: 'pointer',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+    });
+    agentFilesBtn.addEventListener('click', () => {
+      try {
+        runAgentFilesCheck();
+      } catch (e) {
+        console.error("[BulkApproveBETA] Проверка Agent's files:", e);
+      }
+    });
+    container.appendChild(agentFilesBtn);
+    startBtns.push(agentFilesBtn);
 
     stopBtn = document.createElement('button');
     stopBtn.id = 'bulk-approve-beta-stop-btn';
