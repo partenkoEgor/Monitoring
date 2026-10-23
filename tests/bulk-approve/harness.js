@@ -234,6 +234,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
             walletAccountNumber: '00799999004063893970',
             numberWallet: t.userWallet || '01080969968',
             status: t.txId ? (t.txStatusName || 'OK') : '',
+            commentSupport: t.insideComment || '',
             // Agent's files — HTML-ссылками, как колонка файлов на сайте
             documentsExternal: (t.agentFiles || []).map((f) =>
               `<a href='/admin/amazon/?type=6&url=${encodeURIComponent(f)}' target='_blank'>${f}</a>`).join('<br>'),
