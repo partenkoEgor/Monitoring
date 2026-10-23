@@ -613,24 +613,29 @@ const scenarios = {
       ov.querySelector(`.${prefix}-check-${clickWhat}`).click();
       const rep = await waitFor(() => d.querySelector(`.${prefix}-report-overlay`));
       if (!rep) throw new Error('нет отчёта; окно проверки: ' + (d.querySelector(`.${prefix}-check-overlay`) || { textContent: '(закрыто)' }).textContent);
-      const dl = rep.querySelector(`.${prefix}-report-download`);
-      let xlsx = null;
-      if (dl) {
-        dl.click();
+      // Обе кнопки Excel: «все» и «без файлов»
+      const files = {};
+      for (const kind of ['all', 'empty']) {
+        const btn = rep.querySelector(`.${prefix}-report-download-${kind}`);
+        if (!btn) continue;
+        btn.click();
         const buf = await new Promise((res) => {
           const fr = new w.FileReader();
           fr.onload = () => res(Buffer.from(fr.result));
           fr.readAsArrayBuffer(site.blobs.at(-1));
         });
-        fs.writeFileSync(`${__dirname}/last-agent-files.xlsx`, buf);
-        xlsx = readStoredZip(buf);
+        fs.writeFileSync(`${__dirname}/last-agent-files-${kind}.xlsx`, buf);
+        files[kind] = { label: btn.textContent, fileName: site.downloads.at(-1), xlsx: readStoredZip(buf) };
       }
+      const dl = files.all ? { textContent: files.all.label } : null;
+      const xlsx = files.all ? files.all.xlsx : null;
       const out = {
         text: rep.querySelector(`.${prefix}-report-text`).textContent,
         blocks: [...rep.querySelectorAll(`.${prefix}-report-copy`)].map((a) => ({ label: a.previousElementSibling.textContent, text: a.value })),
         downloadLabel: dl ? dl.textContent : null,
-        fileName: dl ? site.downloads.at(-1) : null,
+        fileName: files.all ? files.all.fileName : null,
         xlsx,
+        files,
       };
       w.confirm = () => true;
       [...rep.querySelectorAll('button')].find((b) => b.textContent === 'Закрыть').click();
@@ -651,8 +656,8 @@ const scenarios = {
     check('ничего не открывалось и не сохранялось', site.modalOpens.length === 0 && site.saves.length === 0);
 
     // Excel: 5 найденных тикетов, по листу на страну (страны по алфавиту)
-    check('кнопка Excel: 5 тикетов, 3 страны', r.downloadLabel === 'Скачать Excel (5 тикетов, 3 страны)', r.downloadLabel);
-    check('имя файла', /^agents-files_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}\.xlsx$/.test(r.fileName || ''), r.fileName);
+    check('кнопка Excel «все»: 5 тикетов, 3 страны', r.downloadLabel === 'Excel: все (5 тикетов, 3 страны)', r.downloadLabel);
+    check('имя файла «все»', /^agents-files_vse_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}\.xlsx$/.test(r.fileName || ''), r.fileName);
     const wb = r.xlsx && r.xlsx['xl/workbook.xml'];
     check('листы: Algeria, Egypt, Iraq Kurdistan (без «/»)',
       wb && /<sheet name="Algeria" sheetId="1"/.test(wb) && /<sheet name="Egypt" sheetId="2"/.test(wb) && /<sheet name="Iraq Kurdistan" sheetId="3"/.test(wb), wb);
@@ -671,6 +676,20 @@ const scenarios = {
       sh(2).includes('<v>24085716901</v>') && sh(2).includes('<t>Approved</t>') && !sh(1).includes('<t>OK</t>'), sh(2));
     check('кошелёк с ведущим нулём — текстом, ноль на месте', sh(1).includes('<t>01080969968</t>') && !sh(1).includes('<v>1080969968</v>'), sh(1));
     check('Agent\'s files в файле: «пусто» и «1 файл»', sh(1).includes('<t>пусто</t>') && sh(2).includes('<t>1 файл</t>'), sh(2));
+
+    // Второй файл — только «пусто» (ids[0], ids[2] — оба Algeria); без колонки (ids[5]) сюда не идёт
+    const e = r.files.empty;
+    check('кнопка «без файлов»: 2 тикета, 1 страна', e && e.label === 'Excel: без файлов (2 тикета, 1 страна)', e && e.label);
+    check('имя файла «без файлов»', e && /^agents-files_bez-faylov_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}\.xlsx$/.test(e.fileName), e && e.fileName);
+    const eb = e && e.xlsx;
+    const ewb = (eb && eb['xl/workbook.xml']) || '';
+    const esh = (eb && eb['xl/worksheets/sheet1.xml']) || '';
+    check('без файлов: один лист Algeria, 2 строки, та же шапка',
+      /<sheet name="Algeria" sheetId="1"/.test(ewb) && !/sheetId="2"/.test(ewb) && rowsOf(esh) === 2 &&
+      esh.includes('<t>External Status</t>') && esh.includes('<t>Inside comment</t>'), ewb + '\n' + esh.slice(0, 500));
+    check('без файлов: только «пусто», без чужих тикетов',
+      (esh.match(/<t>пусто<\/t>/g) || []).length === 2 && !esh.includes('файл</t>') && !esh.includes('нет данных') &&
+      esh.includes(`<v>${ids[0]}</v>`) && esh.includes(`<v>${ids[2]}</v>`), esh);
 
     // Первая проверка сама нажала Apply у фильтров (подхватить запрос) — стенд при
     // пустом поле Ticket ID очищает таблицу; оператор вывел тикеты на экран снова

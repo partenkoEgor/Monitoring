@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.22
+// @version      0.23
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -6246,7 +6246,8 @@
     if (missing.length > 0) {
       blocks.push({ label: `Нет колонки в ответе (${missing.length}) — Ticket ID:`, text: missing.join('\n') });
     }
-    // Файл Excel: все найденные сайтом тикеты, по листу на страну
+    // Файлы Excel (с 0.23 — два): все найденные сайтом тикеты и только те,
+    // где Agent's files пусто. Структура одна: по листу на страну, те же колонки.
     const found = ids.filter((id) => rows.has(id));
     const filesNote = (row) => {
       const f = parseAgentFiles(row.agentFiles);
@@ -6254,34 +6255,31 @@
       if (f.state === 'missing') return 'нет данных';
       return `${f.count} ${pluralRu(f.count, 'файл', 'файла', 'файлов')}`;
     };
-    const byCountry = new Map();
-    found.forEach((id) => {
-      const row = rows.get(id);
-      const country = row.country || 'Без страны';
-      if (!byCountry.has(country)) byCountry.set(country, []);
-      byCountry.get(country).push([
-        id,
-        row.externalStatus,
-        row.userId,
-        row.subagent,
-        row.insideComment,
-        row.transactionId,
-        // Статус — только когда транзакция в тикете есть
-        row.transactionId ? row.txStatus : '',
-        row.department,
-        row.agentWallet,
-        row.userWallet,
-        filesNote(row),
-      ]);
-    });
-    const countries = [...byCountry.keys()].sort((a, b) => a.localeCompare(b));
-    const options = {};
-    if (found.length > 0) {
-      options.download = {
-        label:
-          `Скачать Excel (${found.length} ${pluralRu(found.length, 'тикет', 'тикета', 'тикетов')}, ` +
-          `${countries.length} ${pluralRu(countries.length, 'страна', 'страны', 'стран')})`,
-        fileName: () => stampedFileName('agents-files'),
+    const workbookFor = (ticketIds) => {
+      const byCountry = new Map();
+      ticketIds.forEach((id) => {
+        const row = rows.get(id);
+        const country = row.country || 'Без страны';
+        if (!byCountry.has(country)) byCountry.set(country, []);
+        byCountry.get(country).push([
+          id,
+          row.externalStatus,
+          row.userId,
+          row.subagent,
+          row.insideComment,
+          row.transactionId,
+          // Статус — только когда транзакция в тикете есть
+          row.transactionId ? row.txStatus : '',
+          row.department,
+          row.agentWallet,
+          row.userWallet,
+          filesNote(row),
+        ]);
+      });
+      const countries = [...byCountry.keys()].sort((a, b) => a.localeCompare(b));
+      return {
+        tickets: ticketIds.length,
+        countries: countries.length,
         build: () =>
           buildSheetsXlsx(
             countries.map((country) => ({
@@ -6296,6 +6294,29 @@
             }))
           ),
       };
+    };
+    const describe = (wb) =>
+      `${wb.tickets} ${pluralRu(wb.tickets, 'тикет', 'тикета', 'тикетов')}, ` +
+      `${wb.countries} ${pluralRu(wb.countries, 'страна', 'страны', 'стран')}`;
+    const options = { downloads: [] };
+    if (found.length > 0) {
+      const all = workbookFor(found);
+      options.downloads.push({
+        kind: 'all',
+        label: `Excel: все (${describe(all)})`,
+        fileName: () => stampedFileName('agents-files_vse'),
+        build: all.build,
+      });
+    }
+    // Только «пусто»: тикеты без колонки в ответе сюда не идут — про них неизвестно
+    if (empty.length > 0) {
+      const none = workbookFor(empty);
+      options.downloads.push({
+        kind: 'empty',
+        label: `Excel: без файлов (${describe(none)})`,
+        fileName: () => stampedFileName('agents-files_bez-faylov'),
+        build: none.build,
+      });
     }
     showReportWindow(lines.join('\n'), blocks, options);
   }
@@ -6367,11 +6388,13 @@
         footer.appendChild(downloadBtn);
       }
 
-      // Любой другой файл Excel к отчёту: { label, fileName, build: () => Blob }
-      const download = options && options.download;
-      if (download) {
+      // Другие файлы Excel к отчёту: [{ kind, label, fileName, build: () => Blob }]
+      const downloads = (options && options.downloads) || [];
+      downloads.forEach((download) => {
         const fileBtn = document.createElement('button');
-        fileBtn.className = 'bulk-approve-beta-report-download';
+        fileBtn.className =
+          'bulk-approve-beta-report-download' +
+          (download.kind ? ` bulk-approve-beta-report-download-${download.kind}` : '');
         fileBtn.textContent = download.label;
         fileBtn.style.cssText = [
           'padding:8px 20px', 'border:none', 'border-radius:4px',
@@ -6387,7 +6410,7 @@
           }
         });
         footer.appendChild(fileBtn);
-      }
+      });
 
       const closeBtn = document.createElement('button');
       closeBtn.textContent = 'Закрыть';
