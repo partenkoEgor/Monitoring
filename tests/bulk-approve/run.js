@@ -41,6 +41,21 @@ function makeTickets(n, base = 22700000) {
 
 const line = (text, re) => (text.match(re) || [])[0] || '(нет строки)';
 
+// Файлы из zip без сжатия (так собирает xlsx скрипт): имя → текст
+function readStoredZip(buf) {
+  const files = {};
+  for (let i = 0; i + 30 <= buf.length && buf.readUInt32LE(i) === 0x04034b50;) {
+    const size = buf.readUInt32LE(i + 18);
+    const nameLen = buf.readUInt16LE(i + 26);
+    const extraLen = buf.readUInt16LE(i + 28);
+    const name = buf.slice(i + 30, i + 30 + nameLen).toString('utf8');
+    const start = i + 30 + nameLen + extraLen;
+    files[name] = buf.slice(start, start + size).toString('utf8');
+    i = start + size;
+  }
+  return files;
+}
+
 const scenarios = {
   async 1() {
     console.log('\n[1] Сбой посреди списка, затем догоняем: отчёт — итог по всему списку');
@@ -577,6 +592,11 @@ const scenarios = {
     if (!IS_BETA) return console.log('  — только бета');
     const { tickets, ids } = makeTickets(6);
     tickets[ids[1]].agentFiles = ['BTDocuments/1/PaymentReferences/a1.png'];
+    tickets[ids[1]].country = 'Egypt';
+    tickets[ids[1]].txId = '24085716901';
+    tickets[ids[1]].txStatusName = 'Approved';
+    tickets[ids[3]].country = 'Iraq/Kurdistan';
+    tickets[ids[5]].country = 'Egypt';
     tickets[ids[3]].agentFiles = ['BTDocuments/1/x/b1.png', 'BTDocuments/1/x/b2.pdf'];
     const behaviour = { listApi: true, hiddenFromFilter: [ids[4]], omitAgentFiles: new Set([ids[5]]) };
     const page = createPage({ tickets, onScreen: ['19999999', ids[0], ids[1]], behaviour });
@@ -589,9 +609,25 @@ const scenarios = {
       if (text !== undefined) ov.querySelector('textarea').value = text;
       ov.querySelector(`.${prefix}-check-${clickWhat}`).click();
       const rep = await waitFor(() => d.querySelector(`.${prefix}-report-overlay`));
+      if (!rep) throw new Error('нет отчёта; окно проверки: ' + (d.querySelector(`.${prefix}-check-overlay`) || { textContent: '(закрыто)' }).textContent);
+      const dl = rep.querySelector(`.${prefix}-report-download`);
+      let xlsx = null;
+      if (dl) {
+        dl.click();
+        const buf = await new Promise((res) => {
+          const fr = new w.FileReader();
+          fr.onload = () => res(Buffer.from(fr.result));
+          fr.readAsArrayBuffer(site.blobs.at(-1));
+        });
+        fs.writeFileSync(`${__dirname}/last-agent-files.xlsx`, buf);
+        xlsx = readStoredZip(buf);
+      }
       const out = {
         text: rep.querySelector(`.${prefix}-report-text`).textContent,
         blocks: [...rep.querySelectorAll(`.${prefix}-report-copy`)].map((a) => ({ label: a.previousElementSibling.textContent, text: a.value })),
+        downloadLabel: dl ? dl.textContent : null,
+        fileName: dl ? site.downloads.at(-1) : null,
+        xlsx,
       };
       w.confirm = () => true;
       [...rep.querySelectorAll('button')].find((b) => b.textContent === 'Закрыть').click();
@@ -611,6 +647,26 @@ const scenarios = {
       filledBlock && filledBlock.text === `${ids[1]}\t1\ta1.png\n${ids[3]}\t2\tb1.png, b2.pdf`, filledBlock && filledBlock.text);
     check('ничего не открывалось и не сохранялось', site.modalOpens.length === 0 && site.saves.length === 0);
 
+    // Excel: 5 найденных тикетов, по листу на страну (страны по алфавиту)
+    check('кнопка Excel: 5 тикетов, 3 страны', r.downloadLabel === 'Скачать Excel (5 тикетов, 3 страны)', r.downloadLabel);
+    check('имя файла', /^agents-files_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}\.xlsx$/.test(r.fileName || ''), r.fileName);
+    const wb = r.xlsx && r.xlsx['xl/workbook.xml'];
+    check('листы: Algeria, Egypt, Iraq Kurdistan (без «/»)',
+      wb && /<sheet name="Algeria" sheetId="1"/.test(wb) && /<sheet name="Egypt" sheetId="2"/.test(wb) && /<sheet name="Iraq Kurdistan" sheetId="3"/.test(wb), wb);
+    const sh = (n) => (r.xlsx && r.xlsx[`xl/worksheets/sheet${n}.xml`]) || '';
+    const rowsOf = (xml) => (xml.match(/<row r="/g) || []).length - 1;
+    check('строк по листам: 2, 2, 1', rowsOf(sh(1)) === 2 && rowsOf(sh(2)) === 2 && rowsOf(sh(3)) === 1,
+      [rowsOf(sh(1)), rowsOf(sh(2)), rowsOf(sh(3))].join(','));
+    check('шапка', sh(1).includes('<t>Субагент</t>') && sh(1).includes('<t>Статус транзакции</t>') && sh(1).includes('<t>Кошелёк пользователя</t>'), sh(1).slice(0, 600));
+    check('транзакция и её статус есть только у тикета с транзакцией',
+      sh(2).includes('<v>24085716901</v>') && sh(2).includes('<t>Approved</t>') && !sh(1).includes('<t>OK</t>'), sh(2));
+    check('кошелёк с ведущим нулём — текстом, ноль на месте', sh(1).includes('<t>01080969968</t>') && !sh(1).includes('<v>1080969968</v>'), sh(1));
+    check('Agent\'s files в файле: «пусто» и «1 файл»', sh(1).includes('<t>пусто</t>') && sh(2).includes('<t>1 файл</t>'), sh(2));
+
+    // Первая проверка сама нажала Apply у фильтров (подхватить запрос) — стенд при
+    // пустом поле Ticket ID очищает таблицу; оператор вывел тикеты на экран снова
+    site.onScreen = ['19999999', ids[0], ids[1]];
+    page.renderTable();
     const r2 = await openReport('screen');
     check('по экрану: проверены 3 тикета экрана', /Проверено: 3 \(тикеты на экране\)/.test(r2.text) && /Agent's files заполнено: 1/.test(r2.text), r2.text);
   },
