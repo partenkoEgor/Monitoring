@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.20
+// @version      0.21
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -800,6 +800,16 @@
         // Колонка Agent's files — для кнопки проверки (с 0.20). undefined —
         // поля в ответе нет вовсе: это не «пусто», а «не знаю».
         agentFiles: 'documentsExternal' in r ? (r.documentsExternal == null ? '' : String(r.documentsExternal)) : undefined,
+        // Для файла Excel проверки Agent's files (с 0.21)
+        country: String(r.nameCountry == null ? '' : r.nameCountry).trim(),
+        userId: r.idUser == null ? '' : String(r.idUser).trim(),
+        subagent: String(r.nameSubagent == null ? '' : r.nameSubagent).trim(),
+        // Колонка Transaction status таблицы — поле status; на всякий случай
+        // запасное transactionStatusName
+        txStatus: String(r.status || r.transactionStatusName || '').trim(),
+        department: String(r.department == null ? '' : r.department).trim(),
+        agentWallet: String(r.walletAccountNumber == null ? '' : r.walletAccountNumber).trim(),
+        userWallet: String(r.numberWallet == null ? '' : r.numberWallet).trim(),
       }))
       .filter((r) => r.ticketId !== '');
     return { kind: 'ok', rows, hasMore: !!(json.otherData && json.otherData.hasMore) };
@@ -5691,11 +5701,12 @@
   // Номера, состоящие только из цифр, пишем числом с форматом «0»: так Excel
   // не ставит зелёные треугольники «число как текст» и не превращает длинный
   // номер в 2,39E+10. Дольше 15 цифр Excel число не удержит — такое и всё
-  // нецифровое пишем текстом.
+  // нецифровое пишем текстом. Номер с ведущим нулём (кошельки вида
+  // 01080969968) тоже текстом: числом он потерял бы этот ноль.
   function xlsxCell(ref, value, style) {
     const v = value == null ? '' : String(value);
     if (v === '') return `<c r="${ref}" s="${style.text}"/>`;
-    if (/^\d{1,15}$/.test(v)) return `<c r="${ref}" s="${style.number}"><v>${v}</v></c>`;
+    if (/^(0|[1-9]\d{0,14})$/.test(v)) return `<c r="${ref}" s="${style.number}"><v>${v}</v></c>`;
     return `<c r="${ref}" s="${style.text}" t="inlineStr"><is><t>${xmlEscape(v)}</t></is></c>`;
   }
 
@@ -5795,6 +5806,148 @@
       { name: 'xl/worksheets/sheet1.xml', text: sheet },
       { name: 'xl/styles.xml', text: styles },
     ]);
+  }
+
+  // Буква колонки Excel по номеру с нуля: 0 → A, 25 → Z, 26 → AA
+  function xlsxColumn(n) {
+    let out = '';
+    for (let i = n + 1; i > 0; i = Math.floor((i - 1) / 26)) {
+      out = String.fromCharCode(65 + ((i - 1) % 26)) + out;
+    }
+    return out;
+  }
+
+  // Имя листа по правилам Excel: до 31 символа, без []:*?/\ и уникальное
+  function xlsxSheetNames(names) {
+    const used = new Set();
+    return names.map((raw) => {
+      const base = (String(raw || '').replace(/[\[\]:*?\/\\]/g, ' ').replace(/\s+/g, ' ').trim() || 'Без страны')
+        .slice(0, 31)
+        .replace(/^'+|'+$/g, '') || 'Лист';
+      let name = base;
+      for (let k = 2; used.has(name.toLowerCase()); k++) {
+        const tail = ` (${k})`;
+        name = base.slice(0, 31 - tail.length) + tail;
+      }
+      used.add(name.toLowerCase());
+      return name;
+    });
+  }
+
+  // Книга из нескольких листов: [{ name, header: [...], widths: [...], rows: [[...], ...] }].
+  // Шапка жирная и закреплена, на шапке автофильтр. Стили — как у файла дублей.
+  function buildSheetsXlsx(sheets) {
+    const style = { header: 1, number: 2, text: 3 };
+    const names = xlsxSheetNames(sheets.map((sh) => sh.name));
+    const sheetXml = sheets.map((sh) => {
+      const lastCol = xlsxColumn(Math.max(0, sh.header.length - 1));
+      const rows = [
+        `<row r="1">${sh.header.map((h, c) => xlsxCell(`${xlsxColumn(c)}1`, h, { text: style.header })).join('')}</row>`,
+        ...sh.rows.map(
+          (row, i) =>
+            `<row r="${i + 2}">${row.map((v, c) => xlsxCell(`${xlsxColumn(c)}${i + 2}`, v, style)).join('')}</row>`
+        ),
+      ];
+      const cols = (sh.widths || [])
+        .map((w, c) => `<col min="${c + 1}" max="${c + 1}" width="${w}" customWidth="1"/>`)
+        .join('');
+      return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+        '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>' +
+        (cols ? `<cols>${cols}</cols>` : '') +
+        `<sheetData>${rows.join('')}</sheetData>` +
+        `<autoFilter ref="A1:${lastCol}${sh.rows.length + 1}"/>` +
+        '</worksheet>'
+      );
+    });
+    const styles =
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>' +
+      '<font><b/><sz val="11"/><name val="Calibri"/></font></fonts>' +
+      '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>' +
+      '<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border>' +
+      '<border><left style="thin"/><right style="thin"/><top style="thin"/><bottom style="thin"/><diagonal/></border></borders>' +
+      '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+      '<cellXfs count="4">' +
+      '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
+      '<xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1"/>' +
+      '<xf numFmtId="1" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"/>' +
+      '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/>' +
+      '</cellXfs>' +
+      '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
+      '</styleSheet>';
+    const ws = (i) => `xl/worksheets/sheet${i + 1}.xml`;
+    return buildZip([
+      {
+        name: '[Content_Types].xml',
+        text:
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+          '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+          '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+          '<Default Extension="xml" ContentType="application/xml"/>' +
+          '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+          sheets
+            .map((_, i) => `<Override PartName="/${ws(i)}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`)
+            .join('') +
+          '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
+          '</Types>',
+      },
+      {
+        name: '_rels/.rels',
+        text:
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+          '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+          '</Relationships>',
+      },
+      {
+        name: 'xl/workbook.xml',
+        text:
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+          '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+          'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
+          names.map((n, i) => `<sheet name="${xmlEscape(n)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('') +
+          '</sheets>' +
+          // Автофильтру Excel нужно скрытое имя на каждом листе
+          '<definedNames>' +
+          sheets
+            .map(
+              (sh, i) =>
+                `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">` +
+                `'${xmlEscape(names[i].replace(/'/g, "''"))}'!$A$1:$${xlsxColumn(Math.max(0, sh.header.length - 1))}$${sh.rows.length + 1}` +
+                '</definedName>'
+            )
+            .join('') +
+          '</definedNames></workbook>',
+      },
+      {
+        name: 'xl/_rels/workbook.xml.rels',
+        text:
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+          '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          sheets
+            .map(
+              (_, i) =>
+                `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`
+            )
+            .join('') +
+          `<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>` +
+          '</Relationships>',
+      },
+      ...sheetXml.map((text, i) => ({ name: ws(i), text })),
+      { name: 'xl/styles.xml', text: styles },
+    ]);
+  }
+
+  function stampedFileName(prefix) {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return (
+      `${prefix}_${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+      `_${pad(d.getHours())}-${pad(d.getMinutes())}.xlsx`
+    );
   }
 
   function duplicatesFileName() {
@@ -6085,7 +6238,55 @@
     if (missing.length > 0) {
       blocks.push({ label: `Нет колонки в ответе (${missing.length}) — Ticket ID:`, text: missing.join('\n') });
     }
-    showReportWindow(lines.join('\n'), blocks, {});
+    // Файл Excel: все найденные сайтом тикеты, по листу на страну
+    const found = ids.filter((id) => rows.has(id));
+    const filesNote = (row) => {
+      const f = parseAgentFiles(row.agentFiles);
+      if (f.state === 'empty') return 'пусто';
+      if (f.state === 'missing') return 'нет данных';
+      return `${f.count} ${pluralRu(f.count, 'файл', 'файла', 'файлов')}`;
+    };
+    const byCountry = new Map();
+    found.forEach((id) => {
+      const row = rows.get(id);
+      const country = row.country || 'Без страны';
+      if (!byCountry.has(country)) byCountry.set(country, []);
+      byCountry.get(country).push([
+        id,
+        row.userId,
+        row.subagent,
+        row.transactionId,
+        // Статус — только когда транзакция в тикете есть
+        row.transactionId ? row.txStatus : '',
+        row.department,
+        row.agentWallet,
+        row.userWallet,
+        filesNote(row),
+      ]);
+    });
+    const countries = [...byCountry.keys()].sort((a, b) => a.localeCompare(b));
+    const options = {};
+    if (found.length > 0) {
+      options.download = {
+        label:
+          `Скачать Excel (${found.length} ${pluralRu(found.length, 'тикет', 'тикета', 'тикетов')}, ` +
+          `${countries.length} ${pluralRu(countries.length, 'страна', 'страны', 'стран')})`,
+        fileName: () => stampedFileName('agents-files'),
+        build: () =>
+          buildSheetsXlsx(
+            countries.map((country) => ({
+              name: country,
+              header: [
+                'Ticket ID', 'User ID', 'Субагент', 'Transaction ID', 'Статус транзакции',
+                'Департамент', 'Кошелёк агента', 'Кошелёк пользователя', "Agent's files",
+              ],
+              widths: [14, 14, 32, 18, 18, 22, 24, 24, 14],
+              rows: byCountry.get(country),
+            }))
+          ),
+      };
+    }
+    showReportWindow(lines.join('\n'), blocks, options);
   }
 
   function showReportWindow(reportText, copyBlocks, options) {
@@ -6153,6 +6354,28 @@
           }
         });
         footer.appendChild(downloadBtn);
+      }
+
+      // Любой другой файл Excel к отчёту: { label, fileName, build: () => Blob }
+      const download = options && options.download;
+      if (download) {
+        const fileBtn = document.createElement('button');
+        fileBtn.className = 'bulk-approve-beta-report-download';
+        fileBtn.textContent = download.label;
+        fileBtn.style.cssText = [
+          'padding:8px 20px', 'border:none', 'border-radius:4px',
+          'background:#E8590C', 'color:#fff', 'font-size:14px', 'font-weight:600',
+          'cursor:pointer', 'box-shadow:0 2px 6px rgba(232,89,12,.4)',
+        ].join(';');
+        fileBtn.addEventListener('click', () => {
+          try {
+            downloadBlob(download.build(), download.fileName());
+          } catch (e) {
+            console.error('[BulkApproveBETA] Не удалось собрать файл Excel:', e);
+            alert('Не удалось собрать файл Excel — подробности в консоли (F12). Данные есть в блоках для копирования ниже.');
+          }
+        });
+        footer.appendChild(fileBtn);
       }
 
       const closeBtn = document.createElement('button');

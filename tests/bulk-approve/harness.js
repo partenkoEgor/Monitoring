@@ -227,6 +227,13 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
           const row = {
             idTicket: Number(id), nameExternalStatus: t.externalStatus,
             idTransaction: t.txId || null, idTypePayment: '1',
+            idUser: t.userId || 1810634943,
+            nameCountry: t.country || 'Algeria',
+            nameSubagent: t.subagent || 'Miruca BaridiMob Algeria',
+            department: 'Mena Leads 1X',
+            walletAccountNumber: '00799999004063893970',
+            numberWallet: t.userWallet || '01080969968',
+            status: t.txId ? (t.txStatusName || 'OK') : '',
             // Agent's files — HTML-ссылками, как колонка файлов на сайте
             documentsExternal: (t.agentFiles || []).map((f) =>
               `<a href='/admin/amazon/?type=6&url=${encodeURIComponent(f)}' target='_blank'>${f}</a>`).join('<br>'),
