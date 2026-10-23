@@ -571,6 +571,49 @@ const scenarios = {
     await new Promise((res) => setTimeout(res, 60));
     check('сохранение ушло на сервер', page.site.saves.length === 1, JSON.stringify(page.site.saves));
   },
+
+  async 25() {
+    console.log("\n[25] Проверка Agent's files — только читает, делит на пусто/заполнено (0.20)");
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids } = makeTickets(6);
+    tickets[ids[1]].agentFiles = ['BTDocuments/1/PaymentReferences/a1.png'];
+    tickets[ids[3]].agentFiles = ['BTDocuments/1/x/b1.png', 'BTDocuments/1/x/b2.pdf'];
+    const behaviour = { listApi: true, hiddenFromFilter: [ids[4]], omitAgentFiles: new Set([ids[5]]) };
+    const page = createPage({ tickets, onScreen: ['19999999', ids[0], ids[1]], behaviour });
+    const { d, w, site, prefix } = page;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const waitFor = async (fn) => { for (let i = 0; i < 500; i++) { const v = fn(); if (v) return v; await sleep(10); } return null; };
+    const openReport = async (clickWhat, text) => {
+      [...d.querySelectorAll('button')].find((b) => b.textContent === "BETA Проверка Agent's files").click();
+      const ov = await waitFor(() => d.querySelector(`.${prefix}-check-overlay`));
+      if (text !== undefined) ov.querySelector('textarea').value = text;
+      ov.querySelector(`.${prefix}-check-${clickWhat}`).click();
+      const rep = await waitFor(() => d.querySelector(`.${prefix}-report-overlay`));
+      const out = {
+        text: rep.querySelector(`.${prefix}-report-text`).textContent,
+        blocks: [...rep.querySelectorAll(`.${prefix}-report-copy`)].map((a) => ({ label: a.previousElementSibling.textContent, text: a.value })),
+      };
+      w.confirm = () => true;
+      [...rep.querySelectorAll('button')].find((b) => b.textContent === 'Закрыть').click();
+      return out;
+    };
+
+    const r = await openReport('list', ids.join('\n'));
+    check('сводка: пусто 2, заполнено 2', /Agent's files пусто: 2/.test(r.text) && /Agent's files заполнено: 2/.test(r.text), r.text);
+    check('сводка: сайт не нашёл 1', /сайт не нашёл по фильтру: 1/.test(r.text), r.text);
+    check('сводка: нет колонки — не «пусто», а отдельно', /колонки Agent's files нет в ответе сайта: 1/.test(r.text), r.text);
+    const emptyBlock = r.blocks.find((b) => /ПУСТО/.test(b.label));
+    // пусто: ids[0], ids[2] (в ids[4] сайт не нашёл, у ids[5] нет колонки) — плюс ничего лишнего
+    check('блок «пусто» — только тикеты с пустой колонкой', emptyBlock && emptyBlock.text === `${ids[0]}\n${ids[2]}`,
+      emptyBlock && emptyBlock.text);
+    const filledBlock = r.blocks.find((b) => /заполнено/.test(b.label));
+    check('блок «заполнено» — число и имена файлов',
+      filledBlock && filledBlock.text === `${ids[1]}\t1\ta1.png\n${ids[3]}\t2\tb1.png, b2.pdf`, filledBlock && filledBlock.text);
+    check('ничего не открывалось и не сохранялось', site.modalOpens.length === 0 && site.saves.length === 0);
+
+    const r2 = await openReport('screen');
+    check('по экрану: проверены 3 тикета экрана', /Проверено: 3 \(тикеты на экране\)/.test(r2.text) && /Agent's files заполнено: 1/.test(r2.text), r2.text);
+  },
 };
 
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map((x) => x.trim())) : null;

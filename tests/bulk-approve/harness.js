@@ -87,6 +87,8 @@ function processingDate(hoursAgo) {
 //     saveTamper(id, fields): поправить поля запроса сохранения перед
 //       отправкой — как если бы страница отправила не то
 //     saveRejected(id): сервер отвечает на сохранение success: false
+//     omitAgentFiles: Set тикетов, у которых в ответе списка нет поля
+//       documentsExternal (колонки Agent's files) вовсе
 function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, behaviour = {}, configOverrides } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
     <form id="filter_form">
@@ -222,10 +224,15 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
         count: found.length,
         data: slice.map((id) => {
           const t = site.tickets.get(id);
-          return {
+          const row = {
             idTicket: Number(id), nameExternalStatus: t.externalStatus,
             idTransaction: t.txId || null, idTypePayment: '1',
+            // Agent's files — HTML-ссылками, как колонка файлов на сайте
+            documentsExternal: (t.agentFiles || []).map((f) =>
+              `<a href='/admin/amazon/?type=6&url=${encodeURIComponent(f)}' target='_blank'>${f}</a>`).join('<br>'),
           };
+          if (site.behaviour.omitAgentFiles && site.behaviour.omitAgentFiles.has(id)) delete row.documentsExternal;
+          return row;
         }),
         otherData: { hasMore: pageNo * per < found.length },
         success: true,
