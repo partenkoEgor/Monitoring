@@ -599,6 +599,7 @@ const scenarios = {
     // Комментарий со служебным символом и переносом строки — файл должен открыться
     tickets[ids[0]].insideComment = 'проверить\u0007 вручную\nвторая строка';
     tickets[ids[3]].country = 'Iraq/Kurdistan';
+    tickets[ids[2]].subagent = 'Vodafone XC40';
     tickets[ids[5]].country = 'Egypt';
     tickets[ids[3]].agentFiles = ['BTDocuments/1/x/b1.png', 'BTDocuments/1/x/b2.pdf'];
     const behaviour = { listApi: true, hiddenFromFilter: [ids[4]], omitAgentFiles: new Set([ids[5]]) };
@@ -662,7 +663,8 @@ const scenarios = {
     check('листы: Algeria, Egypt, Iraq Kurdistan (без «/»)',
       wb && /<sheet name="Algeria" sheetId="1"/.test(wb) && /<sheet name="Egypt" sheetId="2"/.test(wb) && /<sheet name="Iraq Kurdistan" sheetId="3"/.test(wb), wb);
     const sh = (n) => (r.xlsx && r.xlsx[`xl/worksheets/sheet${n}.xml`]) || '';
-    const rowsOf = (xml) => (xml.match(/<row r="/g) || []).length - 1;
+    // Строки основной таблицы — по ячейкам колонки A (сводка справа может быть длиннее)
+    const rowsOf = (xml) => (xml.match(/<c r="A\d+"/g) || []).length - 1;
     check('строк по листам: 2, 2, 1', rowsOf(sh(1)) === 2 && rowsOf(sh(2)) === 2 && rowsOf(sh(3)) === 1,
       [rowsOf(sh(1)), rowsOf(sh(2)), rowsOf(sh(3))].join(','));
     check('шапка', sh(1).includes('<t>Субагент</t>') && sh(1).includes('<t>Статус транзакции</t>') && sh(1).includes('<t>Кошелёк пользователя</t>'), sh(1).slice(0, 600));
@@ -677,6 +679,19 @@ const scenarios = {
     check('кошелёк с ведущим нулём — текстом, ноль на месте', sh(1).includes('<t>01080969968</t>') && !sh(1).includes('<v>1080969968</v>'), sh(1));
     check('Agent\'s files в файле: «пусто» и «1 файл»', sh(1).includes('<t>пусто</t>') && sh(2).includes('<t>1 файл</t>'), sh(2));
 
+    // Сводка по субагентам справа, через один пустой столбец (L)
+    const s1 = sh(1); // Algeria: ids[0] — Miruca, ids[2] — Vodafone
+    check('сводка: шапка в M1:N1 жирная, столбец L пустой',
+      /<c r="M1" s="1" t="inlineStr"><is><t>Субагент<\/t><\/is><\/c><c r="N1" s="1" t="inlineStr"><is><t>Тикетов<\/t>/.test(s1) &&
+      !/<c r="L\d+"/.test(s1), s1.slice(0, 1500));
+    check('сводка: субагенты с формулами точного совпадения по колонке D',
+      s1.includes('<c r="M2" s="3" t="inlineStr"><is><t>Miruca BaridiMob Algeria</t></is></c><c r="N2" s="2"><f>SUMPRODUCT(--($D$2:$D$3=M2))</f><v>1</v></c>') &&
+      s1.includes('<t>Vodafone XC40</t></is></c><c r="N3" s="2"><f>SUMPRODUCT(--($D$2:$D$3=M3))</f><v>1</v></c>'), s1);
+    check('сводка: «Итого» жирным и суммой', /<c r="M4" s="1" t="inlineStr"><is><t>Итого<\/t><\/is><\/c><c r="N4" s="2"><f>SUM\(N2:N3\)<\/f><v>2<\/v>/.test(s1), s1);
+    check('автофильтр — только на основной таблице', s1.includes('<autoFilter ref="A1:K3"/>'), s1.slice(-300));
+    check('сводка Egypt: один субагент, 2 тикета, сортировка по убыванию',
+      sh(2).includes('<f>SUMPRODUCT(--($D$2:$D$3=M2))</f><v>2</v>') && /<t>Итого<\/t>.*<v>2<\/v>/.test(sh(2)), sh(2));
+
     // Второй файл — только «пусто» (ids[0], ids[2] — оба Algeria); без колонки (ids[5]) сюда не идёт
     const e = r.files.empty;
     check('кнопка «без файлов»: 2 тикета, 1 страна', e && e.label === 'Excel: без файлов (2 тикета, 1 страна)', e && e.label);
@@ -690,6 +705,7 @@ const scenarios = {
     check('без файлов: только «пусто», без чужих тикетов',
       (esh.match(/<t>пусто<\/t>/g) || []).length === 2 && !esh.includes('файл</t>') && !esh.includes('нет данных') &&
       esh.includes(`<v>${ids[0]}</v>`) && esh.includes(`<v>${ids[2]}</v>`), esh);
+    check('без файлов: та же сводка по субагентам', esh.includes('<t>Субагент</t>') && /<t>Итого<\/t>.*<v>2<\/v>/.test(esh), esh);
 
     // Первая проверка сама нажала Apply у фильтров (подхватить запрос) — стенд при
     // пустом поле Ticket ID очищает таблицу; оператор вывел тикеты на экран снова
