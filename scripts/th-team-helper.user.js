@@ -1,14 +1,20 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.38
-// @description  Двенадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (предыдущий статус для закрытых, Admin username для тикетов In progress и In progress (M)), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке и обмен сохранёнными фильтрами с коллегами через текстовый код. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @version      1.39
+// @description  Двенадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (предыдущий статус для закрытых, Admin username для тикетов In progress и In progress (M)), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке и обмен сохранёнными фильтрами с коллегами через текстовый код. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
 // @match        https://th-managment.com/en/admin/backoffice/ExtendedPaymentRequestList*
 // @match        https://my-managment.com/en/admin/backoffice/ExtendedPaymentRequestList*
 // @match        https://managment.io/en/admin/backoffice/ExtendedPaymentRequestList*
+// @match        https://th-managment.com/en/admin/report/requestwithdrawal*
+// @match        https://my-managment.com/en/admin/report/requestwithdrawal*
+// @match        https://managment.io/en/admin/report/requestwithdrawal*
+// @match        https://th-managment.com/en/admin/report/requestrefill*
+// @match        https://my-managment.com/en/admin/report/requestrefill*
+// @match        https://managment.io/en/admin/report/requestrefill*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -56,6 +62,16 @@
       // Кнопка на заголовке столбца: копирует все значения столбца
       // с текущей страницы, по одному в строке
       columnCopy: true,
+    },
+
+    // ── Страницы отчётов ─────────────────────────────────────────────
+    // Отчёты по выводам и пополнениям (/admin/report/...). Остальные
+    // функции рассчитаны на список тикетов, поэтому здесь запускаются
+    // только перечисленные в features. Чтобы добавить функцию на эти
+    // страницы — дописать её имя (ключ из CONFIG.features).
+    reportPages: {
+      paths: ['/admin/report/requestwithdrawal', '/admin/report/requestrefill'],
+      features: ['filePreview'],
     },
 
     // ── Превью вложений ──────────────────────────────────────────────
@@ -4770,6 +4786,18 @@
     return store.get('feature:' + name, CONFIG.features[name] ? '1' : '0') === '1';
   }
 
+  function isReportPage() {
+    const path = window.location.pathname.toLowerCase();
+    return CONFIG.reportPages.paths.some(p => path.includes(p.toLowerCase()));
+  }
+
+  // Включена ли функция и нужна ли она на этой странице: на страницах
+  // отчётов запускаются только функции из CONFIG.reportPages.features
+  function shouldRun(name) {
+    if (!isFeatureEnabled(name)) return false;
+    return !isReportPage() || CONFIG.reportPages.features.includes(name);
+  }
+
   function initSettingsPanel() {
     addStyle('th-helper-settings-style', `
       #th-settings-btn {
@@ -5012,18 +5040,18 @@
 
   function start() {
     initSettingsPanel();
-    if (isFeatureEnabled('filePreview')) initFilePreview();
-    if (isFeatureEnabled('prevStatus')) initPrevStatus();
-    if (isFeatureEnabled('limitsFinder')) initLimitsFinder();
-    if (isFeatureEnabled('adminDirectory')) initAdminDirectory();
-    if (isFeatureEnabled('messengerId')) initMessengerId();
-    if (isFeatureEnabled('autoDateRange')) initAutoDateRange();
-    if (isFeatureEnabled('ticketCopy')) initTicketCopy();
-    if (isFeatureEnabled('commentTemplates')) initCommentTemplates();
-    if (isFeatureEnabled('fileButtons')) initFileButtons();
-    if (isFeatureEnabled('cellCopy')) initCellCopy();
-    if (isFeatureEnabled('filterShare')) initFilterShare();
-    if (isFeatureEnabled('columnCopy')) initColumnCopy();
+    if (shouldRun('filePreview')) initFilePreview();
+    if (shouldRun('prevStatus')) initPrevStatus();
+    if (shouldRun('limitsFinder')) initLimitsFinder();
+    if (shouldRun('adminDirectory')) initAdminDirectory();
+    if (shouldRun('messengerId')) initMessengerId();
+    if (shouldRun('autoDateRange')) initAutoDateRange();
+    if (shouldRun('ticketCopy')) initTicketCopy();
+    if (shouldRun('commentTemplates')) initCommentTemplates();
+    if (shouldRun('fileButtons')) initFileButtons();
+    if (shouldRun('cellCopy')) initCellCopy();
+    if (shouldRun('filterShare')) initFilterShare();
+    if (shouldRun('columnCopy')) initColumnCopy();
     log('Скрипт запущен на', window.location.pathname);
   }
 
