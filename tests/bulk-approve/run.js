@@ -595,6 +595,9 @@ const scenarios = {
     tickets[ids[1]].country = 'Egypt';
     tickets[ids[1]].txId = '24085716901';
     tickets[ids[1]].txStatusName = 'Approved';
+    tickets[ids[1]].insideComment = '24085716901';
+    // Комментарий со служебным символом и переносом строки — файл должен открыться
+    tickets[ids[0]].insideComment = 'проверить\u0007 вручную\nвторая строка';
     tickets[ids[3]].country = 'Iraq/Kurdistan';
     tickets[ids[5]].country = 'Egypt';
     tickets[ids[3]].agentFiles = ['BTDocuments/1/x/b1.png', 'BTDocuments/1/x/b2.pdf'];
@@ -658,6 +661,12 @@ const scenarios = {
     check('строк по листам: 2, 2, 1', rowsOf(sh(1)) === 2 && rowsOf(sh(2)) === 2 && rowsOf(sh(3)) === 1,
       [rowsOf(sh(1)), rowsOf(sh(2)), rowsOf(sh(3))].join(','));
     check('шапка', sh(1).includes('<t>Субагент</t>') && sh(1).includes('<t>Статус транзакции</t>') && sh(1).includes('<t>Кошелёк пользователя</t>'), sh(1).slice(0, 600));
+    check('шапка: External Status после Ticket ID, Inside comment перед Transaction ID',
+      /<t>Ticket ID<\/t>.*<t>External Status<\/t>.*<t>User ID<\/t>.*<t>Субагент<\/t>.*<t>Inside comment<\/t>.*<t>Transaction ID<\/t>/.test(sh(1)), sh(1).slice(0, 900));
+    check('External Status тикета в строке', sh(1).includes('<t>Approved (M)</t>'), sh(1));
+    check('Inside comment: номер — числом', sh(2).includes('<v>24085716901</v><') && (sh(2).match(/<v>24085716901<\/v>/g) || []).length === 2, sh(2));
+    check('Inside comment: служебный символ выкинут, перенос строки сохранён',
+      sh(1).includes('<t xml:space="preserve">проверить вручную\nвторая строка</t>') && !sh(1).includes('\u0007'), sh(1));
     check('транзакция и её статус есть только у тикета с транзакцией',
       sh(2).includes('<v>24085716901</v>') && sh(2).includes('<t>Approved</t>') && !sh(1).includes('<t>OK</t>'), sh(2));
     check('кошелёк с ведущим нулём — текстом, ноль на месте', sh(1).includes('<t>01080969968</t>') && !sh(1).includes('<v>1080969968</v>'), sh(1));

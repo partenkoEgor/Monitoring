@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.21
+// @version      0.22
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -810,6 +810,8 @@
         department: String(r.department == null ? '' : r.department).trim(),
         agentWallet: String(r.walletAccountNumber == null ? '' : r.walletAccountNumber).trim(),
         userWallet: String(r.numberWallet == null ? '' : r.numberWallet).trim(),
+        // Inside comment (с 0.22)
+        insideComment: String(r.commentSupport == null ? '' : r.commentSupport).trim(),
       }))
       .filter((r) => r.ticketId !== '');
     return { kind: 'ok', rows, hasMore: !!(json.otherData && json.otherData.hasMore) };
@@ -5707,7 +5709,13 @@
     const v = value == null ? '' : String(value);
     if (v === '') return `<c r="${ref}" s="${style.text}"/>`;
     if (/^(0|[1-9]\d{0,14})$/.test(v)) return `<c r="${ref}" s="${style.number}"><v>${v}</v></c>`;
-    return `<c r="${ref}" s="${style.text}" t="inlineStr"><is><t>${xmlEscape(v)}</t></is></c>`;
+    // Текст из тикета (комментарии) может нести служебные символы, которых
+    // XML не допускает: с ними Excel не откроет файл вовсе. Выкидываем их и
+    // режем по пределу ячейки Excel (32 767 символов).
+    const clean = v.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '').slice(0, 32767);
+    // Пробелы по краям и переносы строк Excel сохраняет только с этой пометкой
+    const keep = /^\s|\s$|\n/.test(clean) ? ' xml:space="preserve"' : '';
+    return `<c r="${ref}" s="${style.text}" t="inlineStr"><is><t${keep}>${xmlEscape(clean)}</t></is></c>`;
   }
 
   // Один лист: шапка, затем по две строки на дубль. Колонка A — наш тикет и
@@ -6253,8 +6261,10 @@
       if (!byCountry.has(country)) byCountry.set(country, []);
       byCountry.get(country).push([
         id,
+        row.externalStatus,
         row.userId,
         row.subagent,
+        row.insideComment,
         row.transactionId,
         // Статус — только когда транзакция в тикете есть
         row.transactionId ? row.txStatus : '',
@@ -6277,10 +6287,11 @@
             countries.map((country) => ({
               name: country,
               header: [
-                'Ticket ID', 'User ID', 'Субагент', 'Transaction ID', 'Статус транзакции',
-                'Департамент', 'Кошелёк агента', 'Кошелёк пользователя', "Agent's files",
+                'Ticket ID', 'External Status', 'User ID', 'Субагент', 'Inside comment',
+                'Transaction ID', 'Статус транзакции', 'Департамент', 'Кошелёк агента',
+                'Кошелёк пользователя', "Agent's files",
               ],
-              widths: [14, 14, 32, 18, 18, 22, 24, 24, 14],
+              widths: [14, 26, 14, 32, 30, 18, 18, 22, 24, 24, 14],
               rows: byCountry.get(country),
             }))
           ),
