@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.40
+// @version      1.41
 // @description  Двенадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто закрыл, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке и обмен сохранёнными фильтрами с коллегами через текстовый код. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -3340,8 +3340,11 @@
       return !!cell.textContent.trim();
     }
 
+    // table.rows, а не 'tbody tr': таблицу окна «История тикета» сайт
+    // собирает без <tbody> — строки лежат прямо в <table>, и поиск по
+    // tbody их не находил. Строки шапки отсеиваются ниже — в них <th>.
     function processCellsTable(table) {
-      table.querySelectorAll('tbody tr').forEach(row => {
+      Array.from(table.rows).forEach(row => {
         Array.from(row.children).forEach(cell => {
           if (cell.tagName !== 'TD' || cell.dataset.thCellCopyInjected) return;
           cell.dataset.thCellCopyInjected = '1';
