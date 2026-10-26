@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.39
-// @description  Двенадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (предыдущий статус для закрытых, Admin username для тикетов In progress и In progress (M)), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке и обмен сохранёнными фильтрами с коллегами через текстовый код. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @version      1.40
+// @description  Двенадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто закрыл, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке и обмен сохранёнными фильтрами с коллегами через текстовый код. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -35,8 +35,9 @@
     features: {
       // Превью вложений при наведении на ссылку в таблице + полноэкранный просмотр
       filePreview: true,
-      // Тултип на статусе: предыдущий статус для закрытых тикетов
-      // и Admin username для тикетов в работе
+      // Тултип на статусе: для закрытых тикетов — предыдущий статус и кто
+      // закрыл, для тикетов в работе — у кого в работе. Имя и отдел
+      // подтягиваются из справочника админов, если он включён
       prevStatus: true,
       // Поиск лимитов по странице Confluence при выделении текста
       limitsFinder: true,
@@ -96,7 +97,7 @@
       },
     },
 
-    // ── Предыдущий статус и кто в работе ─────────────────────────────
+    // ── Предыдущий статус, кто закрыл и кто в работе ─────────────────
     prevStatus: {
       // Для каких значений External Status показывать предыдущий статус
       // (в нижнем регистре). Сейчас — только закрытые тикеты. Чтобы
@@ -1180,7 +1181,7 @@
   }
 
   // ==================================================================
-  // 2. ТУЛТИП «ПРЕДЫДУЩИЙ СТАТУС» И «В РАБОТЕ У»
+  // 2. ТУЛТИП «ПРЕДЫДУЩИЙ СТАТУС», «СТАТУС ВЫСТАВИЛ» И «В РАБОТЕ У»
   // ==================================================================
 
   function initPrevStatus() {
@@ -1217,6 +1218,24 @@
         font-weight: 600;
         color: ${T.textStrong};
       }
+      #th-prevstatus-tt .th-pst-divider {
+        border: none;
+        border-top: .5px solid ${T.border};
+        margin: 6px 0;
+      }
+      #th-prevstatus-tt .th-pst-name {
+        color: ${T.text};
+        margin-top: 2px;
+      }
+      #th-prevstatus-tt .th-pst-dept {
+        color: ${T.textDim};
+        font-size: 10.5px;
+      }
+      #th-prevstatus-tt .th-pst-dim {
+        color: ${T.textDim};
+        font-style: italic;
+        margin-top: 2px;
+      }
     `);
 
     const tt = document.createElement('div');
@@ -1227,24 +1246,62 @@
     // Запись живёт CFG.cacheTtl — см. комментарий в CONFIG.
     const cache = new Map();
 
-    const LABELS = { prev: 'Предыдущий статус', inWork: 'В работе у' };
+    const LABELS = { prev: 'Предыдущий статус', setBy: 'Статус выставил', inWork: 'В работе у' };
 
-    function render(mode, valueHtml) {
-      tt.innerHTML =
-        `<div class="th-pst-label">${LABELS[mode]}</div>` +
-        `<div class="th-pst-value">${valueHtml}</div>`;
-    }
+    // Имя и отдел по логину — из справочника админов (общий загрузчик
+    // loadAdminDirectory, см. раздел 6). Тумблер «Справочник админов»
+    // отвечает за обращения к Confluence в обоих местах: выключен — в этой
+    // подсказке остаётся только логин.
+    const withNames = isFeatureEnabled('adminDirectory');
 
     function escapeHtml(s) {
       return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
-    // История идёт от новых к старым: находим запись о закрытии
-    // и берём следующую за ней — это и есть статус до закрытия.
-    function pickPrev(list) {
-      const idx = list.findIndex(r => TRIGGERS.has((r.nameExternalStatus || '').trim().toLowerCase()));
-      if (idx === -1 || idx + 1 >= list.length) return null;
-      return list[idx + 1].nameExternalStatus || '—';
+    function section(label, valueHtml) {
+      return `<div class="th-pst-label">${label}</div>` +
+        `<div class="th-pst-value">${valueHtml}</div>`;
+    }
+
+    // person: 'off' | 'loading' | 'none' | 'error' | { name, department }
+    function personHtml(person) {
+      if (!person || person === 'off') return '';
+      if (person === 'loading') return '<div class="th-pst-dim">Загрузка имени…</div>';
+      if (person === 'none') return '<div class="th-pst-dim">Нет в справочнике</div>';
+      if (person === 'error') return '<div class="th-pst-dim">Справочник недоступен</div>';
+      return `<div class="th-pst-name">${escapeHtml(person.name || '—')}</div>` +
+        (person.department ? `<div class="th-pst-dept">${escapeHtml(person.department)}</div>` : '');
+    }
+
+    // state: { mode, loading } | { mode, notFound } | { mode, prev, login, person }
+    function render(state) {
+      if (state.loading || state.notFound) {
+        tt.innerHTML = section(LABELS[state.mode], state.loading ? 'Загрузка…' : 'Не найдено');
+        return;
+      }
+      const who = section(state.mode === 'prev' ? LABELS.setBy : LABELS.inWork, escapeHtml(state.login)) +
+        personHtml(state.person);
+      tt.innerHTML = state.mode === 'prev'
+        ? section(LABELS.prev, state.prev === null ? 'Не найдено' : escapeHtml(state.prev)) +
+          '<hr class="th-pst-divider">' + who
+        : who;
+    }
+
+    // История идёт от новых к старым. Самая свежая запись о закрытии и
+    // идущие сразу за ней записи с ТЕМ ЖЕ статусом — одна серия (тикет
+    // сохраняли повторно, не меняя статуса). Последняя запись серии —
+    // момент, когда статус выставили: её автор и есть «кто закрыл», а
+    // запись сразу после серии — статус до закрытия.
+    function pickClosed(list) {
+      const statusOf = r => (r.nameExternalStatus || '').trim().toLowerCase();
+      const top = list.findIndex(r => TRIGGERS.has(statusOf(r)));
+      if (top === -1) return null;
+      let end = top;
+      while (end + 1 < list.length && statusOf(list[end + 1]) === statusOf(list[top])) end++;
+      return {
+        prev: end + 1 < list.length ? (list[end + 1].nameExternalStatus || '—') : null,
+        login: String(list[end].adminProcessedLogin || '').trim(),
+      };
     }
 
     // Кто в работе — Admin username из самой свежей записи (верхняя
@@ -1252,7 +1309,7 @@
     function pickInWork(list) {
       const latest = list[0];
       if (!latest) return null;
-      return String(latest.adminProcessedLogin || '').trim() || 'Не указан';
+      return { login: String(latest.adminProcessedLogin || '').trim() };
     }
 
     function fetchHistory(ticketId) {
@@ -1291,6 +1348,10 @@
 
     let hideTimer = null;
     let currentTicket = null;
+    // Последняя позиция курсора — подсказка дорисовывается асинхронно
+    // (история, потом справочник) и меняет размер
+    let lastX = 0;
+    let lastY = 0;
 
     document.addEventListener('mouseover', e => {
       const td = e.target instanceof Element ? e.target.closest('td') : null;
@@ -1315,25 +1376,48 @@
 
       clearTimeout(hideTimer);
       currentTicket = ticketId;
+      lastX = e.clientX;
+      lastY = e.clientY;
 
-      render(mode, 'Загрузка…');
+      render({ mode, loading: true });
       tt.classList.add('show');
-      placeNearCursor(tt, e.clientX, e.clientY);
+      placeNearCursor(tt, lastX, lastY);
 
       fetchHistory(ticketId).then(list => {
         // Пока грузилось, мышь могла уйти на другой тикет
         if (currentTicket !== ticketId) return;
-        const result = list && (mode === 'prev' ? pickPrev(list) : pickInWork(list));
-        if (result) {
-          render(mode, escapeHtml(result));
-        } else {
-          render(mode, 'Не найдено');
+        const picked = list && (mode === 'prev' ? pickClosed(list) : pickInWork(list));
+        if (!picked) {
+          render({ mode, notFound: true });
+          placeNearCursor(tt, lastX, lastY);
+          return;
         }
-        placeNearCursor(tt, e.clientX, e.clientY);
+        const login = picked.login;
+        const state = {
+          mode,
+          prev: picked.prev,
+          login: login || 'Не указан',
+          person: login && withNames ? 'loading' : 'off',
+        };
+        render(state);
+        placeNearCursor(tt, lastX, lastY);
+        if (state.person !== 'loading') return;
+
+        // Справочник грузится один раз на страницу; пока он едет, логин
+        // уже виден, имя дорисуется следом
+        loadAdminDirectory()
+          .then(map => { state.person = map.get(login) || 'none'; }, () => { state.person = 'error'; })
+          .then(() => {
+            if (currentTicket !== ticketId) return;
+            render(state);
+            placeNearCursor(tt, lastX, lastY);
+          });
       });
     });
 
     document.addEventListener('mousemove', e => {
+      lastX = e.clientX;
+      lastY = e.clientY;
       if (tt.classList.contains('show')) placeNearCursor(tt, e.clientX, e.clientY);
     });
 
@@ -1347,7 +1431,8 @@
     });
 
     log('Тултип «Предыдущий статус» включён для статусов:', CFG.triggers.join(', '),
-      '| «В работе у» —', (CFG.inWorkTriggers || []).join(', '));
+      '| «В работе у» —', (CFG.inWorkTriggers || []).join(', '),
+      '| имена из справочника:', withNames ? 'да' : 'нет (справочник выключен)');
   }
 
   // ==================================================================
@@ -2205,6 +2290,96 @@
   // 6. СПРАВОЧНИК АДМИНОВ
   // ==================================================================
 
+  // ── Загрузка справочника — общая ──────────────────────────────────
+  // Справочником пользуются две функции: подсказка в окне «История
+  // тикета» (initAdminDirectory) и подсказка на статусе (initPrevStatus,
+  // имя того, кто закрыл или у кого тикет в работе). Страница Confluence
+  // грузится один раз на страницу сайта для обеих, дальше все наведения —
+  // мгновенный поиск в уже загруженной карте.
+
+  // Страница на другом домене — нужен GM_xmlhttpRequest вместе с @connect
+  // в шапке. Тот же грант уже используется поиском лимитов, новый не
+  // требуется. Запасной путь через fetch — для отладки вне Tampermonkey.
+  function requestAdminDirectoryPage(url) {
+    return new Promise((resolve, reject) => {
+      if (typeof GM_xmlhttpRequest === 'function') {
+        GM_xmlhttpRequest({
+          method: 'GET',
+          url: url,
+          timeout: CONFIG.adminDirectory.timeout,
+          onload: r => resolve(r.responseText),
+          onerror: () => reject(new Error('network')),
+          ontimeout: () => reject(new Error('timeout')),
+        });
+        return;
+      }
+      fetch(url, { credentials: 'include' })
+        .then(r => r.text())
+        .then(resolve, reject);
+    });
+  }
+
+  // Ожидаемый формат страницы: одна таблица, три столбца в фиксированном
+  // порядке — логин | имя | отдел. Столбцы читаются по позиции, а не
+  // по названию заголовка, поэтому шапку таблицы можно оформить как угодно.
+  function collectDirectoryTables(doc) {
+    const tables = Array.from(doc.querySelectorAll('table'));
+    // HTML-макрос Confluence вставляет вложенный HTML как
+    // <iframe srcdoc="...">, а не как обычные узлы в DOM страницы —
+    // в исходнике это просто экранированная строка-атрибут, её нужно
+    // распарсить отдельным DOMParser'ом, чтобы добраться до таблицы.
+    doc.querySelectorAll('iframe[srcdoc]').forEach(frame => {
+      const srcdoc = frame.getAttribute('srcdoc');
+      if (!srcdoc) return;
+      const inner = new DOMParser().parseFromString(srcdoc, 'text/html');
+      tables.push(...collectDirectoryTables(inner));
+    });
+    return tables;
+  }
+
+  function parseAdminDirectory(doc) {
+    const map = new Map();
+    // Страница Confluence не гарантированно содержит только одну таблицу
+    // (макросы, панели свойств и т.п. могут добавить свои перед таблицей
+    // с данными) — читаем все и сливаем в одну карту.
+    collectDirectoryTables(doc).forEach(table => {
+      table.querySelectorAll('tr').forEach(row => {
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 3) return; // строка заголовка обычно из th, сюда не попадёт
+        const login = cells[0].textContent.trim();
+        if (!login) return;
+        map.set(login, {
+          name: cells[1].textContent.trim(),
+          department: cells[2].textContent.trim(),
+        });
+      });
+    });
+
+    return map;
+  }
+
+  // Promise<Map<логин, { name, department }>>. При ошибке кэш сбрасывается —
+  // следующее наведение попробует ещё раз.
+  let adminDirPromise = null;
+  function loadAdminDirectory() {
+    if (!adminDirPromise) {
+      adminDirPromise = requestAdminDirectoryPage(CONFIG.adminDirectory.pageUrl)
+        .then(html => {
+          const map = parseAdminDirectory(new DOMParser().parseFromString(html, 'text/html'));
+          if (map.size === 0) {
+            log('Справочник админов загружен, но не удалось разобрать ни одной строки — проверьте разметку страницы Confluence');
+          }
+          return map;
+        })
+        .catch(err => {
+          adminDirPromise = null;
+          log('Не удалось загрузить справочник админов', err);
+          throw err;
+        });
+    }
+    return adminDirPromise;
+  }
+
   function initAdminDirectory() {
     const CFG = CONFIG.adminDirectory;
 
@@ -2266,89 +2441,6 @@
       return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
-    // Страница на другом домене — нужен GM_xmlhttpRequest вместе с @connect
-    // в шапке. Тот же грант уже используется поиском лимитов, новый не
-    // требуется. Запасной путь через fetch — для отладки вне Tampermonkey.
-    function requestPage(url) {
-      return new Promise((resolve, reject) => {
-        if (typeof GM_xmlhttpRequest === 'function') {
-          GM_xmlhttpRequest({
-            method: 'GET',
-            url: url,
-            timeout: CFG.timeout,
-            onload: r => resolve(r.responseText),
-            onerror: () => reject(new Error('network')),
-            ontimeout: () => reject(new Error('timeout')),
-          });
-          return;
-        }
-        fetch(url, { credentials: 'include' })
-          .then(r => r.text())
-          .then(resolve, reject);
-      });
-    }
-
-    // Ожидаемый формат страницы: одна таблица, три столбца в фиксированном
-    // порядке — логин | имя | отдел. Столбцы читаются по позиции, а не
-    // по названию заголовка, поэтому шапку таблицы можно оформить как угодно.
-    function collectTables(doc) {
-      const tables = Array.from(doc.querySelectorAll('table'));
-      // HTML-макрос Confluence вставляет вложенный HTML как
-      // <iframe srcdoc="...">, а не как обычные узлы в DOM страницы —
-      // в исходнике это просто экранированная строка-атрибут, её нужно
-      // распарсить отдельным DOMParser'ом, чтобы добраться до таблицы.
-      doc.querySelectorAll('iframe[srcdoc]').forEach(frame => {
-        const srcdoc = frame.getAttribute('srcdoc');
-        if (!srcdoc) return;
-        const inner = new DOMParser().parseFromString(srcdoc, 'text/html');
-        tables.push(...collectTables(inner));
-      });
-      return tables;
-    }
-
-    function parseDirectory(doc) {
-      const map = new Map();
-      // Страница Confluence не гарантированно содержит только одну таблицу
-      // (макросы, панели свойств и т.п. могут добавить свои перед таблицей
-      // с данными) — читаем все и сливаем в одну карту.
-      collectTables(doc).forEach(table => {
-        table.querySelectorAll('tr').forEach(row => {
-          const cells = row.querySelectorAll('td');
-          if (cells.length < 3) return; // строка заголовка обычно из th, сюда не попадёт
-          const login = cells[0].textContent.trim();
-          if (!login) return;
-          map.set(login, {
-            name: cells[1].textContent.trim(),
-            department: cells[2].textContent.trim(),
-          });
-        });
-      });
-
-      return map;
-    }
-
-    // Справочник грузится один раз за сессию, дальше все наведения — это
-    // мгновенный поиск в уже загруженной карте, без обращений к серверу.
-    let dirPromise = null;
-    function loadDirectory() {
-      if (!dirPromise) {
-        dirPromise = requestPage(CFG.pageUrl)
-          .then(html => {
-            const map = parseDirectory(new DOMParser().parseFromString(html, 'text/html'));
-            if (map.size === 0) {
-              log('Справочник админов загружен, но не удалось разобрать ни одной строки — проверьте разметку страницы Confluence');
-            }
-            return map;
-          })
-          .catch(err => {
-            dirPromise = null;
-            log('Не удалось загрузить справочник админов', err);
-            throw err;
-          });
-      }
-      return dirPromise;
-    }
-
     function render(login, state, entry) {
       const header = `<div class="th-adm-label">Admin username</div>`
         + `<div class="th-adm-login">${escapeHtml(login)}</div>`
@@ -2392,7 +2484,7 @@
       tt.classList.add('show');
       placeNearCursor(tt, e.clientX, e.clientY);
 
-      loadDirectory().then(map => {
+      loadAdminDirectory().then(map => {
         // Пока грузилось, мышь могла уйти на другой логин
         if (currentLogin !== login) return;
         const entry = map.get(login);
@@ -4766,7 +4858,7 @@
   // Порядок и подписи держим синхронно с CONFIG.features
   const FEATURE_LABELS = {
     filePreview: 'Превью вложений',
-    prevStatus: 'Предыдущий статус и кто в работе',
+    prevStatus: 'Предыдущий статус, кто закрыл и кто в работе',
     limitsFinder: 'Поиск лимитов в Confluence',
     adminDirectory: 'Справочник админов',
     messengerId: 'Автоподстановка Reddy ID',
