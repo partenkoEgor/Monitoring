@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.41
-// @description  Двенадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто закрыл, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке и обмен сохранёнными фильтрами с коллегами через текстовый код. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @version      1.42
+// @description  Тринадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто закрыл, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке, обмен сохранёнными фильтрами с коллегами через текстовый код и значок у Transaction ID, который показывает скрин, приложенный к транзакции в отчёте Deposit requests. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -63,6 +63,9 @@
       // Кнопка на заголовке столбца: копирует все значения столбца
       // с текущей страницы, по одному в строке
       columnCopy: true,
+      // Значок у номера в столбце Transaction ID: показывает скрин,
+      // приложенный к самой транзакции в отчёте Deposit requests
+      txScreen: true,
     },
 
     // ── Страницы отчётов ─────────────────────────────────────────────
@@ -394,6 +397,29 @@
       doneDuration: 1500,
       // Задержка перед скрытием кнопки, когда мышь ушла с заголовка (мс)
       hideDelay: 150,
+    },
+
+    // ── Скрин транзакции по Transaction ID ───────────────────────────
+    txScreen: {
+      // Где искать транзакцию — по порядку, до первой найденной. Запрос тот
+      // же, что делает страница отчёта по Apply с номером в поле ID (дату
+      // фильтра сервер при заполненном ID не учитывает).
+      // reportId и fileType — параметры report_id= и type= в ссылках на
+      // файлы этого отчёта: по ним /admin/amazon/ отдаёт файл.
+      sources: [
+        {
+          label: 'Deposit requests',
+          url: '/en/admin/report/requestrefill',
+          reportId: '1c02b05bc4259568a61f1097eb78eb5e',
+          fileType: 1,
+        },
+      ],
+      // Через сколько ответ по транзакции считается устаревшим (мс). До
+      // этого повторное наведение запрос не повторяет.
+      cacheTtl: 5 * 60 * 1000,
+      // Задержка перед запросом при наведении на значок (мс) — чтобы мышь,
+      // просто проходящая по таблице, не отправляла запросы
+      hoverDelay: 250,
     },
 
     // Подробный лог в консоль (F12 → Console)
@@ -1012,10 +1038,20 @@
     function isPdf(path) { return getExt(path) === 'pdf'; }
     function isPreviewable(path) { return isImage(path) || isPdf(path) || isVideo(path); }
 
+    // Кроме ссылок превью показывается у любого элемента с атрибутом
+    // data-th-preview-href — так устроен значок «Скрин транзакции»: файл
+    // берётся из отчёта, и ссылки в ячейке нет.
+    function previewHref(el) {
+      return el.getAttribute('href') || el.getAttribute('data-th-preview-href') || '';
+    }
+
     // Ссылка может вести на вьюер вида /viewer?url=<реальный путь>.
     // Тип файла определяем по реальному пути, а открываем — исходную ссылку.
     function resolveFileUrl(anchor) {
-      const href = anchor.getAttribute('href') || '';
+      return resolveHref(previewHref(anchor));
+    }
+
+    function resolveHref(href) {
       try {
         const abs = new URL(href, window.location.origin);
         const urlParam = abs.searchParams.get('url');
@@ -1024,8 +1060,18 @@
       return { previewUrl: href, filePath: href };
     }
 
-    // Все картинки из той же ячейки — чтобы листать их в полноэкранном режиме
+    // Все картинки из той же ячейки — чтобы листать их в полноэкранном режиме.
+    // У значка скрина транзакции список свой (data-th-preview-urls): это
+    // файлы транзакции, а не ссылки ячейки.
     function getCellImageUrls(anchor) {
+      if (anchor.dataset.thPreviewUrls) {
+        try {
+          return JSON.parse(anchor.dataset.thPreviewUrls)
+            .filter(href => isImage(resolveHref(href).filePath));
+        } catch (e) {
+          return [];
+        }
+      }
       const td = anchor.closest('td');
       if (!td) return [];
       return Array.from(td.querySelectorAll('a'))
@@ -1134,7 +1180,7 @@
     }
 
     function showPopup(anchor) {
-      const href = anchor.getAttribute('href') || '';
+      const href = previewHref(anchor);
       if (!href) return;
       const { filePath } = resolveFileUrl(anchor);
       if (!isPreviewable(filePath)) return;
@@ -1167,13 +1213,15 @@
     popup.addEventListener('mouseenter', () => clearTimeout(hideTimer));
     popup.addEventListener('mouseleave', hidePopup);
 
+    const PREVIEW_TARGET = 'td a, [data-th-preview-href]';
+
     document.addEventListener('mouseover', e => {
-      const anchor = e.target instanceof Element ? e.target.closest('td a') : null;
+      const anchor = e.target instanceof Element ? e.target.closest(PREVIEW_TARGET) : null;
       if (anchor) showPopup(anchor);
     });
 
     document.addEventListener('mouseout', e => {
-      const anchor = e.target instanceof Element ? e.target.closest('td a') : null;
+      const anchor = e.target instanceof Element ? e.target.closest(PREVIEW_TARGET) : null;
       if (anchor) hidePopup();
     });
 
@@ -4855,6 +4903,351 @@
   }
 
   // ==================================================================
+  // 13. СКРИН ТРАНЗАКЦИИ ПО TRANSACTION ID
+  // ==================================================================
+
+  // Скрин, приложенный к транзакции, есть только в отчёте Deposit requests
+  // (колонка User info), а у тикета — лишь номер транзакции. Значок рядом
+  // с номером делает тот же запрос, что страница отчёта по Apply с ID,
+  // достаёт из строки ссылку на файл и отдаёт её превью вложений: окно,
+  // Fullscreen и Open in new tab — те же, что у обычных ссылок.
+  function initTxScreen() {
+    const CFG = CONFIG.txScreen;
+    const HEADER = 'transaction id';
+    const TX_ID_RE = /^\d{5,20}$/;
+    // Путь к файлу в любом поле строки: у депозита он лежит в dopparam —
+    // JSON с полями формы оплаты, где имя поля зависит от платёжки
+    const FILE_RE = /WebUserDocuments\/[^\s"'<>?#\\]+\.[a-z0-9]{2,5}/gi;
+    const STATES = ['th-txs-loading', 'th-txs-ok', 'th-txs-none', 'th-txs-missing', 'th-txs-error'];
+    const WHERE = CFG.sources.map(src => src.label).join(', ');
+
+    addStyle('th-helper-txscreen-style', `
+      .th-txs-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        margin-left: 6px;
+        vertical-align: middle;
+        color: ${ACCENT};
+        opacity: .55;
+        cursor: pointer;
+        user-select: none;
+        transition: opacity .15s;
+      }
+      .th-txs-btn:hover, .th-txs-btn.th-txs-ok { opacity: 1; }
+      .th-txs-btn svg { display: block; flex-shrink: 0; pointer-events: none; }
+      .th-txs-btn.th-txs-loading { animation: th-txs-pulse .7s ease-in-out infinite alternate; }
+      .th-txs-btn.th-txs-none, .th-txs-btn.th-txs-missing { color: ${T.textDim}; opacity: .9; }
+      .th-txs-btn.th-txs-error { color: #DA3633; opacity: .9; }
+      /* Подпись — псевдоэлементом: в textContent ячейки остаётся только
+         номер, и копирование ячейки и столбца берёт ровно его */
+      .th-txs-btn[data-note]::after {
+        content: attr(data-note);
+        font-size: 10px;
+        font-weight: 600;
+        line-height: 1;
+        white-space: nowrap;
+      }
+      @keyframes th-txs-pulse { from { opacity: .2; } to { opacity: 1; } }
+    `);
+
+    const ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
+
+    // ── Запрос к отчёту ───────────────────────────────────────────────
+
+    function todayAt(time) {
+      const d = new Date();
+      const p = n => String(n).padStart(2, '0');
+      return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${time}`;
+    }
+
+    // Те же поля, что отправляет форма отчёта; заполнен только ID
+    function reportPayload(txId) {
+      return {
+        date_from: todayAt('00:00'),
+        date_to: todayAt('23:59'),
+        filter_by_date: null,
+        status: null,
+        id: Number(txId),
+        user_id: null,
+        countryIds: [],
+        currencyIds: [],
+        bank_id: null,
+        ref_ids: null,
+        subagent_id: [],
+        subagents: [],
+        subagentGroups: [],
+      };
+    }
+
+    async function fetchRows(src, txId) {
+      const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/plain, */*',
+        'X-Requested-With': 'XMLHttpRequest',
+      };
+      if (typeof pageWindow._TIMEZONE === 'string') headers['X-Time-Zone'] = pageWindow._TIMEZONE;
+
+      let r;
+      try {
+        r = await fetch(src.url, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers,
+          body: JSON.stringify(reportPayload(txId)),
+        });
+      } catch (err) {
+        throw new Error('нет связи с сервером');
+      }
+      if (!r.ok) throw new Error(`сервер ответил ${r.status}`);
+      let json;
+      try {
+        json = await r.json();
+      } catch (err) {
+        throw new Error('сервер ответил не данными — возможно, истекла сессия, обновите страницу');
+      }
+
+      // Таблица приходит строкой JSON в поле data: {Success, Value: {Columns, Data}}
+      let data = json && json.data;
+      if (typeof data === 'string') {
+        try { data = JSON.parse(data); } catch (err) { data = null; }
+      }
+      const value = data && data.Value;
+      if (!value || !Array.isArray(value.Columns) || !Array.isArray(value.Data)) {
+        throw new Error((value && value.Error) || (data && data.Error) || 'неожиданный ответ отчёта');
+      }
+      return value.Data.map(row => {
+        const obj = {};
+        value.Columns.forEach((col, i) => { obj[col] = row[i]; });
+        return obj;
+      });
+    }
+
+    function extractFiles(row) {
+      const found = [];
+      Object.values(row).forEach(v => {
+        if (typeof v !== 'string') return;
+        (v.replace(/\\\//g, '/').match(FILE_RE) || []).forEach(path => {
+          if (!found.includes(path)) found.push(path);
+        });
+      });
+      return found;
+    }
+
+    // Ссылка того же вида, что страница отчёта ставит в User info:
+    // /admin/amazon/?url=/WebUserDocuments/...&report_id=...&user_id=...&type=1
+    function fileLink(src, path, userId) {
+      const parts = [
+        'url=' + encodeURIComponent('/' + path).replace(/%2F/gi, '/'),
+        'report_id=' + src.reportId,
+        'user_id=' + encodeURIComponent(userId),
+      ];
+      if (src.fileType !== undefined && src.fileType !== null) parts.push('type=' + src.fileType);
+      return '/admin/amazon/?' + parts.join('&');
+    }
+
+    async function findTransaction(txId) {
+      for (const src of CFG.sources) {
+        const rows = await fetchRows(src, txId);
+        const row = rows.find(r => String(r.id) === txId);
+        if (!row) continue;
+        const files = extractFiles(row).map(path => fileLink(src, path, row.IdUser));
+        log('Скрин транзакции', txId, src.label, files);
+        return files.length
+          ? { state: 'ok', files, source: src.label }
+          : { state: 'none', source: src.label };
+      }
+      return { state: 'missing' };
+    }
+
+    // ── Кэш ответов ──────────────────────────────────────────────────
+
+    const results = new Map();   // txId → { at, res }
+    const pending = new Map();   // txId → Promise
+
+    function knownResult(txId) {
+      const hit = results.get(txId);
+      return hit && Date.now() - hit.at < CFG.cacheTtl ? hit.res : null;
+    }
+
+    function lookup(txId) {
+      if (pending.has(txId)) return pending.get(txId);
+      const p = findTransaction(txId)
+        .catch(err => {
+          log('Не удалось найти транзакцию', txId, err);
+          return { state: 'error', message: err.message };
+        })
+        .then(res => {
+          pending.delete(txId);
+          // Ошибку не запоминаем — следующее наведение спросит заново
+          if (res.state !== 'error') results.set(txId, { at: Date.now(), res });
+          else results.delete(txId);
+          return res;
+        });
+      pending.set(txId, p);
+      return p;
+    }
+
+    // ── Значок ───────────────────────────────────────────────────────
+
+    function render(btn, res) {
+      const txId = btn.dataset.txId;
+      btn.classList.remove(...STATES);
+      btn.removeAttribute('data-note');
+      btn.removeAttribute('data-th-preview-href');
+      btn.removeAttribute('data-th-preview-urls');
+
+      if (!res) {
+        btn.title = `Скрин транзакции из ${WHERE}`;
+      } else if (res.state === 'loading') {
+        btn.classList.add('th-txs-loading');
+        btn.title = `Ищу транзакцию в ${WHERE}…`;
+      } else if (res.state === 'ok') {
+        btn.classList.add('th-txs-ok');
+        // Отсюда файл берёт превью вложений
+        btn.dataset.thPreviewHref = res.files[0];
+        btn.dataset.thPreviewUrls = JSON.stringify(res.files);
+        if (res.files.length > 1) btn.dataset.note = String(res.files.length);
+        // Нативная подсказка налезала бы на окно превью — оставляем её,
+        // только если превью выключено и окно не появится
+        btn.title = isFeatureEnabled('filePreview')
+          ? ''
+          : `Открыть скрин транзакции${res.files.length > 1 ? ` (файлов: ${res.files.length})` : ''}`;
+      } else if (res.state === 'none') {
+        btn.classList.add('th-txs-none');
+        btn.dataset.note = 'нет файла';
+        btn.title = `Транзакция ${txId} есть в ${res.source}, но файла к ней нет`;
+      } else if (res.state === 'missing') {
+        btn.classList.add('th-txs-missing');
+        btn.dataset.note = 'не найдена';
+        btn.title = `Транзакции ${txId} нет в ${WHERE}`;
+      } else {
+        btn.classList.add('th-txs-error');
+        btn.dataset.note = 'ошибка';
+        btn.title = `Не удалось проверить: ${res.message}. Наведите ещё раз, чтобы повторить`;
+      }
+    }
+
+    // Одна транзакция может стоять в нескольких строках — обновляем все
+    function renderAll(txId, res) {
+      document.querySelectorAll('.th-txs-btn').forEach(btn => {
+        if (btn.dataset.txId === txId) render(btn, res);
+      });
+    }
+
+    function check(btn) {
+      const txId = btn.dataset.txId;
+      const known = knownResult(txId);
+      if (known) return Promise.resolve(known);
+      renderAll(txId, { state: 'loading' });
+      return lookup(txId).then(res => {
+        renderAll(txId, res);
+        return res;
+      });
+    }
+
+    // Ответ пришёл, пока курсор на значке, — показываем превью сразу, не
+    // дожидаясь, пока мышь сдвинется (окно превью открывается по mouseover)
+    function showIfHovered(btn, txId, res) {
+      if (res.state !== 'ok' || !btn.isConnected || btn.dataset.txId !== txId) return;
+      if (btn.matches(':hover')) btn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    }
+
+    function onHover(btn) {
+      const txId = btn.dataset.txId;
+      if (!txId || knownResult(txId)) return;
+      check(btn).then(res => showIfHovered(btn, txId, res));
+    }
+
+    function onClick(btn) {
+      const txId = btn.dataset.txId;
+      if (!txId) return;
+      const known = knownResult(txId);
+      if (known && known.state === 'ok') {
+        window.open(known.files[0], '_blank', 'noopener');
+        return;
+      }
+      check(btn).then(res => showIfHovered(btn, txId, res));
+    }
+
+    function makeButton() {
+      const btn = document.createElement('span');
+      btn.className = 'th-txs-btn';
+      btn.setAttribute('role', 'button');
+      btn.innerHTML = ICON;
+      // Клик по значку — не клик по ячейке: копирование ячейки и
+      // обработчики строки сайта его не получают
+      btn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        onClick(btn);
+      });
+      btn.addEventListener('dblclick', e => e.stopPropagation());
+      return btn;
+    }
+
+    // ── Поиск столбца и расстановка значков ──────────────────────────
+
+    // Шапка бывает и в <thead>, и в <tr class="table-head"> (окно «История
+    // тикета» собрано без <thead>) — ищем в обоих местах
+    function txColumnIndex(table) {
+      const th = Array.from(table.querySelectorAll('tr.table-head th, thead th'))
+        .find(h => h.textContent.replace(/\s+/g, ' ').trim().toLowerCase() === HEADER);
+      return th ? th.cellIndex : -1;
+    }
+
+    // Значок ставится в конец ячейки, а номер сайт может переписать в той
+    // же ячейке (пагинация, новый фильтр) — поэтому на каждом проходе
+    // сверяем номер на значке с текстом ячейки
+    function processTable(table) {
+      const idx = txColumnIndex(table);
+      if (idx < 0) return;
+      Array.from(table.rows).forEach(row => {
+        const cell = row.cells[idx];
+        if (!cell || cell.tagName !== 'TD') return;
+        let btn = cell.querySelector(':scope > .th-txs-btn');
+        const txId = cell.textContent.trim();
+        if (!TX_ID_RE.test(txId)) {
+          if (btn) btn.remove();
+          return;
+        }
+        if (!btn) {
+          btn = makeButton();
+          cell.appendChild(btn);
+        }
+        if (btn.dataset.txId !== txId) {
+          btn.dataset.txId = txId;
+          render(btn, knownResult(txId));
+        }
+      });
+    }
+
+    function processAll() {
+      document.querySelectorAll('table').forEach(processTable);
+    }
+
+    let hoverTimer = null;
+
+    document.addEventListener('mouseover', e => {
+      const btn = e.target instanceof Element ? e.target.closest('.th-txs-btn') : null;
+      if (!btn || (e.relatedTarget instanceof Node && btn.contains(e.relatedTarget))) return;
+      clearTimeout(hoverTimer);
+      hoverTimer = setTimeout(() => onHover(btn), CFG.hoverDelay);
+    });
+
+    document.addEventListener('mouseout', e => {
+      const btn = e.target instanceof Element ? e.target.closest('.th-txs-btn') : null;
+      if (!btn || (e.relatedTarget instanceof Node && btn.contains(e.relatedTarget))) return;
+      clearTimeout(hoverTimer);
+    });
+
+    processAll();
+    new MutationObserver(processAll).observe(document.body, { childList: true, subtree: true });
+
+    log('Скрин транзакции по Transaction ID включён');
+  }
+
+  // ==================================================================
   // ПАНЕЛЬ НАСТРОЕК: ВКЛЮЧЕНИЕ И ВЫКЛЮЧЕНИЕ ФУНКЦИЙ БЕЗ ПРАВКИ КОДА
   // ==================================================================
 
@@ -4872,6 +5265,7 @@
     cellCopy: 'Копирование значения ячейки по клику',
     filterShare: 'Обмен сохранёнными фильтрами',
     columnCopy: 'Копирование столбца целиком',
+    txScreen: 'Скрин транзакции по Transaction ID',
   };
 
   // CONFIG.features задаёт дефолт при первом запуске; панель настроек и
@@ -5147,6 +5541,7 @@
     if (shouldRun('cellCopy')) initCellCopy();
     if (shouldRun('filterShare')) initFilterShare();
     if (shouldRun('columnCopy')) initColumnCopy();
+    if (shouldRun('txScreen')) initTxScreen();
     log('Скрипт запущен на', window.location.pathname);
   }
 
