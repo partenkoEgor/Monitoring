@@ -2,7 +2,7 @@
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
 // @version      1.42
-// @description  Тринадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто закрыл, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке, обмен сохранёнными фильтрами с коллегами через текстовый код и значок у Transaction ID, который показывает скрин, приложенный к транзакции в отчёте Deposit requests. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @description  Тринадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто закрыл, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке, обмен сохранёнными фильтрами с коллегами через текстовый код и значок у Transaction ID, который показывает скрин, приложенный к транзакции в отчётах Deposit requests и Withdrawal requests. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -64,7 +64,8 @@
       // с текущей страницы, по одному в строке
       columnCopy: true,
       // Значок у номера в столбце Transaction ID: показывает скрин,
-      // приложенный к самой транзакции в отчёте Deposit requests
+      // приложенный к самой транзакции в отчётах Deposit requests
+      // и Withdrawal requests
       txScreen: true,
     },
 
@@ -404,14 +405,38 @@
       // Где искать транзакцию — по порядку, до первой найденной. Запрос тот
       // же, что делает страница отчёта по Apply с номером в поле ID (дату
       // фильтра сервер при заполненном ID не учитывает).
-      // reportId и fileType — параметры report_id= и type= в ссылках на
-      // файлы этого отчёта: по ним /admin/amazon/ отдаёт файл.
+      //   form       — остальные поля формы отчёта, как их шлёт сама
+      //                страница (date_from, date_to и id скрипт добавляет сам)
+      //   userColumn — колонка ответа с User ID: у отчётов она называется по-разному
+      //   reportId, fileType, pathPrefix — как страница отчёта собирает
+      //                ссылку на файл: /admin/amazon/?url=<pathPrefix><путь>
+      //                &report_id=<reportId>&user_id=...[&type=<fileType>]
       sources: [
         {
           label: 'Deposit requests',
           url: '/en/admin/report/requestrefill',
+          form: {
+            filter_by_date: null, status: null, user_id: null, bank_id: null,
+            countryIds: [], currencyIds: [], ref_ids: null,
+            subagent_id: [], subagents: [], subagentGroups: [],
+          },
+          userColumn: 'IdUser',
           reportId: '1c02b05bc4259568a61f1097eb78eb5e',
           fileType: 1,
+          pathPrefix: '/',
+        },
+        {
+          label: 'Withdrawal requests',
+          url: '/en/admin/report/requestwithdrawal',
+          form: {
+            filter_by_date: 1, status: null, user_id: null, bank_id: null,
+            countryIds: [], currencyIds: [], ref_id: null, ref_ids: [],
+            subagent_id: [],
+          },
+          userColumn: 'id_user',
+          reportId: '6bd19af0e9a32b9da1b0103af860b393',
+          fileType: null,
+          pathPrefix: '',
         },
       ],
       // Через сколько ответ по транзакции считается устаревшим (мс). До
@@ -4906,17 +4931,19 @@
   // 13. СКРИН ТРАНЗАКЦИИ ПО TRANSACTION ID
   // ==================================================================
 
-  // Скрин, приложенный к транзакции, есть только в отчёте Deposit requests
-  // (колонка User info), а у тикета — лишь номер транзакции. Значок рядом
-  // с номером делает тот же запрос, что страница отчёта по Apply с ID,
-  // достаёт из строки ссылку на файл и отдаёт её превью вложений: окно,
-  // Fullscreen и Open in new tab — те же, что у обычных ссылок.
+  // Скрин, приложенный к транзакции, есть только в отчётах Deposit requests
+  // (колонка User info) и Withdrawal requests (Payout confirmation), а у
+  // тикета — лишь номер транзакции. Значок рядом с номером делает тот же
+  // запрос, что страница отчёта по Apply с ID (сначала в депозитах, потом
+  // в выводах), достаёт из строки ссылку на файл и отдаёт её превью
+  // вложений: окно, Fullscreen и Open in new tab — те же, что у обычных ссылок.
   function initTxScreen() {
     const CFG = CONFIG.txScreen;
     const HEADER = 'transaction id';
     const TX_ID_RE = /^\d{5,20}$/;
     // Путь к файлу в любом поле строки: у депозита он лежит в dopparam —
-    // JSON с полями формы оплаты, где имя поля зависит от платёжки
+    // JSON с полями формы оплаты, где имя поля зависит от платёжки, —
+    // у вывода в поле file списком путей
     const FILE_RE = /WebUserDocuments\/[^\s"'<>?#\\]+\.[a-z0-9]{2,5}/gi;
     const STATES = ['th-txs-loading', 'th-txs-ok', 'th-txs-none', 'th-txs-missing', 'th-txs-error'];
     const WHERE = CFG.sources.map(src => src.label).join(', ');
@@ -4962,21 +4989,12 @@
     }
 
     // Те же поля, что отправляет форма отчёта; заполнен только ID
-    function reportPayload(txId) {
+    function reportPayload(src, txId) {
       return {
         date_from: todayAt('00:00'),
         date_to: todayAt('23:59'),
-        filter_by_date: null,
-        status: null,
+        ...src.form,
         id: Number(txId),
-        user_id: null,
-        countryIds: [],
-        currencyIds: [],
-        bank_id: null,
-        ref_ids: null,
-        subagent_id: [],
-        subagents: [],
-        subagentGroups: [],
       };
     }
 
@@ -4994,7 +5012,7 @@
           method: 'POST',
           credentials: 'same-origin',
           headers,
-          body: JSON.stringify(reportPayload(txId)),
+          body: JSON.stringify(reportPayload(src, txId)),
         });
       } catch (err) {
         throw new Error('нет связи с сервером');
@@ -5034,11 +5052,12 @@
       return found;
     }
 
-    // Ссылка того же вида, что страница отчёта ставит в User info:
-    // /admin/amazon/?url=/WebUserDocuments/...&report_id=...&user_id=...&type=1
+    // Ссылка того же вида, что ставит страница отчёта: у депозитов
+    // /admin/amazon/?url=/WebUserDocuments/...&report_id=...&user_id=...&type=1,
+    // у выводов — без «/» в начале пути и без type
     function fileLink(src, path, userId) {
       const parts = [
-        'url=' + encodeURIComponent('/' + path).replace(/%2F/gi, '/'),
+        'url=' + encodeURIComponent((src.pathPrefix || '') + path).replace(/%2F/gi, '/'),
         'report_id=' + src.reportId,
         'user_id=' + encodeURIComponent(userId),
       ];
@@ -5051,7 +5070,7 @@
         const rows = await fetchRows(src, txId);
         const row = rows.find(r => String(r.id) === txId);
         if (!row) continue;
-        const files = extractFiles(row).map(path => fileLink(src, path, row.IdUser));
+        const files = extractFiles(row).map(path => fileLink(src, path, row[src.userColumn]));
         log('Скрин транзакции', txId, src.label, files);
         return files.length
           ? { state: 'ok', files, source: src.label }
