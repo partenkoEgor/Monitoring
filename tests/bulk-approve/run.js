@@ -602,7 +602,9 @@ const scenarios = {
     tickets[ids[2]].subagent = 'Vodafone XC40';
     tickets[ids[5]].country = 'Egypt';
     tickets[ids[3]].agentFiles = ['BTDocuments/1/x/b1.png', 'BTDocuments/1/x/b2.pdf'];
-    const behaviour = { listApi: true, hiddenFromFilter: [ids[4]], omitAgentFiles: new Set([ids[5]]) };
+    tickets[ids[2]].userType = 'VIP player';
+    tickets[ids[1]].userType = 'Loss-making player (inexperienced)';
+    const behaviour = { listApi: true, hiddenFromFilter: [ids[4]], omitAgentFiles: new Set([ids[5]]), omitUserType: new Set([ids[5]]) };
     const page = createPage({ tickets, onScreen: ['19999999', ids[0], ids[1]], behaviour });
     const { d, w, site, prefix } = page;
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -669,7 +671,7 @@ const scenarios = {
       [rowsOf(sh(1)), rowsOf(sh(2)), rowsOf(sh(3))].join(','));
     check('шапка', sh(1).includes('<t>Субагент</t>') && sh(1).includes('<t>Статус транзакции</t>') && sh(1).includes('<t>Кошелёк пользователя</t>'), sh(1).slice(0, 600));
     check('шапка: External Status после Ticket ID, Inside comment перед Transaction ID',
-      /<t>Ticket ID<\/t>.*<t>External Status<\/t>.*<t>User ID<\/t>.*<t>Субагент<\/t>.*<t>Inside comment<\/t>.*<t>Transaction ID<\/t>/.test(sh(1)), sh(1).slice(0, 900));
+      /<t>Ticket ID<\/t>.*<t>External Status<\/t>.*<t>User ID<\/t>.*<t>VIP<\/t>.*<t>Type<\/t>.*<t>Субагент<\/t>.*<t>Inside comment<\/t>.*<t>Transaction ID<\/t>/.test(sh(1)), sh(1).slice(0, 900));
     check('External Status тикета в строке', sh(1).includes('<t>Approved (M)</t>'), sh(1));
     check('Inside comment: номер — числом', sh(2).includes('<v>24085716901</v><') && (sh(2).match(/<v>24085716901<\/v>/g) || []).length === 2, sh(2));
     check('Inside comment: служебный символ выкинут, перенос строки сохранён',
@@ -679,18 +681,26 @@ const scenarios = {
     check('кошелёк с ведущим нулём — текстом, ноль на месте', sh(1).includes('<t>01080969968</t>') && !sh(1).includes('<v>1080969968</v>'), sh(1));
     check('Agent\'s files в файле: «пусто» и «1 файл»', sh(1).includes('<t>пусто</t>') && sh(2).includes('<t>1 файл</t>'), sh(2));
 
-    // Сводка по субагентам справа, через один пустой столбец (L)
+    const cell = (ref, text) => `<c r="${ref}" s="3" t="inlineStr"><is><t>${text}</t></is></c>`;
+    check('VIP: по колонке Type — «VIP» и «не VIP», Type как есть',
+      sh(1).includes(cell('D3', 'VIP') + cell('E3', 'VIP player')) &&
+      sh(1).includes(cell('D2', 'не VIP') + cell('E2', 'New player')) &&
+      sh(2).includes(cell('D2', 'не VIP') + cell('E2', 'Loss-making player (inexperienced)')), sh(1) + '\n' + sh(2));
+    check('VIP: поля Type нет в ответе — «нет данных», а не «не VIP»',
+      sh(2).includes(cell('D3', 'нет данных') + '<c r="E3" s="3"/>'), sh(2));
+
+    // Сводка по субагентам справа, через один пустой столбец (N)
     const s1 = sh(1); // Algeria: ids[0] — Miruca, ids[2] — Vodafone
-    check('сводка: шапка в M1:N1 жирная, столбец L пустой',
-      /<c r="M1" s="1" t="inlineStr"><is><t>Субагент<\/t><\/is><\/c><c r="N1" s="1" t="inlineStr"><is><t>Тикетов<\/t>/.test(s1) &&
-      !/<c r="L\d+"/.test(s1), s1.slice(0, 1500));
-    check('сводка: субагенты с формулами точного совпадения по колонке D',
-      s1.includes('<c r="M2" s="3" t="inlineStr"><is><t>Miruca BaridiMob Algeria</t></is></c><c r="N2" s="2"><f>SUMPRODUCT(--($D$2:$D$3=M2))</f><v>1</v></c>') &&
-      s1.includes('<t>Vodafone XC40</t></is></c><c r="N3" s="2"><f>SUMPRODUCT(--($D$2:$D$3=M3))</f><v>1</v></c>'), s1);
-    check('сводка: «Итого» жирным и суммой', /<c r="M4" s="1" t="inlineStr"><is><t>Итого<\/t><\/is><\/c><c r="N4" s="2"><f>SUM\(N2:N3\)<\/f><v>2<\/v>/.test(s1), s1);
-    check('автофильтр — только на основной таблице', s1.includes('<autoFilter ref="A1:K3"/>'), s1.slice(-300));
+    check('сводка: шапка в O1:P1 жирная, столбец N пустой',
+      /<c r="O1" s="1" t="inlineStr"><is><t>Субагент<\/t><\/is><\/c><c r="P1" s="1" t="inlineStr"><is><t>Тикетов<\/t>/.test(s1) &&
+      !/<c r="N\d+"/.test(s1), s1.slice(0, 1500));
+    check('сводка: субагенты с формулами точного совпадения по колонке F',
+      s1.includes('<c r="O2" s="3" t="inlineStr"><is><t>Miruca BaridiMob Algeria</t></is></c><c r="P2" s="2"><f>SUMPRODUCT(--($F$2:$F$3=O2))</f><v>1</v></c>') &&
+      s1.includes('<t>Vodafone XC40</t></is></c><c r="P3" s="2"><f>SUMPRODUCT(--($F$2:$F$3=O3))</f><v>1</v></c>'), s1);
+    check('сводка: «Итого» жирным и суммой', /<c r="O4" s="1" t="inlineStr"><is><t>Итого<\/t><\/is><\/c><c r="P4" s="2"><f>SUM\(P2:P3\)<\/f><v>2<\/v>/.test(s1), s1);
+    check('автофильтр — только на основной таблице', s1.includes('<autoFilter ref="A1:M3"/>'), s1.slice(-300));
     check('сводка Egypt: один субагент, 2 тикета, сортировка по убыванию',
-      sh(2).includes('<f>SUMPRODUCT(--($D$2:$D$3=M2))</f><v>2</v>') && /<t>Итого<\/t>.*<v>2<\/v>/.test(sh(2)), sh(2));
+      sh(2).includes('<f>SUMPRODUCT(--($F$2:$F$3=O2))</f><v>2</v>') && /<t>Итого<\/t>.*<v>2<\/v>/.test(sh(2)), sh(2));
 
     // Второй файл — только «пусто» (ids[0], ids[2] — оба Algeria); без колонки (ids[5]) сюда не идёт
     const e = r.files.empty;
