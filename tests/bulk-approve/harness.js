@@ -59,11 +59,18 @@ function loadScript(which, overrides) {
 const COLUMNS = [
   'Ticket history', 'Actions', 'External Status', 'Ticket ID', 'Amount',
   'Transaction ID', 'Transaction Amount', 'Transaction Status', 'Processing Date',
+  'Ticket type',
 ];
 
-const STATUS_OPTIONS = ['225 Approved by agent', '239 Response to user (M)', '238 Revision needed (M)'];
+const STATUS_OPTIONS = [
+  '225 Approved by agent', '239 Response to user (M)', '238 Revision needed (M)',
+  '55 Sent for processing', '209 Sent for processing (M)',
+];
 // id статусов в запросе сохранения — как в GetRequestStatusesExternal сайта
-const STATUS_IDS = { '225 Approved by agent': 212, '239 Response to user (M)': 219, '238 Revision needed (M)': 218 };
+const STATUS_IDS = {
+  '225 Approved by agent': 212, '239 Response to user (M)': 219, '238 Revision needed (M)': 218,
+  '55 Sent for processing': 317, '209 Sent for processing (M)': 204,
+};
 
 const pad = (n) => String(n).padStart(2, '0');
 function processingDate(hoursAgo) {
@@ -235,6 +242,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
             numberWallet: t.userWallet || '01080969968',
             status: t.txId ? (t.txStatusName || 'OK') : '',
             commentSupport: t.insideComment || '',
+            requestTypeName: t.ticketType || 'BT M',
             userType: t.userType || 'New player',
             // Agent's files — HTML-ссылками, как колонка файлов на сайте
             documentsExternal: (t.agentFiles || []).map((f) =>
@@ -272,6 +280,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
         'Transaction Amount': '100',
         'Transaction Status': t.txStatus || '',
         'Processing Date': processingDate(t.hoursAgo == null ? 2 : t.hoursAgo),
+        'Ticket type': t.ticketType || 'BT M',
       };
       COLUMNS.forEach((c) => {
         const td = d.createElement('td');
@@ -318,6 +327,8 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
               <div class="multiselect__tags"><input class="multiselect__input" type="text"></div>
               <div class="multiselect__content-wrapper" style="display:none"></div>
             </div></div>
+          <div class="input-group input-group--full-width"><span class="title">Comment (internal)</span><div class="th-ct-trigger-wrap"></div>
+            <textarea type="text" rows="4" class="comment-internal"></textarea></div>
         </div>
         <div class="filter btn-block">
           <div class="input-group"><button class="btn btn-success">Apply</button></div>
@@ -328,6 +339,8 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
 
     let chosen = null;
     const txInput = wrap.querySelector('.tx-id');
+    const commentArea = wrap.querySelector('.comment-internal');
+    commentArea.value = t.insideComment || '';
     let waves = false;
     txInput.addEventListener('input', () => {
       if (waves) return;
@@ -369,6 +382,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
         externalStatusId: STATUS_IDS[chosen] || '',
         transactionId: tx,
         initialTransactionId: t.txId || '',
+        commentSupport: commentArea.value,
       };
       if (site.behaviour.saveTamper) site.behaviour.saveTamper(id, fields);
       const fd = new w.FormData();
@@ -388,6 +402,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
         }
         site.applied.push({ ticketId: id, status: chosen, transactionId: tx });
         t.externalStatus = chosen || t.externalStatus;
+        t.insideComment = fields.commentSupport;
         if (!(site.behaviour.dropsTransactionId && site.behaviour.dropsTransactionId(id))) t.txId = tx;
         afterSave();
       };
@@ -443,7 +458,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
 
   // Один прогон, как его делает оператор: кнопка → окно списка → запуск →
   // отчёт. Возвращает текст отчёта, блоки для копирования и память после.
-  async function run({ button, listText, autopilot = true, byScreen = false, closeReport = true, onlyWindow = false, overwrite = false }) {
+  async function run({ button, listText, autopilot = true, byScreen = false, closeReport = true, onlyWindow = false, overwrite = false, comment }) {
     const btn = [...d.querySelectorAll('button')].find((b) => b.textContent === button);
     if (!btn) throw new Error('нет кнопки ' + button);
     btn.click();
@@ -452,6 +467,11 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
     if (listText !== undefined) {
       area.value = listText;
       area.dispatchEvent(new w.Event('input', { bubbles: true }));
+    }
+    const commentBox = overlay.querySelector(`.${prefix}-comment-text`);
+    if (commentBox && comment !== undefined) {
+      commentBox.value = comment;
+      commentBox.dispatchEvent(new w.Event('input', { bubbles: true }));
     }
     const auto = overlay.querySelector(`.${prefix}-autopilot`);
     if (auto && auto.checked !== autopilot) {
@@ -473,8 +493,10 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
     const precheckText = precheckBox ? precheckBox.textContent : '';
     if (onlyWindow) {
       const startDisabled = start.disabled;
+      const screenStart = [...overlay.querySelectorAll('button')].find((b) => /Запустить по экрану/.test(b.textContent));
+      const screenDisabled = screenStart ? screenStart.disabled : null;
       [...overlay.querySelectorAll('button')].find((b) => b.textContent === 'Отмена').click();
-      return { windowText, precheckText, startDisabled };
+      return { windowText, precheckText, startDisabled, screenDisabled };
     }
     if (start.disabled) throw new Error('кнопка запуска заблокирована: ' + windowText);
     start.click();

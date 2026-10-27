@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.28
+// @version      0.29
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -258,6 +258,31 @@
       saveStatusId: 212,
       fillTransactionIdFromList: true,
     },
+    {
+      // Отправка на обработку (с 0.29): к Inside comment каждого тикета
+      // дописывается один и тот же текст — через « // », старый комментарий
+      // не стирается — и ставится статус «209 Sent for processing (M)».
+      // Берутся только тикеты BT M в статусе Approved (M).
+      id: 'sfp',
+      buttonLabel: 'BETA Sent for processing (209)',
+      buttonColor: '#3A8F5C',
+      requiredExternalStatuses: ['Approved (M)'],
+      // Колонка Ticket type таблицы (поле requestTypeName ответа сайта)
+      requiredTicketType: 'BT M',
+      allowTicketIdList: true,
+      searchTerm: '209',
+      statusMatch: (text) => {
+        const t = text.trim().toLowerCase();
+        return t.includes('209') && t.includes('sent for processing');
+      },
+      targetStatusLabel: '209 Sent for processing (M)',
+      // «209 Sent for processing (M)» = id 204 в списке статусов сайта
+      // (у «55 Sent for processing» другого типа тикетов id 317)
+      saveStatusId: 204,
+      appendComment: true,
+      // Своя память списка: обработанное здесь — не обработанное в 225
+      storageKey: 'th-bulk-approve:sfp-list:v1-beta',
+    },
   ];
 
   // Общее состояние выполнения (используется кнопкой СТОП)
@@ -289,6 +314,12 @@
     // в режиме по списку такой тикет попадает в список «посмотреть глазами».
     'wrong-external-status': 'External Status тикета не подходит для этого режима — не трогали',
     'not-in-list': 'тикета нет в поданном списке — не трогали',
+    'wrong-ticket-type': 'тип тикета (колонка Ticket type) не подходит для этого режима — не трогали',
+    'no-ticket-type-column':
+      'не удалось прочитать колонку Ticket type — не с чем сверять, тикет не открывали',
+    'no-comment-field': 'в окне нет поля Comment (internal) — дописать комментарий некуда, статус не меняли',
+    'comment-not-accepted':
+      'сайт не принял дописанный комментарий (поле сбросилось) — статус не меняли',
     'transaction-id-mismatch':
       'Transaction ID уже заполнен, и не тем номером, что в списке — ничего не меняли, нужна ручная проверка ' +
       '(если номер в тикете неверный — прогони список с галочкой «Переписывать Transaction ID»)',
@@ -542,13 +573,15 @@
   // Вне прогона (человек работает руками) скрипт этот запрос не трогает.
   // Сам скрипт этот запрос не отправляет никогда.
   // ------------------------------------------------------------------
-  let saveGuard = null; // { ticketId, statusId, expectedTx, seen, response, blocked }
+  let saveGuard = null; // { ticketId, statusId, expectedTx, expectedComment, seen, response, blocked }
 
-  function armSaveGuard(ticketId, workflow, expectedTx) {
+  function armSaveGuard(ticketId, workflow, expectedTx, expectedComment) {
     saveGuard = {
       ticketId: String(ticketId),
       statusId: String(workflow.saveStatusId),
       expectedTx: expectedTx == null || expectedTx === '' ? null : String(expectedTx),
+      // Режим Sent for processing: Inside comment, который должен уйти (с 0.29)
+      expectedComment: expectedComment == null ? null : String(expectedComment),
       seen: [],
       response: null,
       blocked: null,
@@ -632,6 +665,15 @@
         return block(
           `тикет ${g.ticketId}: уходил Transaction ID "${tx == null ? '' : tx}", ` +
           `а по списку должен быть "${g.expectedTx}"`
+        );
+      }
+    }
+    if (g.expectedComment !== null) {
+      const comment = readRequestField(body, 'commentSupport');
+      if (String(comment == null ? '' : comment).trim() !== g.expectedComment.trim()) {
+        return block(
+          `тикет ${g.ticketId}: уходил Inside comment "${comment == null ? '' : comment}", ` +
+          `а должен был "${g.expectedComment}"`
         );
       }
     }
@@ -812,6 +854,9 @@
         userWallet: String(r.numberWallet == null ? '' : r.numberWallet).trim(),
         // Inside comment (с 0.22)
         insideComment: String(r.commentSupport == null ? '' : r.commentSupport).trim(),
+        // Колонка Ticket type — для режима Sent for processing (с 0.29).
+        // undefined — поля в ответе нет: тогда тип сверит прогон по таблице
+        ticketType: 'requestTypeName' in r ? String(r.requestTypeName == null ? '' : r.requestTypeName).trim() : undefined,
         // Колонка Type (с 0.25) — по ней видно VIP. undefined — поля в ответе нет
         userType: 'userType' in r ? String(r.userType == null ? '' : r.userType).trim() : undefined,
       }))
@@ -1022,6 +1067,16 @@
       }
       if (!matchesRequiredExternalStatus(workflow, row.externalStatus)) {
         wrongStatus.push({ ticketId: id, externalStatus: row.externalStatus });
+        return;
+      }
+      // Чужой тип тикета — туда же: пропуск без открытия. В сводке он виден
+      // отдельной строкой «тип тикета …» среди статусов.
+      if (
+        workflow.requiredTicketType &&
+        row.ticketType !== undefined &&
+        !sameTicketType(row.ticketType, workflow.requiredTicketType)
+      ) {
+        wrongStatus.push({ ticketId: id, externalStatus: `тип тикета ${row.ticketType || '(пусто)'}` });
         return;
       }
       const dup = dupChecks ? dupChecks.get(id) : null;
@@ -1597,6 +1652,32 @@
     const cell = row.querySelector(`td:nth-child(${idx})`);
     if (!cell) return null;
     return cell.textContent.trim();
+  }
+
+  // Колонка Ticket type («BT M») — для режима Sent for processing (с 0.29).
+  // Только по названию: колонка Type рядом — про пользователя, не про тикет.
+  // null — колонки нет, сверять не с чем.
+  function getTicketTypeFromRow(row) {
+    const idx = getColumnIndex('ticket type');
+    if (!idx) return null;
+    const cell = row.querySelector(`td:nth-child(${idx})`);
+    if (!cell) return null;
+    return cell.textContent.trim();
+  }
+
+  function sameTicketType(actual, required) {
+    const norm = (v) => String(v == null ? '' : v).trim().replace(/\s+/g, ' ').toLowerCase();
+    return norm(actual) === norm(required);
+  }
+
+  // Inside comment после дописывания текста: старый комментарий остаётся,
+  // новый текст идёт после « // ». Если текст уже стоит в конце (прошлый
+  // прогон дописал его, но статус не сменился) — второй раз не дописываем.
+  function appendToComment(existing, text) {
+    const base = String(existing == null ? '' : existing).replace(/\s+$/, '');
+    if (base === '') return text;
+    if (base.endsWith(text)) return base;
+    return `${base} // ${text}`;
   }
 
   // Совпадает ли статус транзакции с требуемым. Сверяем по словам, а не
@@ -2288,6 +2369,26 @@
       return { ticketId, status: 'skipped', reason: 'wrong-external-status', externalStatus };
     }
 
+    // Тип тикета (режим Sent for processing). Не прочитали — не трогаем:
+    // «не знаю» здесь работает как «нет».
+    if (workflow.requiredTicketType) {
+      const ticketType = getTicketTypeFromRow(row);
+      if (ticketType === null) {
+        console.warn(
+          `[BulkApproveBETA/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: не нашёл колонку ` +
+          `Ticket type — сверить тип тикета нечем, пропускаю.`
+        );
+        return { ticketId, status: 'skipped', reason: 'no-ticket-type-column', externalStatus };
+      }
+      if (!sameTicketType(ticketType, workflow.requiredTicketType)) {
+        console.log(
+          `[BulkApproveBETA/${workflow.id}] (${index + 1}/${total}) Тикет ${ticketId}: Ticket type = ` +
+          `"${ticketType}" (нужен "${workflow.requiredTicketType}") — пропускаю.`
+        );
+        return { ticketId, status: 'skipped', reason: 'wrong-ticket-type', externalStatus, ticketType };
+      }
+    }
+
     // Статус транзакции — второе обязательное условие, и проверяется оно до
     // открытия Edit: тикет с подходящим External Status, но не отклонённой
     // транзакцией закрывать ответом пользователю нельзя, и трогать его вообще
@@ -2885,6 +2986,55 @@
       console.log(`[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: в Amount by receipt вписано "${amountFilled}".`);
     }
 
+    // ------------------------------------------------------------------
+    // ДОПИСЫВАНИЕ INSIDE COMMENT (режим Sent for processing, с 0.29).
+    // Как и остальные подстановки — до Status и Apply: сорвётся — тикет
+    // останется нетронутым. Старый текст поля не стирается.
+    // ------------------------------------------------------------------
+    let commentWritten = null;
+    if (workflow.appendComment) {
+      if (!currentCommentText) {
+        // Окно списка не даёт запустить режим без текста — сюда не попасть
+        runAbortReason = 'Не задан текст для Inside comment. Прогон остановлен.';
+        const result = await failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'no-comment-field' });
+        state.stopRequested = true;
+        return result;
+      }
+      setProgress({ action: 'дописываю Inside comment' });
+      let commentGroup;
+      try {
+        commentGroup = await waitFor(() => {
+          const g = findFieldGroup(modal, 'Comment (internal)');
+          return g && g.querySelector('textarea') ? g : null;
+        });
+      } catch (e) {
+        if (e instanceof StopSignal) throw e;
+        console.warn(`[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: в окне нет поля Comment (internal).`);
+        return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'no-comment-field' });
+      }
+      const commentArea = commentGroup.querySelector('textarea');
+      const before = commentArea.value;
+      const wanted = appendToComment(before, currentCommentText);
+      if (wanted !== before) {
+        setInputValue(commentArea, wanted);
+        commentArea.blur();
+        commentArea.dispatchEvent(new FocusEvent('blur', { bubbles: true }));
+        await interruptibleSleep(CONFIG.stepDelay);
+      }
+      if (commentArea.value !== wanted) {
+        console.warn(
+          `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: сайт не принял комментарий — в поле ` +
+          `"${commentArea.value}", а должно быть "${wanted}". Статус не меняю.`
+        );
+        return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'comment-not-accepted' });
+      }
+      commentWritten = { before, after: wanted, appended: wanted !== before.replace(/\s+$/, '') };
+      console.log(
+        `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: ` +
+        (commentWritten.appended ? `Inside comment теперь "${wanted}".` : 'текст уже стоит в конце Inside comment — не дописываю.')
+      );
+    }
+
     checkStop();
 
     // Находим поле Status. Форма внутри модалки может рендериться с задержкой
@@ -3018,7 +3168,7 @@
       workflow.fillTransactionIdFromList && currentListPairs
         ? currentListPairs.get(String(ticketId))
         : null;
-    const guard = armSaveGuard(ticketId, workflow, expectedTx);
+    const guard = armSaveGuard(ticketId, workflow, expectedTx, commentWritten ? commentWritten.after : null);
     try {
       setProgress({ action: 'жму Apply' });
       fireClick(applyBtn);
@@ -3077,7 +3227,8 @@
       `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: готово ✅` +
       (amountFilled ? ` (вписана сумма "${amountFilled}")` : '') +
       (transactionIdFilled ? ` (вписан Transaction ID "${transactionIdFilled}")` : '') +
-      (currentReplacedTransactionId ? ` (вместо "${currentReplacedTransactionId}")` : '')
+      (currentReplacedTransactionId ? ` (вместо "${currentReplacedTransactionId}")` : '') +
+      (commentWritten && commentWritten.appended ? ' (дописан Inside comment)' : '')
     );
 
     const success = { ticketId, status: 'success' };
@@ -3086,6 +3237,7 @@
     if (amountFilled) success.amountFilled = amountFilled;
     if (transactionIdFilled) success.transactionIdFilled = transactionIdFilled;
     if (transactionLoadNote) success.transactionLoadNote = transactionLoadNote;
+    if (commentWritten) success.commentAppended = commentWritten.appended;
     return success;
   }
 
@@ -3103,6 +3255,7 @@
     currentListDuplicates = null;
     currentListDropped = null;
     currentOverwriteTx = false;
+    currentCommentText = null;
     let autopilot = false;
     let askedInWindow = false;
     // Итог проверки списка на сайте из окна ввода (null — проверки не было)
@@ -3121,6 +3274,7 @@
       );
       autopilot = entered.autopilot;
       currentOverwriteTx = !!entered.overwriteTx;
+      currentCommentText = workflow.appendComment ? entered.commentText || null : null;
       listPrecheck = autopilot ? entered.precheck || null : null;
       if (currentOverwriteTx) {
         console.warn(
@@ -3147,6 +3301,21 @@
     // Колонка Transaction Status для такого режима обязательна: без неё
     // каждый тикет всё равно будет пропущен, так что честнее не начинать
     // прогон, а сказать, чего не хватает.
+    // То же с типом тикета: без колонки Ticket type каждый тикет пропустится
+    if (workflow.requiredTicketType && !getColumnIndex('ticket type')) {
+      alert(
+        'Не найдена колонка Ticket type — прогон не начат.\n\n' +
+        `Режим «${workflow.buttonLabel}» берёт только тикеты типа "${workflow.requiredTicketType}", ` +
+        'а сверить это без колонки нечем.\n\n' +
+        'Включи колонку Ticket type в настройках таблицы и запусти снова.'
+      );
+      return;
+    }
+    if (workflow.appendComment && !currentCommentText) {
+      alert('Не задан текст для Inside comment — прогон не начат.');
+      return;
+    }
+
     if (workflow.requiredTransactionStatus && !getTransactionStatusColumnIndex()) {
       alert(
         'Не найдена колонка Transaction Status — прогон не начат.\n\n' +
@@ -3424,12 +3593,16 @@
       );
       let droppedNew = 0;
       results.forEach((r) => {
-        if (!r || r.status !== 'skipped' || r.reason !== 'wrong-external-status') return;
+        // Чужой тип тикета (режим Sent for processing) сам не поменяется —
+        // такой тикет выбывает так же, как тикет в чужом статусе
+        if (!r || r.status !== 'skipped') return;
+        if (r.reason !== 'wrong-external-status' && r.reason !== 'wrong-ticket-type') return;
         if (!currentListPairs.has(r.ticketId) || done.has(r.ticketId)) return;
         if (!allDropped.has(r.ticketId)) droppedNew++;
         allDropped.set(r.ticketId, {
           ticketId: r.ticketId,
-          externalStatus: r.externalStatus || '',
+          externalStatus:
+            r.reason === 'wrong-ticket-type' ? `тип тикета ${r.ticketType || '(пусто)'}` : r.externalStatus || '',
           at: Date.now(),
         });
       });
@@ -4246,6 +4419,16 @@
     if (txUnverified.length > 0) {
       summaryLines.push(`  • Transaction ID вписан, но не проверен: ${txUnverified.length}`);
     }
+    // Режим Sent for processing (с 0.29): что стало с Inside comment
+    if (workflow.appendComment && successCount > 0) {
+      const appended = successResults.filter((r) => r.commentAppended === true).length;
+      const already = successResults.filter((r) => r.commentAppended === false).length;
+      summaryLines.push(`  • из них с дописанным Inside comment: ${appended}`);
+      if (already > 0) {
+        summaryLines.push(`  • текст уже стоял в конце Inside comment, второй раз не дописывали: ${already}`);
+      }
+      if (currentCommentText) summaryLines.push(`  • дописанный текст: «${currentCommentText}»`);
+    }
     if (!hasProcessingDateColumn) {
       if (successCount > 0) {
         summaryLines.push(`  • возраст не считали: на экране нет колонки Processing Date`);
@@ -4614,6 +4797,7 @@
   };
 
   function listStorageKey(workflow) {
+    if (workflow.storageKey) return workflow.storageKey;
     return workflow.fillTransactionIdFromList ? LIST_STORAGE_KEYS.pairs : LIST_STORAGE_KEYS.ids;
   }
 
@@ -4640,6 +4824,9 @@
   // человек, собирая список, а не скрипт. Сбрасывается в начале каждого
   // прогона и между запусками не запоминается: включать её надо осознанно.
   let currentOverwriteTx = false;
+  // Текст, который режим Sent for processing дописывает в Inside comment
+  // (с 0.29). Один на весь прогон, вводится в окне списка.
+  let currentCommentText = null;
 
   // Запись о дубле в том виде, в каком она лежит в памяти списка
   function duplicateRecord(r, fromThisRun) {
@@ -4869,6 +5056,26 @@
   // Возвращает { pairs, state, autopilot } — запуск по списку,
   //            { pairs: null, state: null, autopilot: false } — по экрану,
   //            null — отмена.
+  // Последний текст комментария режима Sent for processing — удобство, не
+  // данные: пропадёт (приватное окно, запрет хранилища) — впишут заново.
+  function commentDraftKey(workflow) {
+    return `th-bulk-approve:${workflow.id}-comment:v1-beta`;
+  }
+  function readCommentDraft(workflow) {
+    try {
+      return window.localStorage.getItem(commentDraftKey(workflow)) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+  function writeCommentDraft(workflow, text) {
+    try {
+      window.localStorage.setItem(commentDraftKey(workflow), text);
+    } catch (e) {
+      /* хранилище недоступно — текст просто не запомнится */
+    }
+  }
+
   function showTicketListWindow(workflow) {
     return new Promise((resolve) => {
       let settled = false;
@@ -4924,10 +5131,36 @@
           `На экране сейчас тикетов: ${rowsOnScreen}.`,
           'Будут обработаны только те, у кого External Status — один из:',
           ...workflow.requiredExternalStatuses.map((name) => `  • ${name}`),
-          `Остальные пропускаются. У подходящих будет выставлен статус ` +
-            `"${workflow.targetStatusLabel}" и нажат Apply.`,
+          ...(workflow.requiredTicketType
+            ? [`и при этом тип тикета (Ticket type) — ${workflow.requiredTicketType}.`]
+            : []),
+          `Остальные пропускаются. У подходящих ` +
+            (workflow.appendComment ? 'к Inside comment допишется текст ниже (через « // »), ' : '') +
+            `будет выставлен статус "${workflow.targetStatusLabel}" и нажат Apply.`,
         ].join('\n');
         body.appendChild(plan);
+
+        // Текст для Inside comment (режим Sent for processing, с 0.29): один
+        // на все тикеты. Последний введённый запоминается в этом браузере.
+        let commentInput = null;
+        if (workflow.appendComment) {
+          const commentLabel = document.createElement('div');
+          commentLabel.textContent =
+            'Текст, который допишется в Inside comment каждого тикета ' +
+            '(старый комментарий останется, новый текст пойдёт после « // »):';
+          commentLabel.style.cssText = 'color:#333;margin-bottom:6px;font-weight:600';
+          body.appendChild(commentLabel);
+          commentInput = document.createElement('input');
+          commentInput.type = 'text';
+          commentInput.className = 'bulk-approve-beta-comment-text';
+          commentInput.value = readCommentDraft(workflow);
+          commentInput.placeholder = 'Например: Sent for processing to the agent';
+          commentInput.style.cssText = [
+            'width:100%', 'box-sizing:border-box', 'font-size:14px', 'padding:8px',
+            'border:1px solid #ccc', 'border-radius:4px', 'margin-bottom:12px',
+          ].join(';');
+          body.appendChild(commentInput);
+        }
 
         const hint = document.createElement('div');
         hint.textContent = needsPairs
@@ -5128,10 +5361,15 @@
             const r = precheck.result;
             lines.push(`Проверено на сайте: ${r.checked}`);
             lines.push(
-              `  • к прогону (статус ${workflow.requiredExternalStatuses.join(' / ')}): ${r.ready.length}`
+              `  • к прогону (статус ${workflow.requiredExternalStatuses.join(' / ')}` +
+                (workflow.requiredTicketType ? `, тип ${workflow.requiredTicketType}` : '') +
+                `): ${r.ready.length}`
             );
             if (r.wrongStatus.length > 0) {
-              lines.push(`  • другой статус — пропущу, не открывая: ${r.wrongStatus.length}`);
+              lines.push(
+                `  • другой ${workflow.requiredTicketType ? 'статус или тип тикета' : 'статус'} — ` +
+                  `пропущу, не открывая: ${r.wrongStatus.length}`
+              );
               const byStatus = countByStatus(r.wrongStatus);
               byStatus.slice(0, 5).forEach(([name, count]) => lines.push(`      ${name}: ${count}`));
               if (byStatus.length > 5) {
@@ -5394,26 +5632,39 @@
             });
           }
 
+          const commentMissing = !!commentInput && commentText() === '';
+          if (commentMissing) {
+            lines.push('');
+            lines.push('Впиши текст для Inside comment — без него запуск закрыт.');
+          }
+
           const blocked =
+            commentMissing ||
             parsed.pairs.size === 0 ||
             parsed.badLines.length > 0 ||
             parsed.duplicateTickets.length > 0 ||
             parsed.duplicateTransactions.length > 0;
 
           status.textContent = lines.join('\n');
-          status.style.color = blocked && parsed.pairs.size > 0 ? '#B00020' : '#555';
+          status.style.color = blocked && (parsed.pairs.size > 0 || commentMissing) ? '#B00020' : '#555';
           lastBlocked = blocked;
           updatePrecheck(remainingIds);
           updateRunButton();
 
-          // По экрану запускать нечего, если экран пуст
-          screenBtn.disabled = rowsOnScreen === 0;
-          screenBtn.style.opacity = rowsOnScreen === 0 ? '0.5' : '1';
-          screenBtn.style.cursor = rowsOnScreen === 0 ? 'default' : 'pointer';
+          // По экрану запускать нечего, если экран пуст (или не задан текст комментария)
+          const screenOff = rowsOnScreen === 0 || commentMissing;
+          screenBtn.disabled = screenOff;
+          screenBtn.style.opacity = screenOff ? '0.5' : '1';
+          screenBtn.style.cursor = screenOff ? 'default' : 'pointer';
         };
+
+        // Текст комментария — одной строкой, без пробелов по краям
+        const commentText = () =>
+          commentInput ? commentInput.value.replace(/\s+/g, ' ').trim() : '';
 
         area.addEventListener('input', refresh);
         autoBox.addEventListener('change', refresh);
+        if (commentInput) commentInput.addEventListener('input', refresh);
         refresh();
 
         resetBtn.addEventListener('click', () => {
@@ -5424,7 +5675,8 @@
         cancelBtn.addEventListener('click', () => finish(null));
         screenBtn.addEventListener('click', () => {
           if (screenBtn.disabled) return;
-          finish({ pairs: null, state: null, autopilot: false, overwriteTx: false });
+          if (commentInput) writeCommentDraft(workflow, commentText());
+          finish({ pairs: null, state: null, autopilot: false, overwriteTx: false, commentText: commentText() });
         });
         runBtn.addEventListener('click', () => {
           if (runBtn.disabled) return;
@@ -5443,7 +5695,9 @@
             runs: keep ? saved.runs : 0,
           };
           writeListStorage(storageKey, state);
+          if (commentInput) writeCommentDraft(workflow, commentText());
           finish({
+            commentText: commentText(),
             pairs: parsed.pairs,
             state,
             autopilot: autoBox.checked && !autoBox.disabled,
