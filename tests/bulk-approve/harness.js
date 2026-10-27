@@ -235,11 +235,13 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
             numberWallet: t.userWallet || '01080969968',
             status: t.txId ? (t.txStatusName || 'OK') : '',
             commentSupport: t.insideComment || '',
+            userType: t.userType || 'New player',
             // Agent's files — HTML-ссылками, как колонка файлов на сайте
             documentsExternal: (t.agentFiles || []).map((f) =>
               `<a href='/admin/amazon/?type=6&url=${encodeURIComponent(f)}' target='_blank'>${f}</a>`).join('<br>'),
           };
           if (site.behaviour.omitAgentFiles && site.behaviour.omitAgentFiles.has(id)) delete row.documentsExternal;
+          if (site.behaviour.omitUserType && site.behaviour.omitUserType.has(id)) delete row.userType;
           return row;
         }),
         otherData: { hasMore: pageNo * per < found.length },

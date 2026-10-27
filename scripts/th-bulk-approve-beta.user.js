@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.24
+// @version      0.25
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -812,6 +812,8 @@
         userWallet: String(r.numberWallet == null ? '' : r.numberWallet).trim(),
         // Inside comment (с 0.22)
         insideComment: String(r.commentSupport == null ? '' : r.commentSupport).trim(),
+        // Колонка Type (с 0.25) — по ней видно VIP. undefined — поля в ответе нет
+        userType: 'userType' in r ? String(r.userType == null ? '' : r.userType).trim() : undefined,
       }))
       .filter((r) => r.ticketId !== '');
     return { kind: 'ok', rows, hasMore: !!(json.otherData && json.otherData.hasMore) };
@@ -6288,6 +6290,11 @@
       if (f.state === 'missing') return 'нет данных';
       return `${f.count} ${pluralRu(f.count, 'файл', 'файла', 'файлов')}`;
     };
+    // VIP — по колонке Type тикета (с 0.25): «VIP» в названии типа пользователя
+    const vipNote = (row) => {
+      if (row.userType === undefined) return 'нет данных';
+      return /\bvip\b/i.test(row.userType) ? 'VIP' : 'не VIP';
+    };
     const workbookFor = (ticketIds) => {
       const byCountry = new Map();
       ticketIds.forEach((id) => {
@@ -6298,6 +6305,8 @@
           id,
           row.externalStatus,
           row.userId,
+          vipNote(row),
+          row.userType === undefined ? '' : row.userType,
           row.subagent,
           row.insideComment,
           row.transactionId,
@@ -6311,23 +6320,24 @@
       });
       const countries = [...byCountry.keys()].sort((a, b) => a.localeCompare(b));
       // Сводка справа: сколько тикетов у каждого субагента на этом листе.
-      // Числа — формулами по колонке «Субагент» (D) основной таблицы: поправят
+      // Числа — формулами по колонке «Субагент» (F) основной таблицы: поправят
       // строки — сводка пересчитается. Точное сравнение через SUMPRODUCT, а не
       // COUNTIF: в COUNTIF символы * ? и > в названии считались бы шаблоном.
       const header = [
-        'Ticket ID', 'External Status', 'User ID', 'Субагент', 'Inside comment',
+        'Ticket ID', 'External Status', 'User ID', 'VIP', 'Type', 'Субагент', 'Inside comment',
         'Transaction ID', 'Статус транзакции', 'Департамент', 'Кошелёк агента',
         'Кошелёк пользователя', "Agent's files",
       ];
       // Буквы колонок — от ширины основной таблицы: добавят колонку — формулы не съедут
-      const subCol = xlsxColumn(header.indexOf('Субагент'));
+      const subIdx = header.indexOf('Субагент');
+      const subCol = xlsxColumn(subIdx);
       const nameCol = xlsxColumn(header.length + 1);
       const countCol = xlsxColumn(header.length + 2);
       const subagentSummary = (sheetRows) => {
         const last = sheetRows.length + 1;
         const range = `$${subCol}$2:$${subCol}$${last}`;
         const counts = new Map();
-        sheetRows.forEach((r) => counts.set(r[3] || '', (counts.get(r[3] || '') || 0) + 1));
+        sheetRows.forEach((r) => counts.set(r[subIdx] || '', (counts.get(r[subIdx] || '') || 0) + 1));
         const ordered = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
         const rowsOut = ordered.map(([name, count], i) => {
           const at = i + 2;
@@ -6350,7 +6360,7 @@
             countries.map((country) => ({
               name: country,
               header,
-              widths: [14, 26, 14, 32, 30, 18, 18, 22, 24, 24, 14],
+              widths: [14, 26, 14, 8, 22, 32, 30, 18, 18, 22, 24, 24, 14],
               rows: byCountry.get(country),
               side: subagentSummary(byCountry.get(country)),
             }))
