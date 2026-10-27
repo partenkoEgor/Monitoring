@@ -602,7 +602,7 @@ const scenarios = {
     tickets[ids[2]].subagent = 'Vodafone XC40';
     tickets[ids[5]].country = 'Egypt';
     tickets[ids[3]].agentFiles = ['BTDocuments/1/x/b1.png', 'BTDocuments/1/x/b2.pdf'];
-    tickets[ids[2]].userType = 'VIP player';
+    tickets[ids[2]].userType = 'VIP-Casino';
     tickets[ids[1]].userType = 'Loss-making player (inexperienced)';
     const behaviour = { listApi: true, hiddenFromFilter: [ids[4]], omitAgentFiles: new Set([ids[5]]), omitUserType: new Set([ids[5]]) };
     const page = createPage({ tickets, onScreen: ['19999999', ids[0], ids[1]], behaviour });
@@ -682,11 +682,12 @@ const scenarios = {
     check('Agent\'s files в файле: «пусто» и «1 файл»', sh(1).includes('<t>пусто</t>') && sh(2).includes('<t>1 файл</t>'), sh(2));
 
     const cell = (ref, text) => `<c r="${ref}" s="3" t="inlineStr"><is><t>${text}</t></is></c>`;
-    check('VIP: по колонке Type — «VIP» и «не VIP», Type как есть',
-      sh(1).includes(cell('D3', 'VIP') + cell('E3', 'VIP player')) &&
-      sh(1).includes(cell('D2', 'не VIP') + cell('E2', 'New player')) &&
-      sh(2).includes(cell('D2', 'не VIP') + cell('E2', 'Loss-making player (inexperienced)')), sh(1) + '\n' + sh(2));
-    check('VIP: поля Type нет в ответе — «нет данных», а не «не VIP»',
+    check('VIP: по колонке Type — «VIP», у не VIP ячейка пустая, Type как есть',
+      sh(1).includes(cell('D3', 'VIP') + cell('E3', 'VIP-Casino')) &&
+      sh(1).includes('<c r="D2" s="3"/>' + cell('E2', 'New player')) &&
+      sh(2).includes('<c r="D2" s="3"/>' + cell('E2', 'Loss-making player (inexperienced)')) &&
+      !sh(1).includes('не VIP') && !sh(2).includes('не VIP'), sh(1) + '\n' + sh(2));
+    check('VIP: поля Type нет в ответе — «нет данных», а не пусто',
       sh(2).includes(cell('D3', 'нет данных') + '<c r="E3" s="3"/>'), sh(2));
 
     // Сводка по субагентам справа, через один пустой столбец (N)
