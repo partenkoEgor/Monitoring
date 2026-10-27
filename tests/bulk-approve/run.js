@@ -691,13 +691,15 @@ const scenarios = {
 
     // Сводка по субагентам справа, через один пустой столбец (N)
     const s1 = sh(1); // Algeria: ids[0] — Miruca, ids[2] — Vodafone
-    check('сводка: шапка в O1:P1 жирная, столбец N пустой',
-      /<c r="O1" s="1" t="inlineStr"><is><t>Субагент<\/t><\/is><\/c><c r="P1" s="1" t="inlineStr"><is><t>Тикетов<\/t>/.test(s1) &&
+    check('сводка: шапка в O1:Q1 жирная, столбец N пустой',
+      /<c r="O1" s="1" t="inlineStr"><is><t>Субагент<\/t><\/is><\/c><c r="P1" s="1" t="inlineStr"><is><t>Тикетов<\/t><\/is><\/c><c r="Q1" s="1" t="inlineStr"><is><t>из них VIP<\/t>/.test(s1) &&
       !/<c r="N\d+"/.test(s1), s1.slice(0, 1500));
     check('сводка: субагенты с формулами точного совпадения по колонке F',
       s1.includes('<c r="O2" s="3" t="inlineStr"><is><t>Miruca BaridiMob Algeria</t></is></c><c r="P2" s="2"><f>SUMPRODUCT(--($F$2:$F$3=O2))</f><v>1</v></c>') &&
+      s1.includes('<c r="Q2" s="2"><f>SUMPRODUCT(($F$2:$F$3=O2)*($D$2:$D$3=&quot;VIP&quot;))</f><v>0</v></c>') &&
+      s1.includes('<c r="Q3" s="2"><f>SUMPRODUCT(($F$2:$F$3=O3)*($D$2:$D$3=&quot;VIP&quot;))</f><v>1</v></c>') &&
       s1.includes('<t>Vodafone XC40</t></is></c><c r="P3" s="2"><f>SUMPRODUCT(--($F$2:$F$3=O3))</f><v>1</v></c>'), s1);
-    check('сводка: «Итого» жирным и суммой', /<c r="O4" s="1" t="inlineStr"><is><t>Итого<\/t><\/is><\/c><c r="P4" s="2"><f>SUM\(P2:P3\)<\/f><v>2<\/v>/.test(s1), s1);
+    check('сводка: «Итого» жирным и суммой, VIP по гео — 1', /<c r="O4" s="1" t="inlineStr"><is><t>Итого<\/t><\/is><\/c><c r="P4" s="2"><f>SUM\(P2:P3\)<\/f><v>2<\/v><\/c><c r="Q4" s="2"><f>SUM\(Q2:Q3\)<\/f><v>1<\/v>/.test(s1), s1);
     check('автофильтр — только на основной таблице', s1.includes('<autoFilter ref="A1:M3"/>'), s1.slice(-300));
     check('сводка Egypt: один субагент, 2 тикета, сортировка по убыванию',
       sh(2).includes('<f>SUMPRODUCT(--($F$2:$F$3=O2))</f><v>2</v>') && /<t>Итого<\/t>.*<v>2<\/v>/.test(sh(2)), sh(2));

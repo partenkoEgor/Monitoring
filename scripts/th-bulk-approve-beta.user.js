@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.25
+// @version      0.26
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -6319,8 +6319,9 @@
         ]);
       });
       const countries = [...byCountry.keys()].sort((a, b) => a.localeCompare(b));
-      // Сводка справа: сколько тикетов у каждого субагента на этом листе.
-      // Числа — формулами по колонке «Субагент» (F) основной таблицы: поправят
+      // Сводка справа: сколько тикетов у каждого субагента на этом листе и
+      // сколько из них VIP (с 0.26; «Итого» — VIP по всему гео).
+      // Числа — формулами по колонкам «Субагент» (F) и «VIP» (D): поправят
       // строки — сводка пересчитается. Точное сравнение через SUMPRODUCT, а не
       // COUNTIF: в COUNTIF символы * ? и > в названии считались бы шаблоном.
       const header = [
@@ -6333,24 +6334,38 @@
       const subCol = xlsxColumn(subIdx);
       const nameCol = xlsxColumn(header.length + 1);
       const countCol = xlsxColumn(header.length + 2);
+      const vipIdx = header.indexOf('VIP');
+      const vipCol = xlsxColumn(vipIdx);
+      const vipCountCol = xlsxColumn(header.length + 3);
       const subagentSummary = (sheetRows) => {
         const last = sheetRows.length + 1;
         const range = `$${subCol}$2:$${subCol}$${last}`;
+        const vipRange = `$${vipCol}$2:$${vipCol}$${last}`;
         const counts = new Map();
-        sheetRows.forEach((r) => counts.set(r[subIdx] || '', (counts.get(r[subIdx] || '') || 0) + 1));
+        const vips = new Map();
+        sheetRows.forEach((r) => {
+          const key = r[subIdx] || '';
+          counts.set(key, (counts.get(key) || 0) + 1);
+          if (r[vipIdx] === 'VIP') vips.set(key, (vips.get(key) || 0) + 1);
+        });
         const ordered = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
         const rowsOut = ordered.map(([name, count], i) => {
           const at = i + 2;
+          const match = name ? `(${range}=${nameCol}${at})` : `(${range}="")`;
           return [
             name || '(без субагента)',
-            {
-              f: name ? `SUMPRODUCT(--(${range}=${nameCol}${at}))` : `SUMPRODUCT(--(${range}=""))`,
-              v: count,
-            },
+            { f: `SUMPRODUCT(--${match})`, v: count },
+            { f: `SUMPRODUCT(${match}*(${vipRange}="VIP"))`, v: vips.get(name) || 0 },
           ];
         });
-        rowsOut.push(['Итого', { f: `SUM(${countCol}2:${countCol}${ordered.length + 1})`, v: sheetRows.length }]);
-        return { header: ['Субагент', 'Тикетов'], widths: [34, 10], rows: rowsOut, boldLastRow: true };
+        const end = ordered.length + 1;
+        const vipTotal = sheetRows.filter((r) => r[vipIdx] === 'VIP').length;
+        rowsOut.push([
+          'Итого',
+          { f: `SUM(${countCol}2:${countCol}${end})`, v: sheetRows.length },
+          { f: `SUM(${vipCountCol}2:${vipCountCol}${end})`, v: vipTotal },
+        ]);
+        return { header: ['Субагент', 'Тикетов', 'из них VIP'], widths: [34, 10, 11], rows: rowsOut, boldLastRow: true };
       };
       return {
         tickets: ticketIds.length,
