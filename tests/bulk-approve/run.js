@@ -728,6 +728,82 @@ const scenarios = {
     const r2 = await openReport('screen');
     check('по экрану: проверены 3 тикета экрана', /Проверено: 3 \(тикеты на экране\)/.test(r2.text) && /Agent's files заполнено: 1/.test(r2.text), r2.text);
   },
+
+  async 26() {
+    console.log('\n[26] Sent for processing (209): дописать Inside comment через « // », статус 209 — только BT M в Approved (M) (0.29)');
+    if (!IS_BETA) return console.log('  — только бета');
+    const SFP_BTN = 'BETA Sent for processing (209)';
+    const TEXT = 'Sent to agent for processing';
+    const { tickets, ids } = makeTickets(5);
+    tickets[ids[0]].insideComment = 'Incorrect complaint details';
+    // ids[1] — пустой комментарий
+    tickets[ids[2]].ticketType = 'BT P';                       // чужой тип — не трогать
+    tickets[ids[3]].externalStatus = 'Sent for processing (M)'; // чужой статус — не трогать
+    tickets[ids[4]].insideComment = `старый // ${TEXT}`;        // текст уже дописан прошлым прогоном
+    const listText = ids.join('\n');
+
+    // Без текста комментария запуск закрыт — и по списку, и по экрану
+    const page = createPage({ tickets, onScreen: ['19999999', ids[0]], behaviour: { listApi: true } });
+    const empty = await page.run({ button: SFP_BTN, listText, comment: '', onlyWindow: true });
+    check('без текста комментария обе кнопки запуска закрыты', empty.startDisabled && empty.screenDisabled,
+      JSON.stringify(empty));
+    check('окно говорит, чего не хватает', /Впиши текст для Inside comment/.test(empty.windowText), empty.windowText);
+
+    const r = await page.run({ button: SFP_BTN, listText, comment: `  ${TEXT}  ` });
+    check('проверка списка: чужой тип и чужой статус пропущены, к прогону 3',
+      /к прогону \(статус Approved \(M\), тип BT M\): 3/.test(r.precheckText) &&
+      /другой статус или тип тикета — пропущу, не открывая: 2/.test(r.precheckText) &&
+      /тип тикета BT P: 1/.test(r.precheckText), r.precheckText);
+    const saves = page.site.saves;
+    const saveOf = (id) => saves.find((x) => x.requestId === id);
+    check('сохранено ровно 3 тикета', saves.length === 3, JSON.stringify(saves));
+    check('статус — 209 Sent for processing (M), id 204',
+      saves.every((x) => String(x.externalStatusId) === '204') &&
+      page.site.applied.every((a) => a.status === '209 Sent for processing (M)'), JSON.stringify(page.site.applied));
+    check('к старому комментарию текст дописан через « // »',
+      saveOf(ids[0]) && saveOf(ids[0]).commentSupport === `Incorrect complaint details // ${TEXT}`,
+      JSON.stringify(saveOf(ids[0])));
+    check('в пустой комментарий — просто текст, без « // »',
+      saveOf(ids[1]) && saveOf(ids[1]).commentSupport === TEXT, JSON.stringify(saveOf(ids[1])));
+    check('уже дописанный текст второй раз не дописан',
+      saveOf(ids[4]) && saveOf(ids[4]).commentSupport === `старый // ${TEXT}`, JSON.stringify(saveOf(ids[4])));
+    check('BT P и чужой статус даже не открывались',
+      !page.site.modalOpens.includes(ids[2]) && !page.site.modalOpens.includes(ids[3]),
+      JSON.stringify(page.site.modalOpens));
+    check('Transaction ID не трогали', saves.every((x) => x.transactionId === ''), JSON.stringify(saves));
+    check('отчёт: дописано 2, уже стоял 1, текст',
+      /из них с дописанным Inside comment: 2/.test(r.text) &&
+      /текст уже стоял в конце Inside comment, второй раз не дописывали: 1/.test(r.text) &&
+      r.text.includes(`дописанный текст: «${TEXT}»`), r.text);
+    const mem = JSON.parse(page.w.localStorage.getItem('th-bulk-approve:sfp-list:v1-beta') || 'null');
+    check('своя память списка, 225 не задета',
+      mem && mem.done.length === 3 && !page.w.localStorage.getItem('th-bulk-approve:ticket-list:v1-beta'),
+      JSON.stringify(mem && mem.done));
+    check('текст комментария запомнился для следующего раза',
+      page.w.localStorage.getItem('th-bulk-approve:sfp-comment:v1-beta') === TEXT);
+
+    // По экрану, без запроса списка: тип сверяется по колонке Ticket type таблицы
+    const s = makeTickets(2, 22800000);
+    s.tickets[s.ids[1]].ticketType = 'BT P';
+    const pageS = createPage({ tickets: s.tickets, onScreen: ['19999999', ...s.ids] });
+    const rs = await pageS.run({ button: SFP_BTN, byScreen: true, comment: TEXT });
+    check('по экрану: BT M сохранён, BT P пропущен без открытия',
+      pageS.site.saves.length === 1 && pageS.site.saves[0].requestId === s.ids[0] &&
+      !pageS.site.modalOpens.includes(s.ids[1]), JSON.stringify(pageS.site.saves));
+    check('по экрану: причина пропуска в отчёте', rs.text.includes('тип тикета (колонка Ticket type) не подходит'), rs.text);
+
+    // Страница отправила бы не тот комментарий — защита сохранения не пускает
+    const g = makeTickets(2, 22900000);
+    const pageG = createPage({
+      tickets: g.tickets, onScreen: ['19999999', ...g.ids],
+      behaviour: { saveTamper: (id, f) => { f.commentSupport = 'стёрто'; } },
+    });
+    const rg = await pageG.run({ button: SFP_BTN, byScreen: true, comment: TEXT });
+    check('чужой комментарий: стоп защитой сохранения',
+      /ЗАЩИТА СОХРАНЕНИЯ: тикет 22900001: уходил Inside comment "стёрто", а должен был "Sent to agent for processing"/.test(rg.text),
+      rg.text.slice(0, 500));
+    check('чужой комментарий: до сервера не дошло', pageG.site.saves.length === 0, JSON.stringify(pageG.site.saves));
+  },
 };
 
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map((x) => x.trim())) : null;
