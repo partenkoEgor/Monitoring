@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.27
+// @version      0.28
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -6307,7 +6307,6 @@
           row.externalStatus,
           row.userId,
           vipNote(row),
-          row.userType === undefined ? '' : row.userType,
           row.subagent,
           row.insideComment,
           row.transactionId,
@@ -6322,11 +6321,11 @@
       const countries = [...byCountry.keys()].sort((a, b) => a.localeCompare(b));
       // Сводка справа: сколько тикетов у каждого субагента на этом листе и
       // сколько из них VIP (с 0.26; «Итого» — VIP по всему гео).
-      // Числа — формулами по колонкам «Субагент» (F) и «VIP» (D): поправят
+      // Числа — формулами по колонкам «Субагент» (E) и «VIP» (D): поправят
       // строки — сводка пересчитается. Точное сравнение через SUMPRODUCT, а не
       // COUNTIF: в COUNTIF символы * ? и > в названии считались бы шаблоном.
       const header = [
-        'Ticket ID', 'External Status', 'User ID', 'VIP', 'Type', 'Субагент', 'Inside comment',
+        'Ticket ID', 'External Status', 'User ID', 'VIP', 'Субагент', 'Inside comment',
         'Transaction ID', 'Статус транзакции', 'Департамент', 'Кошелёк агента',
         'Кошелёк пользователя', "Agent's files",
       ];
@@ -6376,7 +6375,7 @@
             countries.map((country) => ({
               name: country,
               header,
-              widths: [14, 26, 14, 8, 22, 32, 30, 18, 18, 22, 24, 24, 14],
+              widths: [14, 26, 14, 8, 32, 30, 18, 18, 22, 24, 24, 14],
               rows: byCountry.get(country),
               side: subagentSummary(byCountry.get(country)),
             }))
