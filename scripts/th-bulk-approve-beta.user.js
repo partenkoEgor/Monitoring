@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.29
+// @version      0.30
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -6314,8 +6314,35 @@
   }
 
   // Окно проверки: список Ticket ID или «по экрану», ход проверки, ошибки.
-  // Закрывается само, когда готов отчёт.
+  // Закрывается само, когда готов отчёт. Общее у двух кнопок, которые только
+  // читают: проверки Agent's files (с 0.20) и состояния тикетов (с 0.30) —
+  // у них свои заголовок, подсказка и отчёт.
   function runAgentFilesCheck() {
+    runSiteCheck({
+      title: "Проверка Agent's files",
+      hint:
+        "Скрипт только читает: спросит сайт о каждом тикете и разделит их на «Agent's files пусто» " +
+        'и «заполнено». Окна Edit не открываются, в тикетах ничего не меняется. Вставь список ' +
+        'Ticket ID — по одному в строке — или проверь тикеты, которые сейчас на экране.',
+      logName: "Проверка Agent's files",
+      onDone: showAgentFilesReport,
+    });
+  }
+
+  function runTicketStateCheck() {
+    runSiteCheck({
+      title: 'Состояние тикетов',
+      hint:
+        'Скрипт только читает: спросит сайт о каждом тикете и покажет его текущее состояние — ' +
+        "External Status, Transaction ID, Inside comment, Agent's files, User ID и субагента — " +
+        'с файлом Excel. Окна Edit не открываются, в тикетах ничего не меняется. Вставь список ' +
+        'Ticket ID — по одному в строке — или проверь тикеты, которые сейчас на экране.',
+      logName: 'Состояние тикетов',
+      onDone: showTicketStateReport,
+    });
+  }
+
+  function runSiteCheck({ title: titleText, hint: hintText, logName, onDone }) {
     if (state.isRunning) return;
     // Номера тикетов с экрана читаются по карте колонок — она должна быть свежей
     refreshColumnIndexMap();
@@ -6342,14 +6369,11 @@
     const body = document.createElement('div');
     body.style.cssText = 'padding:18px 20px;overflow:auto;flex:1';
     const title = document.createElement('div');
-    title.textContent = "Проверка Agent's files";
+    title.textContent = titleText;
     title.style.cssText = 'font-weight:600;font-size:16px;margin-bottom:6px';
     const hint = document.createElement('div');
     hint.style.cssText = 'color:#555;margin-bottom:10px';
-    hint.textContent =
-      "Скрипт только читает: спросит сайт о каждом тикете и разделит их на «Agent's files пусто» " +
-      'и «заполнено». Окна Edit не открываются, в тикетах ничего не меняется. Вставь список ' +
-      'Ticket ID — по одному в строке — или проверь тикеты, которые сейчас на экране.';
+    hint.textContent = hintText;
     const area = document.createElement('textarea');
     area.rows = 10;
     area.placeholder = '22708318\n22707583';
@@ -6451,9 +6475,9 @@
           return;
         }
         close();
-        showAgentFilesReport(ids, res.rows, sourceLabel);
+        onDone(ids, res.rows, sourceLabel);
       } catch (e) {
-        console.error('[BulkApproveBETA] Проверка Agent\'s files упала:', e);
+        console.error(`[BulkApproveBETA] ${logName}: проверка упала:`, e);
         if (!closed) say(`Проверка упала: ${(e && e.message) || e}`, '#B00020');
       } finally {
         if (!closed) setBusy(false);
@@ -6662,6 +6686,94 @@
     showReportWindow(lines.join('\n'), blocks, options);
   }
 
+  // ------------------------------------------------------------------
+  // СОСТОЯНИЕ ТИКЕТОВ (с 0.30).
+  //
+  // Кнопка, которая только ЧИТАЕТ: по списку Ticket ID (или по экрану)
+  // спрашивает сайт тем же запросом списка и показывает, в каком тикет
+  // состоянии сейчас, — с файлом Excel. Строки идут в порядке списка;
+  // тикеты, которых сайт не нашёл, тоже попадают в файл — с пометкой.
+  // ------------------------------------------------------------------
+  function showTicketStateReport(ids, rows, sourceLabel) {
+    const found = ids.filter((id) => rows.has(id));
+    const notFound = ids.filter((id) => !rows.has(id));
+    const filesNote = (row) => {
+      const f = parseAgentFiles(row.agentFiles);
+      if (f.state === 'empty') return 'пусто';
+      if (f.state === 'missing') return 'нет данных';
+      return `${f.count} ${pluralRu(f.count, 'файл', 'файла', 'файлов')}`;
+    };
+    const header = [
+      'Ticket ID', 'External Status', 'Transaction ID', 'Inside comment',
+      "Agent's files", 'User ID', 'Субагент',
+    ];
+    const tableRows = ids.map((id) => {
+      const row = rows.get(id);
+      if (!row) return [id, 'сайт не нашёл по фильтру', '', '', '', '', ''];
+      return [
+        id, row.externalStatus, row.transactionId, row.insideComment,
+        filesNote(row), row.userId, row.subagent,
+      ];
+    });
+    window.__bulkApproveTicketState = tableRows.map((r) =>
+      Object.fromEntries(header.map((h, i) => [h, r[i]]))
+    );
+
+    const byStatus = countByStatus(found.map((id) => ({ externalStatus: rows.get(id).externalStatus })));
+    const withTx = found.filter((id) => rows.get(id).transactionId !== '').length;
+    const states = found.map((id) => parseAgentFiles(rows.get(id).agentFiles).state);
+    const filesFilled = states.filter((st) => st === 'filled').length;
+    const filesEmpty = states.filter((st) => st === 'empty').length;
+    const filesMissing = states.filter((st) => st === 'missing').length;
+    const lines = [
+      'СОСТОЯНИЕ ТИКЕТОВ',
+      `Проверено: ${ids.length} (${sourceLabel}), сайт нашёл: ${found.length}`,
+    ];
+    if (notFound.length > 0) {
+      lines.push(
+        `  • сайт не нашёл по фильтру: ${notFound.length} — проверь, не стоит ли на странице ` +
+          'ещё какой-то фильтр (даты, статус, отдел)'
+      );
+    }
+    if (found.length > 0) {
+      lines.push('', 'External Status:');
+      byStatus.forEach(([name, count]) => lines.push(`  • ${name || '(пусто)'}: ${count}`));
+      lines.push(
+        '',
+        `Transaction ID: заполнен ${withTx}, пусто ${found.length - withTx}`,
+        `Agent's files: есть файлы ${filesFilled}, пусто ${filesEmpty}` +
+          (filesMissing > 0 ? `, нет данных ${filesMissing} (колонки нет в ответе сайта)` : '')
+      );
+    }
+    lines.push('', 'Скрипт только читал — в тикетах ничего не менялось.');
+
+    // Та же таблица текстом — вставить в свою таблицу без файла
+    const tsvCell = (v) => String(v == null ? '' : v).replace(/[\t\r\n]+/g, ' ').trim();
+    const blocks = [{
+      label: `Таблица (${ids.length}) — ${header.join(', ')}:`,
+      text: tableRows.map((r) => r.map(tsvCell).join('\t')).join('\n'),
+    }];
+    if (notFound.length > 0) {
+      blocks.push({ label: `Сайт не нашёл (${notFound.length}) — Ticket ID:`, text: notFound.join('\n') });
+    }
+
+    const options = {
+      downloads: [{
+        kind: 'state',
+        label: `Excel (${ids.length} ${pluralRu(ids.length, 'тикет', 'тикета', 'тикетов')})`,
+        fileName: () => stampedFileName('sostoyanie-tiketov'),
+        build: () =>
+          buildSheetsXlsx([{
+            name: 'Тикеты',
+            header,
+            widths: [14, 28, 18, 40, 14, 14, 32],
+            rows: tableRows,
+          }]),
+      }],
+    };
+    showReportWindow(lines.join('\n'), blocks, options);
+  }
+
   function showReportWindow(reportText, copyBlocks, options) {
     // Если что-то пойдёт не так с вёрсткой — отчёт всё равно должен дойти
     // до человека, поэтому любой сбой откатывается на обычный alert.
@@ -6819,6 +6931,10 @@
       zIndex: 999999,
       display: 'flex',
       gap: '10px',
+      // Кнопок стало много — на узком экране переносятся, а не уезжают за край
+      flexWrap: 'wrap',
+      justifyContent: 'flex-end',
+      maxWidth: 'calc(100vw - 40px)',
     });
 
     startBtns = WORKFLOWS.map((workflow, idx) => {
@@ -6871,6 +6987,31 @@
     });
     container.appendChild(agentFilesBtn);
     startBtns.push(agentFilesBtn);
+
+    // Состояние тикетов (с 0.30) — тоже только читает
+    const stateBtn = document.createElement('button');
+    stateBtn.id = 'bulk-approve-beta-btn-ticket-state';
+    stateBtn.textContent = 'BETA Состояние тикетов';
+    Object.assign(stateBtn.style, {
+      padding: '12px 18px',
+      background: '#4F6D8F',
+      color: '#fff',
+      border: 'none',
+      borderRadius: '8px',
+      fontSize: '14px',
+      fontWeight: '600',
+      cursor: 'pointer',
+      boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+    });
+    stateBtn.addEventListener('click', () => {
+      try {
+        runTicketStateCheck();
+      } catch (e) {
+        console.error('[BulkApproveBETA] Состояние тикетов:', e);
+      }
+    });
+    container.appendChild(stateBtn);
+    startBtns.push(stateBtn);
 
     stopBtn = document.createElement('button');
     stopBtn.id = 'bulk-approve-beta-stop-btn';
