@@ -804,6 +804,70 @@ const scenarios = {
       rg.text.slice(0, 500));
     check('чужой комментарий: до сервера не дошло', pageG.site.saves.length === 0, JSON.stringify(pageG.site.saves));
   },
+
+  async 27() {
+    console.log('\n[27] Состояние тикетов — только читает: статус, Transaction ID, Inside comment, Agent\'s files, User ID, субагент + Excel (0.30)');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids } = makeTickets(4);
+    tickets[ids[0]].txId = '24085716901';
+    tickets[ids[0]].insideComment = 'старый // Sent to agent';
+    tickets[ids[0]].agentFiles = ['BTDocuments/1/x/a1.png', 'BTDocuments/1/x/a2.pdf'];
+    tickets[ids[0]].userId = 1737967889;
+    tickets[ids[1]].externalStatus = '209 Sent for processing (M)';
+    tickets[ids[1]].subagent = 'Etisalat Sebring';
+    tickets[ids[2]].insideComment = 'строка\tс табуляцией\nи переносом';
+    const page = createPage({
+      tickets, onScreen: ['19999999', ids[0]],
+      behaviour: { listApi: true, hiddenFromFilter: [ids[3]] },
+    });
+    const { d, w, site, prefix } = page;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const waitFor = async (fn) => { for (let i = 0; i < 500; i++) { const v = fn(); if (v) return v; await sleep(10); } return null; };
+    [...d.querySelectorAll('button')].find((b) => b.textContent === 'BETA Состояние тикетов').click();
+    const ov = await waitFor(() => d.querySelector(`.${prefix}-check-overlay`));
+    check('окно со своим заголовком', ov && /Состояние тикетов/.test(ov.textContent), ov && ov.textContent);
+    // Порядок списка намеренно не по возрастанию — в файле он должен сохраниться
+    const order = [ids[2], ids[0], ids[3], ids[1]];
+    ov.querySelector('textarea').value = order.join('\n');
+    ov.querySelector(`.${prefix}-check-list`).click();
+    const rep = await waitFor(() => d.querySelector(`.${prefix}-report-overlay`));
+    const text = rep ? rep.querySelector(`.${prefix}-report-text`).textContent : '';
+    check('сводка: проверено 4, нашёл 3, не нашёл 1',
+      /Проверено: 4 \(список\), сайт нашёл: 3/.test(text) && /сайт не нашёл по фильтру: 1/.test(text), text);
+    check('сводка: статусы, Transaction ID, Agent\'s files',
+      /Approved \(M\): 2/.test(text) && /209 Sent for processing \(M\): 1/.test(text) &&
+      /Transaction ID: заполнен 1, пусто 2/.test(text) && /Agent's files: есть файлы 1, пусто 2/.test(text), text);
+    const blocks = [...rep.querySelectorAll(`.${prefix}-report-copy`)].map((a) => a.value);
+    const tsv = blocks[0].split('\n').map((l) => l.split('\t'));
+    check('таблица текстом — в порядке списка, 7 колонок',
+      tsv.length === 4 && tsv.map((r) => r[0]).join(',') === order.join(',') && tsv.every((r) => r.length === 7), blocks[0]);
+    check('строка тикета: статус, транзакция, комментарий, файлы, User ID, субагент',
+      tsv[1].join('|') === `${ids[0]}|Approved (M)|24085716901|старый // Sent to agent|2 файла|1737967889|Miruca BaridiMob Algeria`, tsv[1].join('|'));
+    check('табуляция и перенос в комментарии не ломают таблицу', tsv[0][3] === 'строка с табуляцией и переносом', tsv[0].join('|'));
+    check('не найденный — строкой с пометкой', tsv[2][1] === 'сайт не нашёл по фильтру', tsv[2].join('|'));
+    check('ничего не открывалось и не сохранялось', site.modalOpens.length === 0 && site.saves.length === 0);
+
+    const btn = rep.querySelector(`.${prefix}-report-download-state`);
+    check('кнопка Excel', btn && btn.textContent === 'Excel (4 тикета)', btn && btn.textContent);
+    btn.click();
+    const buf = await new Promise((res) => {
+      const fr = new w.FileReader();
+      fr.onload = () => res(Buffer.from(fr.result));
+      fr.readAsArrayBuffer(site.blobs.at(-1));
+    });
+    fs.writeFileSync(`${__dirname}/last-ticket-state.xlsx`, buf);
+    const x = readStoredZip(buf);
+    const sh = x['xl/worksheets/sheet1.xml'] || '';
+    check('имя файла', /^sostoyanie-tiketov_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}\.xlsx$/.test(site.downloads.at(-1) || ''), site.downloads.at(-1));
+    check('один лист «Тикеты», шапка по порядку',
+      /<sheet name="Тикеты" sheetId="1"/.test(x['xl/workbook.xml'] || '') &&
+      /<t>Ticket ID<\/t>.*<t>External Status<\/t>.*<t>Transaction ID<\/t>.*<t>Inside comment<\/t>.*<t>Agent's files<\/t>.*<t>User ID<\/t>.*<t>Субагент<\/t>/.test(sh), sh.slice(0, 1200));
+    check('в файле 4 строки, первая — первый тикет списка',
+      (sh.match(/<c r="A\d+"/g) || []).length === 5 && sh.includes(`<c r="A2" s="2"><v>${ids[2]}</v>`), sh);
+    check('в файле: транзакция числом, файлы и комментарий текстом',
+      sh.includes('<v>24085716901</v>') && sh.includes('<t>2 файла</t>') && sh.includes('<t>старый // Sent to agent</t>'), sh);
+    check('автофильтр на всю таблицу', sh.includes('<autoFilter ref="A1:G5"/>'), sh.slice(-200));
+  },
 };
 
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map((x) => x.trim())) : null;
