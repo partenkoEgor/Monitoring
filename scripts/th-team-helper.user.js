@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.43
-// @description  Тринадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто его выставил, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке, обмен сохранёнными фильтрами с коллегами через текстовый код и значок у Transaction ID, который показывает скрин, приложенный к транзакции в отчётах Deposit requests и Withdrawal requests. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @version      1.44
+// @description  Тринадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто его выставил, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке, обмен сохранёнными фильтрами с коллегами через текстовый код и значок у Transaction ID, который показывает скрин, приложенный к транзакции в отчётах Deposit requests и Withdrawal requests, с проверкой по User ID. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -402,9 +402,13 @@
 
     // ── Скрин транзакции по Transaction ID ───────────────────────────
     txScreen: {
-      // Где искать транзакцию — по порядку, до первой найденной. Запрос тот
-      // же, что делает страница отчёта по Apply с номером в поле ID (дату
-      // фильтра сервер при заполненном ID не учитывает).
+      // Где искать транзакцию. Запрос тот же, что делает страница отчёта
+      // по Apply с номером в поле ID (дату фильтра сервер при заполненном
+      // ID не учитывает). Номера депозитов и выводов из разных серий могут
+      // совпадать, поэтому транзакцией тикета считается строка, у которой
+      // User ID совпадает с User ID тикета: отчёты проверяются по порядку
+      // до первого такого совпадения. Если совпадения нет нигде, берётся
+      // первая найденная строка с пометкой «другой клиент».
       //   form       — остальные поля формы отчёта, как их шлёт сама
       //                страница (date_from, date_to и id скрипт добавляет сам)
       //   userColumn — колонка ответа с User ID: у отчётов она называется по-разному
@@ -439,6 +443,9 @@
           pathPrefix: '',
         },
       ],
+      // Заголовок столбца с User ID в таблице тикетов — с ним сверяется
+      // пользователь найденной транзакции
+      userColumn: 'User ID',
       // Через сколько ответ по транзакции считается устаревшим (мс). До
       // этого повторное наведение запрос не повторяет.
       cacheTtl: 5 * 60 * 1000,
@@ -591,6 +598,17 @@
         font-weight: 500;
         word-break: break-all;
         max-width: 300px;
+      }
+      /* Пометка от функции, открывшей превью (например, «транзакция другого
+         клиента» у скрина транзакции) — между кнопками и картинкой */
+      .th-preview-note {
+        padding: 7px 12px;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.35;
+        color: #E8590C;
+        background: rgba(232, 89, 12, 0.12);
+        border-bottom: .5px solid rgba(232, 89, 12, 0.35);
       }
       .th-preview-loading {
         padding: 20px 24px;
@@ -1168,12 +1186,24 @@
       popup.style.top = pos.top + 'px';
     }
 
+    // Текст пометки приходит из атрибута data-th-preview-note — выводим
+    // его только как текст
+    function appendNote(anchor) {
+      const text = anchor.getAttribute('data-th-preview-note');
+      if (!text) return;
+      const note = document.createElement('div');
+      note.className = 'th-preview-note';
+      note.textContent = text;
+      popup.appendChild(note);
+    }
+
     function buildPopup(anchor) {
       popup.innerHTML = '';
       const { previewUrl, filePath } = resolveFileUrl(anchor);
 
       if (isImage(filePath)) {
         popup.appendChild(makeActions(anchor, previewUrl, true));
+        appendNote(anchor);
 
         const loading = document.createElement('div');
         loading.className = 'th-preview-loading';
@@ -1196,10 +1226,12 @@
 
       } else if (isPdf(filePath)) {
         popup.appendChild(makeActions(anchor, previewUrl, false));
+        appendNote(anchor);
         popup.appendChild(makeFileRow(ICON_PDF, getFileName(filePath)));
 
       } else if (isVideo(filePath)) {
         popup.appendChild(makeActions(anchor, previewUrl, false));
+        appendNote(anchor);
         popup.appendChild(makeFileRow(ICON_VIDEO, getFileName(filePath)));
       }
     }
@@ -4938,17 +4970,20 @@
   // (колонка User info) и Withdrawal requests (Payout confirmation), а у
   // тикета — лишь номер транзакции. Значок рядом с номером делает тот же
   // запрос, что страница отчёта по Apply с ID (сначала в депозитах, потом
-  // в выводах), достаёт из строки ссылку на файл и отдаёт её превью
+  // в выводах; транзакцией тикета считается строка с тем же User ID, что
+  // у тикета), достаёт из строки ссылку на файл и отдаёт её превью
   // вложений: окно, Fullscreen и Open in new tab — те же, что у обычных ссылок.
   function initTxScreen() {
     const CFG = CONFIG.txScreen;
     const HEADER = 'transaction id';
+    const USER_HEADER = CFG.userColumn.trim().toLowerCase();
     const TX_ID_RE = /^\d{5,20}$/;
+    const USER_ID_RE = /^\d{3,20}$/;
     // Путь к файлу в любом поле строки: у депозита он лежит в dopparam —
     // JSON с полями формы оплаты, где имя поля зависит от платёжки, —
     // у вывода в поле file списком путей
     const FILE_RE = /WebUserDocuments\/[^\s"'<>?#\\]+\.[a-z0-9]{2,5}/gi;
-    const STATES = ['th-txs-loading', 'th-txs-ok', 'th-txs-none', 'th-txs-missing', 'th-txs-error'];
+    const STATES = ['th-txs-loading', 'th-txs-ok', 'th-txs-none', 'th-txs-missing', 'th-txs-error', 'th-txs-foreign'];
     const WHERE = CFG.sources.map(src => src.label).join(', ');
 
     addStyle('th-helper-txscreen-style', `
@@ -4969,6 +5004,7 @@
       .th-txs-btn.th-txs-loading { animation: th-txs-pulse .7s ease-in-out infinite alternate; }
       .th-txs-btn.th-txs-none, .th-txs-btn.th-txs-missing { color: ${T.textDim}; opacity: .9; }
       .th-txs-btn.th-txs-error { color: #DA3633; opacity: .9; }
+      .th-txs-btn.th-txs-foreign { color: #E8590C; opacity: 1; }
       /* Подпись — псевдоэлементом: в textContent ячейки остаётся только
          номер, и копирование ячейки и столбца берёт ровно его */
       .th-txs-btn[data-note]::after {
@@ -5068,45 +5104,65 @@
       return '/admin/amazon/?' + parts.join('&');
     }
 
-    async function findTransaction(txId) {
+    function describe(src, row, txId, foreign) {
+      const files = extractFiles(row).map(path => fileLink(src, path, row[src.userColumn]));
+      log('Скрин транзакции', txId, src.label, files, foreign || '');
+      return { state: files.length ? 'ok' : 'none', files, source: src.label, foreign };
+    }
+
+    // Транзакция тикета — та, у которой User ID совпадает с тикетом.
+    // Строку с тем же номером, но другим клиентом (совпадение номеров
+    // депозита и вывода) запоминаем как запасную и ищем дальше. Без User ID
+    // тикета берём первую найденную строку, как раньше.
+    async function findTransaction(txId, userId) {
+      let fallback = null;
       for (const src of CFG.sources) {
         const rows = await fetchRows(src, txId);
         const row = rows.find(r => String(r.id) === txId);
         if (!row) continue;
-        const files = extractFiles(row).map(path => fileLink(src, path, row[src.userColumn]));
-        log('Скрин транзакции', txId, src.label, files);
-        return files.length
-          ? { state: 'ok', files, source: src.label }
-          : { state: 'none', source: src.label };
+        const reportUser = row[src.userColumn] === undefined || row[src.userColumn] === null
+          ? '' : String(row[src.userColumn]).trim();
+        if (!userId || reportUser === userId) return describe(src, row, txId, null);
+        if (!fallback) fallback = { src, row, reportUser };
+      }
+      if (fallback) {
+        return describe(fallback.src, fallback.row, txId,
+          { ticketUser: userId, reportUser: fallback.reportUser || '—' });
       }
       return { state: 'missing' };
     }
 
     // ── Кэш ответов ──────────────────────────────────────────────────
 
-    const results = new Map();   // txId → { at, res }
-    const pending = new Map();   // txId → Promise
+    // Ключ — номер транзакции и User ID тикета: одна транзакция в строках
+    // разных клиентов проверяется отдельно
+    const results = new Map();   // ключ → { at, res }
+    const pending = new Map();   // ключ → Promise
 
-    function knownResult(txId) {
-      const hit = results.get(txId);
+    function keyOf(btn) {
+      return `${btn.dataset.txId}|${btn.dataset.userId || ''}`;
+    }
+
+    function knownResult(key) {
+      const hit = results.get(key);
       return hit && Date.now() - hit.at < CFG.cacheTtl ? hit.res : null;
     }
 
-    function lookup(txId) {
-      if (pending.has(txId)) return pending.get(txId);
-      const p = findTransaction(txId)
+    function lookup(key, txId, userId) {
+      if (pending.has(key)) return pending.get(key);
+      const p = findTransaction(txId, userId)
         .catch(err => {
           log('Не удалось найти транзакцию', txId, err);
           return { state: 'error', message: err.message };
         })
         .then(res => {
-          pending.delete(txId);
+          pending.delete(key);
           // Ошибку не запоминаем — следующее наведение спросит заново
-          if (res.state !== 'error') results.set(txId, { at: Date.now(), res });
-          else results.delete(txId);
+          if (res.state !== 'error') results.set(key, { at: Date.now(), res });
+          else results.delete(key);
           return res;
         });
-      pending.set(txId, p);
+      pending.set(key, p);
       return p;
     }
 
@@ -5118,6 +5174,11 @@
       btn.removeAttribute('data-note');
       btn.removeAttribute('data-th-preview-href');
       btn.removeAttribute('data-th-preview-urls');
+      btn.removeAttribute('data-th-preview-note');
+      const foreign = res && res.foreign;
+      const foreignText = foreign
+        ? `в отчёте User ID ${foreign.reportUser}, в тикете ${foreign.ticketUser}` : '';
+      if (foreign) btn.classList.add('th-txs-foreign');
 
       if (!res) {
         btn.title = `Скрин транзакции из ${WHERE}`;
@@ -5129,16 +5190,25 @@
         // Отсюда файл берёт превью вложений
         btn.dataset.thPreviewHref = res.files[0];
         btn.dataset.thPreviewUrls = JSON.stringify(res.files);
-        if (res.files.length > 1) btn.dataset.note = String(res.files.length);
+        const count = res.files.length > 1 ? String(res.files.length) : '';
+        if (foreign) {
+          btn.dataset.note = count ? `другой клиент · ${count}` : 'другой клиент';
+          btn.dataset.thPreviewNote = `Транзакция другого клиента: ${foreignText}`;
+        } else if (count) {
+          btn.dataset.note = count;
+        }
         // Нативная подсказка налезала бы на окно превью — оставляем её,
         // только если превью выключено и окно не появится
         btn.title = isFeatureEnabled('filePreview')
           ? ''
-          : `Открыть скрин транзакции${res.files.length > 1 ? ` (файлов: ${res.files.length})` : ''}`;
+          : `Открыть скрин транзакции${count ? ` (файлов: ${count})` : ''}`
+            + (foreign ? `. Транзакция другого клиента: ${foreignText}` : '');
       } else if (res.state === 'none') {
         btn.classList.add('th-txs-none');
         btn.dataset.note = 'нет файла';
-        btn.title = `Транзакция ${txId} есть в ${res.source}, но файла к ней нет`;
+        btn.title = foreign
+          ? `Транзакция ${txId} есть в ${res.source}, но у другого клиента (${foreignText}), и файла к ней нет`
+          : `Транзакция ${txId} есть в ${res.source}, но файла к ней нет`;
       } else if (res.state === 'missing') {
         btn.classList.add('th-txs-missing');
         btn.dataset.note = 'не найдена';
@@ -5151,45 +5221,47 @@
     }
 
     // Одна транзакция может стоять в нескольких строках — обновляем все
-    function renderAll(txId, res) {
+    // значки с тем же номером и тем же клиентом
+    function renderAll(key, res) {
       document.querySelectorAll('.th-txs-btn').forEach(btn => {
-        if (btn.dataset.txId === txId) render(btn, res);
+        if (keyOf(btn) === key) render(btn, res);
       });
     }
 
     function check(btn) {
-      const txId = btn.dataset.txId;
-      const known = knownResult(txId);
+      const key = keyOf(btn);
+      const known = knownResult(key);
       if (known) return Promise.resolve(known);
-      renderAll(txId, { state: 'loading' });
-      return lookup(txId).then(res => {
-        renderAll(txId, res);
+      renderAll(key, { state: 'loading' });
+      return lookup(key, btn.dataset.txId, btn.dataset.userId || '').then(res => {
+        renderAll(key, res);
         return res;
       });
     }
 
     // Ответ пришёл, пока курсор на значке, — показываем превью сразу, не
     // дожидаясь, пока мышь сдвинется (окно превью открывается по mouseover)
-    function showIfHovered(btn, txId, res) {
-      if (res.state !== 'ok' || !btn.isConnected || btn.dataset.txId !== txId) return;
+    function showIfHovered(btn, key, res) {
+      if (res.state !== 'ok' || !btn.isConnected || keyOf(btn) !== key) return;
       if (btn.matches(':hover')) btn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
     }
 
     function onHover(btn) {
-      const txId = btn.dataset.txId;
-      if (!txId || knownResult(txId)) return;
-      check(btn).then(res => showIfHovered(btn, txId, res));
+      if (!btn.dataset.txId) return;
+      const key = keyOf(btn);
+      if (knownResult(key)) return;
+      check(btn).then(res => showIfHovered(btn, key, res));
     }
 
     function onClick(btn) {
-      const txId = btn.dataset.txId;
-      if (!txId) return;
-      const known = knownResult(txId);
+      if (!btn.dataset.txId) return;
+      const key = keyOf(btn);
+      const known = knownResult(key);
       if (known && known.state === 'ok') {
         window.open(known.files[0], '_blank', 'noopener');
         return;
       }
-      check(btn).then(res => showIfHovered(btn, txId, res));
+      check(btn).then(res => showIfHovered(btn, key, res));
     }
 
     function makeButton() {
@@ -5212,18 +5284,27 @@
 
     // Шапка бывает и в <thead>, и в <tr class="table-head"> (окно «История
     // тикета» собрано без <thead>) — ищем в обоих местах
-    function txColumnIndex(table) {
+    function columnIndex(table, header) {
       const th = Array.from(table.querySelectorAll('tr.table-head th, thead th'))
-        .find(h => h.textContent.replace(/\s+/g, ' ').trim().toLowerCase() === HEADER);
+        .find(h => h.textContent.replace(/\s+/g, ' ').trim().toLowerCase() === header);
       return th ? th.cellIndex : -1;
     }
 
-    // Значок ставится в конец ячейки, а номер сайт может переписать в той
-    // же ячейке (пагинация, новый фильтр) — поэтому на каждом проходе
-    // сверяем номер на значке с текстом ячейки
+    // User ID тикета из той же строки; нет столбца или в ячейке не номер —
+    // пустая строка, тогда пользователь не сверяется
+    function rowUserId(row, idx) {
+      const cell = idx < 0 ? null : row.cells[idx];
+      const text = cell ? cell.textContent.replace(/\s+/g, '') : '';
+      return USER_ID_RE.test(text) ? text : '';
+    }
+
+    // Значок ставится в конец ячейки, а номер и клиента сайт может
+    // переписать в той же строке (пагинация, новый фильтр) — поэтому на
+    // каждом проходе сверяем их со значком
     function processTable(table) {
-      const idx = txColumnIndex(table);
+      const idx = columnIndex(table, HEADER);
       if (idx < 0) return;
+      const userIdx = columnIndex(table, USER_HEADER);
       Array.from(table.rows).forEach(row => {
         const cell = row.cells[idx];
         if (!cell || cell.tagName !== 'TD') return;
@@ -5237,9 +5318,11 @@
           btn = makeButton();
           cell.appendChild(btn);
         }
-        if (btn.dataset.txId !== txId) {
+        const userId = rowUserId(row, userIdx);
+        if (btn.dataset.txId !== txId || (btn.dataset.userId || '') !== userId) {
           btn.dataset.txId = txId;
-          render(btn, knownResult(txId));
+          btn.dataset.userId = userId;
+          render(btn, knownResult(keyOf(btn)));
         }
       });
     }
