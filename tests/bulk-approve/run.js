@@ -4,7 +4,7 @@
 'use strict';
 
 const fs = require('fs');
-const { createPage } = require('./harness');
+const { createPage, SCRIPTS } = require('./harness');
 
 const IS_BETA = (process.env.TARGET || 'beta') === 'beta';
 const LABEL = IS_BETA ? 'BETA ' : '';
@@ -911,6 +911,64 @@ const scenarios = {
       during && during.menuDisabled && during.stopShown && !during.menuOpened, JSON.stringify(during));
     check('после прогона: меню снова доступно, СТОП спрятан',
       !menuBtn.disabled && d.getElementById('bulk-approve-beta-stop-btn').style.display === 'none');
+  },
+
+  async 29() {
+    console.log('\n[29] Отдельный скрипт «Состояние тикетов» — то же, что кнопка беты; уживается с бетой на одной странице');
+    if (!IS_BETA) return console.log('  — идёт в прогоне беты');
+    if (!fs.existsSync(SCRIPTS.state)) {
+      return console.log(`  — пропущен: нет файла ${SCRIPTS.state} (склонируй partenkoEgor/scripts_other_team рядом с Monitoring или задай TICKET_STATE_SCRIPT)`);
+    }
+    const { tickets, ids } = makeTickets(3);
+    tickets[ids[0]].txId = '24085716901';
+    tickets[ids[0]].insideComment = 'старый // Sent to agent';
+    tickets[ids[0]].agentFiles = ['BTDocuments/1/x/a1.png'];
+    tickets[ids[1]].externalStatus = '209 Sent for processing (M)';
+    // Страница с бетой и отдельным скриптом сразу — как у человека, у
+    // которого включены оба
+    const page = createPage({
+      which: 'beta', also: ['state'], tickets, onScreen: ['19999999', ids[0]],
+      behaviour: { listApi: true, hiddenFromFilter: [ids[2]] },
+    });
+    const { d, w, site } = page;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const waitFor = async (fn) => { for (let i = 0; i < 800; i++) { const v = fn(); if (v) return v; await sleep(10); } return null; };
+    const btn = d.getElementById('th-ticket-state-btn');
+    check('своя кнопка, и меню беты тоже на месте', btn && btn.textContent === 'Состояние тикетов' &&
+      !!d.getElementById('bulk-approve-beta-menu-btn'));
+    btn.click();
+    const ov = await waitFor(() => d.querySelector('.th-ticket-state-check-overlay'));
+    check('своё окно, не окно беты', ov && /Состояние тикетов/.test(ov.textContent) &&
+      !d.querySelector('.bulk-approve-beta-check-overlay'));
+    ov.querySelector('textarea').value = [ids[1], ids[0], ids[2]].join('\n');
+    ov.querySelector('.th-ticket-state-check-list').click();
+    const rep = await waitFor(() => d.querySelector('.th-ticket-state-report-overlay'));
+    const text = rep ? rep.querySelector('.th-ticket-state-report-text').textContent : '';
+    check('сводка как у кнопки беты',
+      /Проверено: 3 \(список\), сайт нашёл: 2/.test(text) && /сайт не нашёл по фильтру: 1/.test(text) &&
+      /Transaction ID: заполнен 1, пусто 1/.test(text) && /Agent's files: есть файлы 1, пусто 1/.test(text), text);
+    const tsv = rep.querySelector('.th-ticket-state-report-copy').value.split('\n').map((l) => l.split('\t'));
+    check('таблица в порядке списка', tsv.map((r) => r[0]).join(',') === [ids[1], ids[0], ids[2]].join(',') &&
+      tsv[1].join('|') === `${ids[0]}|Approved (M)|24085716901|старый // Sent to agent|1 файл|1810634943|Miruca BaridiMob Algeria`,
+      tsv.map((r) => r.join('|')).join('\n'));
+    check('запрос списка повторён самим скриптом', site.listQueries.length >= 1, JSON.stringify(site.listQueries.length));
+    check('ничего не открывалось и не сохранялось', site.modalOpens.length === 0 && site.saves.length === 0);
+    rep.querySelector('.th-ticket-state-report-download-state').click();
+    const buf = await new Promise((res) => {
+      const fr = new w.FileReader();
+      fr.onload = () => res(Buffer.from(fr.result));
+      fr.readAsArrayBuffer(site.blobs.at(-1));
+    });
+    const x = readStoredZip(buf);
+    const sh = x['xl/worksheets/sheet1.xml'] || '';
+    check('Excel: имя, лист, 3 строки, автофильтр',
+      /^sostoyanie-tiketov_/.test(site.downloads.at(-1) || '') && /<sheet name="Тикеты"/.test(x['xl/workbook.xml'] || '') &&
+      (sh.match(/<c r="A\d+"/g) || []).length === 4 && sh.includes('<autoFilter ref="A1:G4"/>'), sh.slice(0, 600));
+
+    // Бета на той же странице по-прежнему работает: свой прогон, свой отчёт
+    [...rep.querySelectorAll('button')].find((b) => b.textContent === 'Закрыть').click();
+    const r = await page.run({ button: LIST_BTN, listText: `${ids[0]}\t24085716901` });
+    check('бета рядом работает как обычно', /Успешно: 1/.test(r.text) && site.saves.length === 1, r.text.slice(0, 300));
   },
 };
 

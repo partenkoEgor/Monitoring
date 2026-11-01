@@ -15,6 +15,11 @@ const { TextEncoder } = require('util');
 const SCRIPTS = {
   beta: path.join(__dirname, '../../scripts/th-bulk-approve-beta.user.js'),
   main: path.join(__dirname, '../../scripts/th-bulk-approve.user.js'),
+  // Отдельный скрипт «Состояние тикетов» (вынесен из беты 0.31). Живёт в
+  // репозитории partenkoEgor/scripts_other_team — берём его клон рядом с
+  // этим репозиторием или путь из TICKET_STATE_SCRIPT
+  state: process.env.TICKET_STATE_SCRIPT ||
+    path.join(__dirname, '../../../scripts_other_team/scripts/th-ticket-state.user.js'),
 };
 
 // Тайминги, под которые написан стенд. Значения выбраны так, чтобы сохранить
@@ -42,14 +47,16 @@ const FAST_CONFIG = {
 function loadScript(which, overrides) {
   // BULK_SCRIPT=путь — прогнать сценарии на другом файле (например, на
   // предыдущей версии, чтобы убедиться, что тест ловит старое поведение)
-  let src = fs.readFileSync(process.env.BULK_SCRIPT || SCRIPTS[which], 'utf8');
-  const config = { ...FAST_CONFIG, ...(overrides || {}) };
+  let src = fs.readFileSync((which !== 'state' && process.env.BULK_SCRIPT) || SCRIPTS[which], 'utf8');
+  // У «Состояния тикетов» своих таймингов прогона нет — только переданные
+  const config = which === 'state' ? { ...(overrides || {}) } : { ...FAST_CONFIG, ...(overrides || {}) };
   for (const [key, value] of Object.entries(config)) {
     const re = new RegExp(`(\\n\\s+${key}:\\s*)[^,\\n]+,`);
     if (!re.test(src)) throw new Error(`В CONFIG нет ключа ${key}`);
     src = src.replace(re, `$1${value},`);
   }
   // Пара функций наружу — для точечных проверок окна отчёта и Excel
+  if (which === 'state') return src;
   const tail = src.lastIndexOf('})();');
   src = src.slice(0, tail) +
     'window.__t = { showReportWindow, buildDuplicatesXlsx };\n' + src.slice(tail);
@@ -96,7 +103,7 @@ function processingDate(hoursAgo) {
 //     saveRejected(id): сервер отвечает на сохранение success: false
 //     omitAgentFiles: Set тикетов, у которых в ответе списка нет поля
 //       documentsExternal (колонки Agent's files) вовсе
-function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, behaviour = {}, configOverrides } = {}) {
+function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, behaviour = {}, configOverrides, also = [] } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
     <form id="filter_form">
       <button type="button" class="btn-settings-columns">Quick filters</button>
@@ -440,8 +447,10 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
 
   renderTable();
   w.eval(loadScript(which, configOverrides));
+  // Ещё скрипты на ту же страницу — как несколько скриптов Tampermonkey
+  also.forEach((other) => w.eval(loadScript(other)));
 
-  const prefix = which === 'beta' ? 'bulk-approve-beta' : 'bulk-approve';
+  const prefix = which === 'beta' ? 'bulk-approve-beta' : which === 'state' ? 'th-ticket-state' : 'bulk-approve';
   const storageKey = (mode) =>
     `th-bulk-approve:${mode === 'pairs' ? 'tx-list' : 'ticket-list'}:v1${which === 'beta' ? '-beta' : ''}`;
 
@@ -522,4 +531,4 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
   return { w, d, site, run, readMemory, storageKey, renderTable, prefix };
 }
 
-module.exports = { createPage };
+module.exports = { createPage, SCRIPTS };
