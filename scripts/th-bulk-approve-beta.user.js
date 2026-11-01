@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.30
+// @version      0.31
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -6900,12 +6900,25 @@
   }
 
   // ------------------------------------------------------------------
-  // Кнопки на экране — по одной кнопке запуска на каждый workflow
-  // из WORKFLOWS, плюс одна общая кнопка СТОП (одновременно может
-  // выполняться только один прогон, это гарантирует state.isRunning).
+  // Кнопки на экране (с 0.31 — меню). Все действия — пункты выпадающего
+  // меню за одной компактной кнопкой «Bulk Approve BETA ▴» в правом нижнем
+  // углу: восемь больших кнопок в ряд закрывали полстраницы. Пункт меню —
+  // по одному на каждый workflow из WORKFLOWS плюс две проверки, которые
+  // только читают. Кнопка СТОП во время прогона видна всегда, отдельно от
+  // меню (одновременно идёт только один прогон — это гарантирует
+  // state.isRunning). У пунктов прежние id и подписи.
   // ------------------------------------------------------------------
   let startBtns = [];
   let stopBtn;
+  let menuBtn = null;
+  let menuPanel = null;
+
+  function setMenuOpen(open) {
+    if (!menuPanel || !menuBtn) return;
+    menuPanel.style.display = open ? 'flex' : 'none';
+    menuBtn.textContent = open ? 'Bulk Approve BETA ▾' : 'Bulk Approve BETA ▴';
+    menuBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
 
   function updateButtonsUI() {
     if (startBtns.length === 0 || !stopBtn) return;
@@ -6914,6 +6927,13 @@
       btn.style.opacity = state.isRunning ? '0.5' : '1';
       btn.style.cursor = state.isRunning ? 'default' : 'pointer';
     });
+    // Во время прогона меню закрыто и не открывается: запускать нечего
+    if (menuBtn) {
+      menuBtn.disabled = state.isRunning;
+      menuBtn.style.opacity = state.isRunning ? '0.5' : '1';
+      menuBtn.style.cursor = state.isRunning ? 'default' : 'pointer';
+      if (state.isRunning) setMenuOpen(false);
+    }
 
     stopBtn.disabled = !state.isRunning || state.stopRequested;
     stopBtn.style.display = state.isRunning ? 'inline-block' : 'none';
@@ -6924,105 +6944,145 @@
     if (document.getElementById('bulk-approve-beta-btn')) return;
 
     const container = document.createElement('div');
+    container.id = 'bulk-approve-beta-buttons';
     Object.assign(container.style, {
       position: 'fixed',
       bottom: '20px',
       right: '20px',
       zIndex: 999999,
       display: 'flex',
-      gap: '10px',
-      // Кнопок стало много — на узком экране переносятся, а не уезжают за край
-      flexWrap: 'wrap',
-      justifyContent: 'flex-end',
-      maxWidth: 'calc(100vw - 40px)',
+      alignItems: 'center',
+      gap: '8px',
+      fontFamily: 'system-ui,Arial,sans-serif',
     });
 
-    startBtns = WORKFLOWS.map((workflow, idx) => {
+    // Меню раскрывается вверх над кнопкой
+    menuPanel = document.createElement('div');
+    menuPanel.id = 'bulk-approve-beta-menu';
+    Object.assign(menuPanel.style, {
+      position: 'absolute',
+      right: '0',
+      bottom: 'calc(100% + 8px)',
+      display: 'none',
+      flexDirection: 'column',
+      gap: '6px',
+      padding: '8px',
+      minWidth: '270px',
+      maxHeight: 'calc(100vh - 100px)',
+      overflowY: 'auto',
+      background: '#fff',
+      border: '1px solid #DFE1E6',
+      borderRadius: '10px',
+      boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+    });
+
+    // Пункт меню: белая плашка с цветной полосой слева — цвет прежней кнопки
+    const makeItem = (id, label, color, action, logName) => {
       const btn = document.createElement('button');
-      btn.id = idx === 0 ? 'bulk-approve-beta-btn' : `bulk-approve-beta-btn-${workflow.id}`;
-      btn.textContent = workflow.buttonLabel;
+      btn.id = id;
+      btn.type = 'button';
+      btn.textContent = label;
       Object.assign(btn.style, {
-        padding: '12px 18px',
-        background: workflow.buttonColor,
-        color: '#fff',
-        border: 'none',
-        borderRadius: '8px',
-        fontSize: '14px',
+        display: 'block',
+        width: '100%',
+        padding: '8px 12px',
+        background: '#fff',
+        color: '#172B4D',
+        border: '1px solid #DFE1E6',
+        borderLeft: `5px solid ${color}`,
+        borderRadius: '6px',
+        fontSize: '13px',
         fontWeight: '600',
+        textAlign: 'left',
+        whiteSpace: 'nowrap',
         cursor: 'pointer',
-        boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
       });
+      btn.addEventListener('mouseenter', () => { if (!btn.disabled) btn.style.background = '#F4F5F7'; });
+      btn.addEventListener('mouseleave', () => { btn.style.background = '#fff'; });
       btn.addEventListener('click', () => {
-        runBulkApprove(workflow).catch((e) => {
-          stopKeepalive();
-          console.error(`[BulkApproveBETA/${workflow.id}] Fatal error:`, e);
-        });
+        if (btn.disabled) return;
+        setMenuOpen(false);
+        try {
+          const ret = action();
+          if (ret && typeof ret.catch === 'function') {
+            ret.catch((e) => {
+              stopKeepalive();
+              console.error(`[BulkApproveBETA] ${logName}: Fatal error:`, e);
+            });
+          }
+        } catch (e) {
+          console.error(`[BulkApproveBETA] ${logName}:`, e);
+        }
       });
-      container.appendChild(btn);
+      menuPanel.appendChild(btn);
       return btn;
-    });
+    };
 
-    // Проверка Agent's files (с 0.20) — только читает, но во время прогона
-    // недоступна, как и кнопки запуска: обе работают с фильтром страницы
-    const agentFilesBtn = document.createElement('button');
-    agentFilesBtn.id = 'bulk-approve-beta-btn-agent-files';
-    agentFilesBtn.textContent = "BETA Проверка Agent's files";
-    Object.assign(agentFilesBtn.style, {
-      padding: '12px 18px',
-      background: '#6A5ACD',
+    startBtns = WORKFLOWS.map((workflow, idx) =>
+      makeItem(
+        idx === 0 ? 'bulk-approve-beta-btn' : `bulk-approve-beta-btn-${workflow.id}`,
+        workflow.buttonLabel,
+        workflow.buttonColor,
+        () => runBulkApprove(workflow),
+        workflow.id
+      )
+    );
+
+    // Проверки, которые только читают (Agent's files — с 0.20, состояние
+    // тикетов — с 0.30). Во время прогона недоступны, как и запуск: работают
+    // с фильтром страницы. Отделены от прогонов чертой.
+    const divider = document.createElement('div');
+    Object.assign(divider.style, { borderTop: '1px solid #DFE1E6', margin: '2px 0' });
+    menuPanel.appendChild(divider);
+    startBtns.push(
+      makeItem('bulk-approve-beta-btn-agent-files', "BETA Проверка Agent's files", '#6A5ACD',
+        runAgentFilesCheck, "Проверка Agent's files")
+    );
+    startBtns.push(
+      makeItem('bulk-approve-beta-btn-ticket-state', 'BETA Состояние тикетов', '#4F6D8F',
+        runTicketStateCheck, 'Состояние тикетов')
+    );
+
+    menuBtn = document.createElement('button');
+    menuBtn.id = 'bulk-approve-beta-menu-btn';
+    menuBtn.type = 'button';
+    menuBtn.title = 'Действия Bulk Approve (BETA)';
+    menuBtn.setAttribute('aria-haspopup', 'true');
+    Object.assign(menuBtn.style, {
+      padding: '8px 14px',
+      background: '#2ABFCF',
       color: '#fff',
       border: 'none',
-      borderRadius: '8px',
-      fontSize: '14px',
+      borderRadius: '999px',
+      fontSize: '13px',
       fontWeight: '600',
       cursor: 'pointer',
       boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
     });
-    agentFilesBtn.addEventListener('click', () => {
-      try {
-        runAgentFilesCheck();
-      } catch (e) {
-        console.error("[BulkApproveBETA] Проверка Agent's files:", e);
-      }
+    menuBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (menuBtn.disabled) return;
+      setMenuOpen(menuPanel.style.display === 'none');
     });
-    container.appendChild(agentFilesBtn);
-    startBtns.push(agentFilesBtn);
 
-    // Состояние тикетов (с 0.30) — тоже только читает
-    const stateBtn = document.createElement('button');
-    stateBtn.id = 'bulk-approve-beta-btn-ticket-state';
-    stateBtn.textContent = 'BETA Состояние тикетов';
-    Object.assign(stateBtn.style, {
-      padding: '12px 18px',
-      background: '#4F6D8F',
-      color: '#fff',
-      border: 'none',
-      borderRadius: '8px',
-      fontSize: '14px',
-      fontWeight: '600',
-      cursor: 'pointer',
-      boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
+    // Клик мимо меню и Esc — закрыть
+    document.addEventListener('click', (e) => {
+      if (menuPanel.style.display !== 'none' && !container.contains(e.target)) setMenuOpen(false);
     });
-    stateBtn.addEventListener('click', () => {
-      try {
-        runTicketStateCheck();
-      } catch (e) {
-        console.error('[BulkApproveBETA] Состояние тикетов:', e);
-      }
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && menuPanel.style.display !== 'none') setMenuOpen(false);
     });
-    container.appendChild(stateBtn);
-    startBtns.push(stateBtn);
 
     stopBtn = document.createElement('button');
     stopBtn.id = 'bulk-approve-beta-stop-btn';
     stopBtn.textContent = 'СТОП (BETA)';
     Object.assign(stopBtn.style, {
-      padding: '12px 18px',
+      padding: '8px 16px',
       background: '#d32f2f',
       color: '#fff',
       border: 'none',
-      borderRadius: '8px',
-      fontSize: '14px',
+      borderRadius: '999px',
+      fontSize: '13px',
       fontWeight: '600',
       cursor: 'pointer',
       boxShadow: '0 4px 12px rgba(0,0,0,0.25)',
@@ -7030,9 +7090,11 @@
     });
     stopBtn.addEventListener('click', requestStop);
 
+    container.appendChild(menuPanel);
     container.appendChild(stopBtn);
+    container.appendChild(menuBtn);
     document.body.appendChild(container);
-
+    setMenuOpen(false);
     updateButtonsUI();
   }
 

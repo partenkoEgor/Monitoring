@@ -868,6 +868,50 @@ const scenarios = {
       sh.includes('<v>24085716901</v>') && sh.includes('<t>2 файла</t>') && sh.includes('<t>старый // Sent to agent</t>'), sh);
     check('автофильтр на всю таблицу', sh.includes('<autoFilter ref="A1:G5"/>'), sh.slice(-200));
   },
+
+  async 28() {
+    console.log('\n[28] Кнопки — в меню за одной компактной кнопкой; СТОП во время прогона отдельно (0.31)');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids, listText } = makeTickets(2);
+    const page = createPage({ tickets, onScreen: ['19999999'] });
+    const { d, w } = page;
+    const menuBtn = d.getElementById('bulk-approve-beta-menu-btn');
+    const menu = d.getElementById('bulk-approve-beta-menu');
+    check('одна кнопка меню, меню закрыто', menuBtn && menu && menu.style.display === 'none' &&
+      menuBtn.textContent === 'Bulk Approve BETA ▴');
+    const items = [...menu.querySelectorAll('button')].map((b) => b.id);
+    check('в меню все 6 действий с прежними id', items.join(',') ===
+      ['bulk-approve-beta-btn', 'bulk-approve-beta-btn-239', 'bulk-approve-beta-btn-225-list',
+        'bulk-approve-beta-btn-sfp', 'bulk-approve-beta-btn-agent-files', 'bulk-approve-beta-btn-ticket-state'].join(','),
+      items.join(','));
+    menuBtn.click();
+    check('клик открывает меню', menu.style.display === 'flex' && menuBtn.textContent === 'Bulk Approve BETA ▾');
+    d.body.click();
+    check('клик мимо закрывает', menu.style.display === 'none');
+    menuBtn.click();
+    d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
+    check('Esc закрывает', menu.style.display === 'none');
+    menuBtn.click();
+    d.getElementById('bulk-approve-beta-btn-ticket-state').click();
+    check('выбор пункта закрывает меню и открывает окно',
+      menu.style.display === 'none' && !!d.querySelector('.bulk-approve-beta-check-overlay'));
+    d.querySelector('.bulk-approve-beta-check-overlay').remove();
+
+    // Во время прогона: меню не открывается, СТОП виден
+    let during = null;
+    page.site.behaviour.onApplied = () => {
+      if (during) return;
+      const stop = d.getElementById('bulk-approve-beta-stop-btn');
+      during = { menuDisabled: menuBtn.disabled, stopShown: stop.style.display !== 'none' };
+      menuBtn.click();
+      during.menuOpened = menu.style.display !== 'none';
+    };
+    await page.run({ button: LIST_BTN, listText });
+    check('во время прогона: меню заблокировано, СТОП виден',
+      during && during.menuDisabled && during.stopShown && !during.menuOpened, JSON.stringify(during));
+    check('после прогона: меню снова доступно, СТОП спрятан',
+      !menuBtn.disabled && d.getElementById('bulk-approve-beta-stop-btn').style.display === 'none');
+  },
 };
 
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map((x) => x.trim())) : null;
