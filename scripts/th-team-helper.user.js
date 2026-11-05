@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.44
-// @description  Тринадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто его выставил, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке, обмен сохранёнными фильтрами с коллегами через текстовый код и значок у Transaction ID, который показывает скрин, приложенный к транзакции в отчётах Deposit requests и Withdrawal requests (отчёт выбирается по типу тикета). На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @version      1.45
+// @description  Четырнадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто его выставил, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке, обмен сохранёнными фильтрами с коллегами через текстовый код и значок у Transaction ID, который показывает скрин, приложенный к транзакции в отчётах Deposit requests и Withdrawal requests (отчёт выбирается по типу тикета), а выделение номера в поле Agent wallet показывает, какому субагенту принадлежит кошелёк, по листу Payment references. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -67,6 +67,9 @@
       // приложенный к самой транзакции в отчётах Deposit requests
       // и Withdrawal requests
       txScreen: true,
+      // Выделил кошелёк в поле Agent wallet — окно с субагентом, которому
+      // он принадлежит, по листу Payment references
+      walletLookup: true,
     },
 
     // ── Страницы отчётов ─────────────────────────────────────────────
@@ -475,6 +478,37 @@
       hoverDelay: 250,
     },
 
+    // ── Субагент по кошельку (Agent wallet) ──────────────────────────
+    walletLookup: {
+      // Лист Payment references: тот же запрос, что он делает по Apply —
+      // POST с телом {wallet: "<номер>"}. Адрес без домена: запрос уходит
+      // на то зеркало, где открыта страница
+      url: '/en/admin/banktransfer/paymentreferences',
+      // Заголовок поля формы тикета, в котором работает выделение
+      fieldTitle: 'Agent wallet',
+      // Столбец таблицы с кошельком агента (подстрока названия, в нижнем
+      // регистре): если он выведен в списке тикетов, выделение работает
+      // и в нём
+      column: 'agent wallet',
+      // Выделение короче — не искать: случайно задетые пара символов не
+      // повод для запроса. Длиннее — это уже не номер кошелька
+      minLength: 4,
+      maxLength: 64,
+      // Столбцы ответа. Субагент — главное, ради чего ищем, — выносится
+      // в заголовок окна; ID агента показывается рядом с именем агента
+      subagentColumn: 'NameSubagent',
+      subagentIdColumn: 'idSubAgent',
+      joinIds: { NameAgent: 'idAgent' },
+      // «Last used»: если строк несколько, первой идёт самая свежая
+      dateColumn: 'max_dt',
+      // Реквизиты — строка JSON, показывается «поле — значение»
+      detailsColumn: 'details',
+      // Сколько помнить ответ по кошельку (мс)
+      cacheTtl: 5 * 60 * 1000,
+      // Ширина окна (px)
+      width: 360,
+    },
+
     // Подробный лог в консоль (F12 → Console)
     debug: false,
   };
@@ -542,6 +576,38 @@
     const h = el.offsetHeight || 50;
     el.style.left = (x + m + w > window.innerWidth ? x - w - m : x + m) + 'px';
     el.style.top = (y + m + h > window.innerHeight ? y - h - m : y + m) + 'px';
+  }
+
+  // POST с JSON на тот же домен, где открыта страница (поэтому работает
+  // на всех трёх зеркалах), с теми же заголовками, что шлёт сам сайт.
+  // Ошибки — с понятной причиной для подсказки: нет связи, код ответа
+  // или страница входа вместо JSON (истекла сессия).
+  async function postSiteJson(url, body) {
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json, text/plain, */*',
+      'X-Requested-With': 'XMLHttpRequest',
+    };
+    if (typeof pageWindow._TIMEZONE === 'string') headers['X-Time-Zone'] = pageWindow._TIMEZONE;
+
+    let r;
+    try {
+      r = await fetch(url, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers,
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      throw new Error('нет связи с сервером');
+    }
+    if (!r.ok) throw new Error(`сервер ответил ${r.status}`);
+    try {
+      return await r.json();
+    } catch (err) {
+      // Вместо JSON обычно приходит страница входа — сессия закончилась
+      throw new Error('сервер ответил не данными — возможно, истекла сессия, обновите страницу');
+    }
   }
 
   // ==================================================================
@@ -4238,38 +4304,6 @@
 
     // ── Запросы к сайту ───────────────────────────────────────────────
 
-    function requestHeaders() {
-      const h = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json, text/plain, */*',
-        'X-Requested-With': 'XMLHttpRequest',
-      };
-      // Сайт сам отправляет этот заголовок с запросами фильтров
-      if (typeof pageWindow._TIMEZONE === 'string') h['X-Time-Zone'] = pageWindow._TIMEZONE;
-      return h;
-    }
-
-    async function postJson(url, body) {
-      let r;
-      try {
-        r = await fetch(url, {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: requestHeaders(),
-          body: JSON.stringify(body),
-        });
-      } catch (err) {
-        throw new Error('нет связи с сервером');
-      }
-      if (!r.ok) throw new Error(`сервер ответил ${r.status}`);
-      try {
-        return await r.json();
-      } catch (err) {
-        // Вместо JSON обычно приходит страница входа — сессия закончилась
-        throw new Error('сервер ответил не данными — возможно, истекла сессия, обновите страницу');
-      }
-    }
-
     // Только плоский объект: значения — строки, числа, true/false, null или
     // массивы из них. Ровно так выглядят все фильтры сайта; всё остальное
     // в чужом коде не пропускаем дальше, чем до сообщения об ошибке.
@@ -4283,7 +4317,7 @@
     }
 
     async function loadFilters(reportId) {
-      const json = await postJson(CFG.getUrl, { reportId });
+      const json = await postSiteJson(CFG.getUrl, { reportId });
       if (!json || json.success !== true || !Array.isArray(json.data)) {
         throw new Error('сервер не отдал список фильтров');
       }
@@ -4297,7 +4331,7 @@
     }
 
     async function saveFilter(reportId, name, form) {
-      const json = await postJson(CFG.saveUrl, { reportId, filterName: name, form });
+      const json = await postSiteJson(CFG.saveUrl, { reportId, filterName: name, form });
       if (!json || json.success !== true) {
         throw new Error((json && json.message) || 'сервер не подтвердил сохранение');
       }
@@ -5031,35 +5065,8 @@
       };
     }
 
-    async function postJson(url, body) {
-      const headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json, text/plain, */*',
-        'X-Requested-With': 'XMLHttpRequest',
-      };
-      if (typeof pageWindow._TIMEZONE === 'string') headers['X-Time-Zone'] = pageWindow._TIMEZONE;
-
-      let r;
-      try {
-        r = await fetch(url, {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers,
-          body: JSON.stringify(body),
-        });
-      } catch (err) {
-        throw new Error('нет связи с сервером');
-      }
-      if (!r.ok) throw new Error(`сервер ответил ${r.status}`);
-      try {
-        return await r.json();
-      } catch (err) {
-        throw new Error('сервер ответил не данными — возможно, истекла сессия, обновите страницу');
-      }
-    }
-
     async function fetchRows(src, txId) {
-      const json = await postJson(src.url, reportPayload(src, txId));
+      const json = await postSiteJson(src.url, reportPayload(src, txId));
 
       // Таблица приходит строкой JSON в поле data: {Success, Value: {Columns, Data}}
       let data = json && json.data;
@@ -5110,7 +5117,7 @@
     function ticketType(ticketId) {
       if (!ticketId) return Promise.resolve(null);
       if (ticketTypes.has(ticketId)) return ticketTypes.get(ticketId);
-      const p = postJson(CFG.ticketUrl, { ...CFG.ticketForm, idTicket: ticketId })
+      const p = postSiteJson(CFG.ticketUrl, { ...CFG.ticketForm, idTicket: ticketId })
         .then(json => {
           const rows = json && Array.isArray(json.data) ? json.data : [];
           const row = rows.find(r => String(r.idTicket) === ticketId);
@@ -5365,6 +5372,614 @@
   }
 
   // ==================================================================
+  // 14. СУБАГЕНТ ПО КОШЕЛЬКУ (AGENT WALLET)
+  // ==================================================================
+
+  // Выделил номер в поле Agent wallet формы тикета — рядом всплывает
+  // окно в стиле поиска лимитов: чей это кошелёк по листу Payment
+  // references. Строк в ответе может быть несколько (кошелёк был у разных
+  // субагентов) — тогда их можно листать стрелками, первой идёт самая
+  // свежая по Last used.
+  function initWalletLookup() {
+    const CFG = CONFIG.walletLookup;
+
+    // Заголовки полей приходят с &nbsp;, двоеточием и разным регистром
+    const norm = text => (text || '')
+      .replace(/ /g, ' ')
+      .replace(/:\s*$/, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+    const FIELD = norm(CFG.fieldTitle);
+    const COLUMN = norm(CFG.column);
+
+    addStyle('th-helper-wallet-style', `
+      #th-wal-popup {
+        position: fixed;
+        z-index: 999999;
+        display: none;
+        flex-direction: column;
+        background: ${T.bg};
+        border: 1px solid ${T.border};
+        border-radius: 10px;
+        box-shadow: ${T.shadow};
+        font-family: "Open Sans", Tahoma, Arial, sans-serif;
+        font-size: 12px;
+        color: ${T.text};
+        width: ${CFG.width}px;
+        max-height: calc(100vh - 32px);
+        clip-path: inset(0 round 10px);
+        animation: th-wal-appear .16s cubic-bezier(0.34, 1.4, 0.64, 1) both;
+        transform-origin: top center;
+      }
+      @keyframes th-wal-appear {
+        from { opacity: 0; transform: scale(0.88) translateY(-4px); }
+        to   { opacity: 1; transform: scale(1) translateY(0); }
+      }
+      #th-wal-popup.th-wal-hiding { animation: th-wal-vanish .1s ease both; }
+      @keyframes th-wal-vanish {
+        to { opacity: 0; transform: scale(0.94) translateY(-3px); }
+      }
+
+      #th-wal-header {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 9px 12px 8px;
+        background: linear-gradient(135deg, ${ACCENT} 0%, ${ACCENT_HOVER} 100%);
+        flex-shrink: 0;
+      }
+      #th-wal-header-icon {
+        width: 22px; height: 22px;
+        border-radius: 5px;
+        background: rgba(255,255,255,0.2);
+        color: #fff;
+        display: flex; align-items: center; justify-content: center;
+        flex-shrink: 0;
+      }
+      #th-wal-header-icon svg { width: 13px; height: 13px; }
+      #th-wal-header-text { flex: 1; min-width: 0; }
+      #th-wal-label {
+        font-size: 9px; font-weight: 700;
+        letter-spacing: .08em; text-transform: uppercase;
+        color: rgba(255,255,255,0.8);
+        margin-bottom: 1px;
+      }
+      #th-wal-query {
+        font-size: 11.5px; font-weight: 600; color: #fff;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      #th-wal-open {
+        color: rgba(255,255,255,0.7);
+        text-decoration: none;
+        flex-shrink: 0;
+        display: flex; align-items: center;
+        transition: color .1s;
+      }
+      #th-wal-open:hover { color: #fff; }
+      #th-wal-open svg { width: 13px; height: 13px; }
+
+      #th-wal-state {
+        display: none;
+        align-items: center;
+        gap: 8px;
+        padding: 14px;
+        font-size: 11.5px;
+        color: ${T.textDim};
+        line-height: 1.4;
+      }
+      #th-wal-state.loading { color: ${ACCENT}; }
+      #th-wal-state svg { width: 15px; height: 15px; flex-shrink: 0; }
+
+      #th-wal-nav {
+        display: none;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        background: ${T.panel};
+        border-bottom: 1px solid ${T.border};
+        flex-shrink: 0;
+      }
+      #th-wal-counter { flex: 1; font-size: 11px; font-weight: 600; color: ${T.textDim}; }
+      #th-wal-counter b { color: ${T.text}; }
+      .th-wal-nav-btn {
+        width: 24px; height: 24px;
+        border-radius: 5px;
+        border: 1px solid ${T.border};
+        background: ${T.bg};
+        color: ${T.text};
+        cursor: pointer;
+        display: flex; align-items: center; justify-content: center;
+        padding: 0;
+        transition: background .1s;
+      }
+      .th-wal-nav-btn:hover { background: ${T.panel}; }
+      .th-wal-nav-btn svg { width: 11px; height: 11px; }
+
+      #th-wal-heading {
+        display: none;
+        flex-direction: column;
+        gap: 2px;
+        padding: 8px 12px 7px;
+        background: rgba(42,191,207,0.07);
+        border-bottom: 1px solid rgba(42,191,207,0.15);
+        flex-shrink: 0;
+      }
+      #th-wal-heading-label {
+        font-size: 9px; font-weight: 700;
+        letter-spacing: .08em; text-transform: uppercase;
+        color: ${T.textDim};
+      }
+      #th-wal-heading-main { display: flex; align-items: baseline; gap: 8px; }
+      #th-wal-heading-name {
+        font-size: 13px; font-weight: 700;
+        color: ${ACCENT_HOVER};
+        line-height: 1.3;
+        word-break: break-word;
+      }
+      #th-wal-heading-id { font-size: 11px; color: ${T.textDim}; white-space: nowrap; }
+
+      #th-wal-result {
+        display: none;
+        flex-direction: column;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        min-height: 0;
+        flex: 1 1 auto;
+      }
+      #th-wal-result::-webkit-scrollbar { width: 4px; }
+      #th-wal-result::-webkit-scrollbar-track { background: transparent; }
+      #th-wal-result::-webkit-scrollbar-thumb { background: ${T.border}; border-radius: 4px; }
+      .th-wal-row { display: flex; border-bottom: 1px solid ${T.border}; }
+      .th-wal-row:last-child { border-bottom: none; }
+      .th-wal-col-label {
+        width: 96px;
+        flex-shrink: 0;
+        padding: 6px 10px;
+        background: ${T.panel};
+        border-right: 1px solid ${T.border};
+        font-size: 10px;
+        font-weight: 700;
+        color: ${T.textDim};
+        text-transform: uppercase;
+        letter-spacing: .05em;
+        line-height: 1.35;
+        word-break: break-word;
+      }
+      .th-wal-col-value {
+        flex: 1;
+        padding: 6px 10px;
+        font-size: 11.5px;
+        color: ${T.text};
+        line-height: 1.45;
+        word-break: break-word;
+        min-width: 0;
+      }
+      .th-wal-detail + .th-wal-detail { margin-top: 4px; }
+      .th-wal-detail-key { font-size: 10.5px; color: ${T.textDim}; unicode-bidi: plaintext; }
+      .th-wal-hl {
+        background: #fde047;
+        color: #1c1917;
+        border-radius: 2px;
+        padding: 0 1px;
+        font-weight: 700;
+      }
+
+      #th-wal-arrow {
+        position: fixed;
+        z-index: 999998;
+        display: none;
+        pointer-events: none;
+        width: 12px; height: 7px;
+      }
+    `);
+
+    const popup = document.createElement('div');
+    popup.id = 'th-wal-popup';
+    popup.innerHTML = `
+      <div id="th-wal-header">
+        <div id="th-wal-header-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-4a2 2 0 0 0 0 4h4v4a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5"/>
+          </svg>
+        </div>
+        <div id="th-wal-header-text">
+          <div id="th-wal-label">Чей кошелёк</div>
+          <div id="th-wal-query">…</div>
+        </div>
+        <a id="th-wal-open" target="_blank" rel="noopener" title="Открыть лист Payment references">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+            <polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>
+          </svg>
+        </a>
+      </div>
+
+      <div id="th-wal-state">
+        <svg id="th-wal-state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></svg>
+        <span id="th-wal-state-text"></span>
+      </div>
+
+      <div id="th-wal-nav">
+        <span id="th-wal-counter"></span>
+        <button type="button" class="th-wal-nav-btn" id="th-wal-prev" title="Предыдущая строка (стрелка влево)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+               stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+        </button>
+        <button type="button" class="th-wal-nav-btn" id="th-wal-next" title="Следующая строка (стрелка вправо)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+               stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+        </button>
+      </div>
+
+      <div id="th-wal-heading">
+        <div id="th-wal-heading-label">Субагент</div>
+        <div id="th-wal-heading-main">
+          <span id="th-wal-heading-name"></span>
+          <span id="th-wal-heading-id"></span>
+        </div>
+      </div>
+      <div id="th-wal-result"></div>
+    `;
+    document.body.appendChild(popup);
+    popup.querySelector('#th-wal-open').href = CFG.url;
+
+    const arrow = document.createElement('div');
+    arrow.id = 'th-wal-arrow';
+    arrow.innerHTML = `<svg width="12" height="7" viewBox="0 0 12 7">
+      <path id="th-wal-arrow-path" d="M6 0L12 7H0Z" fill="${T.bg}"/></svg>`;
+    document.body.appendChild(arrow);
+
+    const $ = id => popup.querySelector('#' + id);
+    const stateEl = $('th-wal-state');
+    const stateIcon = $('th-wal-state-icon');
+    const stateText = $('th-wal-state-text');
+    const navEl = $('th-wal-nav');
+    const counterEl = $('th-wal-counter');
+    const headingEl = $('th-wal-heading');
+    const headingName = $('th-wal-heading-name');
+    const headingId = $('th-wal-heading-id');
+    const resultEl = $('th-wal-result');
+    const queryEl = $('th-wal-query');
+
+    const ICON_SPINNER = '<circle cx="12" cy="12" r="9" stroke-dasharray="28 57" stroke-linecap="round">'
+      + '<animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12"'
+      + ' dur="0.9s" repeatCount="indefinite"/></circle>';
+    const ICON_EMPTY = '<circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12"/>'
+      + '<line x1="12" y1="16" x2="12.01" y2="16"/>';
+    const ICON_ERROR = '<circle cx="12" cy="12" r="9"/><line x1="15" y1="9" x2="9" y2="15"/>'
+      + '<line x1="9" y1="9" x2="15" y2="15"/>';
+
+    let found = null;      // { rows, columns, order } — ответ по текущему кошельку
+    let curIdx = 0;
+    let wallet = '';
+    let lastRect = null;
+    let runSeq = 0;        // защита от позднего ответа по предыдущему выделению
+    let hideTimer = null;
+
+    // ── Запрос ───────────────────────────────────────────────────────
+
+    const str = v => (v === null || v === undefined ? '' : String(v).trim());
+
+    const cache = new Map();   // кошелёк → { at, promise }
+    function lookup(w) {
+      const hit = cache.get(w);
+      if (hit && Date.now() - hit.at < CFG.cacheTtl) return hit.promise;
+      const promise = postSiteJson(CFG.url, { wallet: w }).then(json => {
+        if (!json || json.success === false || !Array.isArray(json.data)) {
+          throw new Error('неожиданный ответ листа Payment references');
+        }
+        const columns = json.columns && typeof json.columns === 'object' ? json.columns : {};
+        const order = Array.isArray(json.columns_allow) && json.columns_allow.length
+          ? json.columns_allow
+          : Object.keys(columns).length ? Object.keys(columns) : Object.keys(json.data[0] || {});
+        // Самая свежая строка — первой
+        const rows = json.data.slice().sort((a, b) => str(b[CFG.dateColumn]).localeCompare(str(a[CFG.dateColumn])));
+        log('Кошелёк', w, '— строк в Payment references:', rows.length);
+        return { rows, columns, order };
+      });
+      cache.set(w, { at: Date.now(), promise });
+      promise.catch(() => {
+        const cur = cache.get(w);
+        if (cur && cur.promise === promise) cache.delete(w);
+      });
+      return promise;
+    }
+
+    // ── Отрисовка ────────────────────────────────────────────────────
+
+    // Текст с подсвеченным номером кошелька — узлами, без innerHTML
+    function appendHighlighted(el, text, query) {
+      const q = query.toLowerCase();
+      const low = text.toLowerCase();
+      let pos = 0;
+      let i = q ? low.indexOf(q) : -1;
+      while (i !== -1) {
+        if (i > pos) el.appendChild(document.createTextNode(text.slice(pos, i)));
+        const mark = document.createElement('span');
+        mark.className = 'th-wal-hl';
+        mark.textContent = text.slice(i, i + q.length);
+        el.appendChild(mark);
+        pos = i + q.length;
+        i = low.indexOf(q, pos);
+      }
+      if (pos < text.length) el.appendChild(document.createTextNode(text.slice(pos)));
+    }
+
+    // details — строка JSON вида {"Номер кошелька": "0103…"}: каждое поле
+    // отдельно, название над значением (названия бывают на арабском)
+    function renderDetails(el, text) {
+      let obj = null;
+      try { obj = JSON.parse(text); } catch (err) { obj = null; }
+      const pairs = obj && typeof obj === 'object' && !Array.isArray(obj)
+        ? Object.keys(obj).map(k => [k.replace(/_/g, ' '), str(obj[k])])
+        : [['', text]];
+      pairs.forEach(([key, value]) => {
+        const line = document.createElement('div');
+        line.className = 'th-wal-detail';
+        if (key) {
+          const k = document.createElement('div');
+          k.className = 'th-wal-detail-key';
+          k.textContent = key;
+          line.appendChild(k);
+        }
+        const v = document.createElement('div');
+        appendHighlighted(v, value, wallet);
+        line.appendChild(v);
+        el.appendChild(line);
+      });
+    }
+
+    function renderResult() {
+      const row = found.rows[curIdx];
+      headingName.textContent = str(row[CFG.subagentColumn]) || '—';
+      const subId = str(row[CFG.subagentIdColumn]);
+      headingId.textContent = subId ? `ID ${subId}` : '';
+      headingEl.style.display = 'flex';
+
+      const skip = new Set([CFG.subagentColumn, CFG.subagentIdColumn, ...Object.values(CFG.joinIds)]);
+      resultEl.innerHTML = '';
+      found.order.forEach(key => {
+        if (skip.has(key) || !(key in row)) return;
+        let text = str(row[key]);
+        const idKey = CFG.joinIds[key];
+        const id = idKey ? str(row[idKey]) : '';
+        if (id) text = text ? `${text} (${id})` : id;
+        if (!text) return;
+
+        const line = document.createElement('div');
+        line.className = 'th-wal-row';
+        const label = document.createElement('div');
+        label.className = 'th-wal-col-label';
+        label.textContent = str(found.columns[key]) || key;
+        const value = document.createElement('div');
+        value.className = 'th-wal-col-value';
+        if (key === CFG.detailsColumn) renderDetails(value, text);
+        else value.textContent = text;
+        line.appendChild(label);
+        line.appendChild(value);
+        resultEl.appendChild(line);
+      });
+      resultEl.style.display = 'flex';
+      resultEl.scrollTop = 0;
+    }
+
+    function renderNav() {
+      const n = found ? found.rows.length : 0;
+      if (n < 2) { navEl.style.display = 'none'; return; }
+      navEl.style.display = 'flex';
+      counterEl.innerHTML = `Строка <b>${curIdx + 1}</b> из <b>${n}</b>`;
+    }
+
+    function showState(kind, text, iconMarkup) {
+      stateEl.className = kind;
+      stateEl.style.display = 'flex';
+      stateIcon.innerHTML = iconMarkup;
+      stateText.textContent = text;
+      resultEl.style.display = 'none';
+      navEl.style.display = 'none';
+      headingEl.style.display = 'none';
+    }
+
+    async function run(w, rect) {
+      const seq = ++runSeq;
+      wallet = w;
+      found = null;
+      curIdx = 0;
+      queryEl.textContent = w;
+      showState('loading', 'Ищу в Payment references…', ICON_SPINNER);
+      place(rect);
+      try {
+        const res = await lookup(w);
+        if (seq !== runSeq) return;
+        found = res;
+        if (!res.rows.length) {
+          showState('empty', 'Кошелька нет в Payment references', ICON_EMPTY);
+        } else {
+          stateEl.style.display = 'none';
+          renderResult();
+          renderNav();
+        }
+      } catch (err) {
+        if (seq !== runSeq) return;
+        log('Кошелёк: ошибка запроса', w, err);
+        showState('error', `Не удалось проверить кошелёк: ${err.message}`, ICON_ERROR);
+      }
+      // После ответа высота окна меняется — позицию считаем заново
+      place(rect);
+    }
+
+    // ── Позиционирование: над полем, а если места нет — под ним ─────
+
+    function place(rect) {
+      lastRect = rect;
+      clearTimeout(hideTimer);
+      popup.classList.remove('th-wal-hiding');
+      popup.style.display = 'flex';
+
+      const gap = 10;
+      const margin = 8;
+      const maxH = window.innerHeight - margin * 2;
+      popup.style.maxHeight = maxH + 'px';
+
+      const pw = popup.offsetWidth || CFG.width;
+      const ph = Math.min(popup.offsetHeight || 80, maxH);
+
+      let left = rect.left + rect.width / 2 - pw / 2;
+      if (left + pw > window.innerWidth - margin) left = window.innerWidth - pw - margin;
+      if (left < margin) left = margin;
+
+      let top = rect.top - ph - gap;
+      let below = false;
+      if (top < margin) {
+        const topIfBelow = rect.bottom + gap;
+        if (topIfBelow + ph <= window.innerHeight - margin) {
+          top = topIfBelow;
+          below = true;
+        } else {
+          top = margin;
+        }
+      }
+      popup.style.left = left + 'px';
+      popup.style.top = top + 'px';
+
+      const ax = Math.min(Math.max(rect.left + rect.width / 2 - 6, left + 12), left + pw - 18);
+      const path = arrow.querySelector('#th-wal-arrow-path');
+      if (path) path.setAttribute('fill', below ? ACCENT : T.bg);
+      arrow.style.left = ax + 'px';
+      arrow.style.top = (below ? top - 7 : top + ph) + 'px';
+      arrow.querySelector('svg').style.transform = below ? 'rotate(0deg)' : 'rotate(180deg)';
+      arrow.style.display = 'block';
+    }
+
+    function hide() {
+      runSeq++;
+      clearTimeout(hideTimer);
+      if (popup.style.display === 'none' || popup.style.display === '') return;
+      popup.classList.add('th-wal-hiding');
+      arrow.style.display = 'none';
+      hideTimer = setTimeout(() => {
+        popup.style.display = 'none';
+        popup.classList.remove('th-wal-hiding');
+        found = null;
+        curIdx = 0;
+      }, 110);
+    }
+
+    // ── Где выделение ────────────────────────────────────────────────
+
+    function elementOf(node) {
+      if (!node) return null;
+      return node.nodeType === 3 ? node.parentElement : node;
+    }
+
+    // Поле формы тикета: <div class="input-group"><span class="title">Agent wallet</span><input …>
+    function inWalletField(el) {
+      const group = el && el.closest ? el.closest('.input-group') : null;
+      const title = group && group.querySelector('.title');
+      return !!title && norm(title.textContent) === FIELD;
+    }
+
+    // Ячейка столбца Agent wallet в таблице тикетов, если он выведен
+    function inWalletColumn(el) {
+      const td = el && el.closest ? el.closest('td') : null;
+      const tr = td && td.closest('tr');
+      const table = td && td.closest('table');
+      if (!tr || !table) return false;
+      const idx = Array.from(tr.children).indexOf(td);
+      const head = table.querySelectorAll('thead th')[idx];
+      return !!head && norm(head.textContent).includes(COLUMN);
+    }
+
+    function clean(text) {
+      const t = (text || '').replace(/\s+/g, ' ').trim();
+      return t.length >= CFG.minLength && t.length <= CFG.maxLength ? t : '';
+    }
+
+    // Выделение внутри <input> в window.getSelection() не видно — его
+    // берём из selectionStart/selectionEnd самого поля
+    function selectedWallet() {
+      const act = document.activeElement;
+      if (act && (act.tagName === 'INPUT' || act.tagName === 'TEXTAREA') && inWalletField(act)) {
+        const from = act.selectionStart;
+        const to = act.selectionEnd;
+        if (typeof from !== 'number' || typeof to !== 'number' || to <= from) return null;
+        const text = clean(act.value.slice(from, to));
+        return text ? { text, rect: act.getBoundingClientRect() } : null;
+      }
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+      const a = elementOf(sel.anchorNode);
+      const f = elementOf(sel.focusNode);
+      const inside = el => inWalletField(el) || inWalletColumn(el);
+      if (!inside(a) && !inside(f)) return null;
+      const text = clean(sel.toString());
+      return text ? { text, rect: sel.getRangeAt(0).getBoundingClientRect() } : null;
+    }
+
+    function check() {
+      const hit = selectedWallet();
+      if (!hit) { hide(); return; }
+      if (hit.text === wallet && popup.style.display === 'flex' && !popup.classList.contains('th-wal-hiding')) {
+        place(hit.rect);
+        return;
+      }
+      run(hit.text, hit.rect);
+    }
+
+    // ── События ──────────────────────────────────────────────────────
+
+    function step(delta) {
+      if (!found || found.rows.length < 2) return;
+      curIdx = (curIdx + delta + found.rows.length) % found.rows.length;
+      renderResult();
+      renderNav();
+      if (lastRect) place(lastRect);
+    }
+    $('th-wal-prev').addEventListener('click', () => step(-1));
+    $('th-wal-next').addEventListener('click', () => step(1));
+
+    document.addEventListener('mouseup', e => {
+      if (popup.contains(e.target)) return;
+      // Выделение появляется не мгновенно после отпускания кнопки
+      setTimeout(check, 15);
+    });
+
+    // Выделение с клавиатуры в самом поле: Shift+стрелки, Shift+Home/End, Ctrl+A
+    document.addEventListener('keyup', e => {
+      if (!(e.target instanceof Element) || !inWalletField(e.target)) return;
+      const selectKey = e.shiftKey || ((e.ctrlKey || e.metaKey) && e.key && e.key.toLowerCase() === 'a');
+      if (selectKey) check();
+    });
+
+    document.addEventListener('mousedown', e => {
+      if (popup.contains(e.target) || arrow.contains(e.target)) return;
+      hide();
+    });
+
+    document.addEventListener('keydown', e => {
+      if (popup.style.display !== 'flex') return;
+      if (e.key === 'Escape') { hide(); return; }
+      // Стрелки листают строки, только когда фокус не в поле ввода —
+      // иначе они нужны для движения курсора в поле
+      const t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (e.key === 'ArrowLeft') step(-1);
+      if (e.key === 'ArrowRight') step(1);
+    });
+
+    document.addEventListener('scroll', e => {
+      if (popup.contains(e.target)) return;
+      hide();
+    }, { passive: true, capture: true });
+
+    log('Субагент по кошельку включён, лист:', CFG.url);
+  }
+
+  // ==================================================================
   // ПАНЕЛЬ НАСТРОЕК: ВКЛЮЧЕНИЕ И ВЫКЛЮЧЕНИЕ ФУНКЦИЙ БЕЗ ПРАВКИ КОДА
   // ==================================================================
 
@@ -5383,6 +5998,7 @@
     filterShare: 'Обмен сохранёнными фильтрами',
     columnCopy: 'Копирование столбца целиком',
     txScreen: 'Скрин транзакции по Transaction ID',
+    walletLookup: 'Субагент по кошельку (Agent wallet)',
   };
 
   // CONFIG.features задаёт дефолт при первом запуске; панель настроек и
@@ -5659,6 +6275,7 @@
     if (shouldRun('filterShare')) initFilterShare();
     if (shouldRun('columnCopy')) initColumnCopy();
     if (shouldRun('txScreen')) initTxScreen();
+    if (shouldRun('walletLookup')) initWalletLookup();
     log('Скрипт запущен на', window.location.pathname);
   }
 
