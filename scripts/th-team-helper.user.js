@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.45
+// @version      1.46
 // @description  Четырнадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто его выставил, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке, обмен сохранёнными фильтрами с коллегами через текстовый код и значок у Transaction ID, который показывает скрин, приложенный к транзакции в отчётах Deposit requests и Withdrawal requests (отчёт выбирается по типу тикета), а выделение номера в поле Agent wallet показывает, какому субагенту принадлежит кошелёк, по листу Payment references. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -487,8 +487,8 @@
       // Заголовок поля формы тикета, в котором работает выделение
       fieldTitle: 'Agent wallet',
       // Столбец таблицы с кошельком агента (подстрока названия, в нижнем
-      // регистре): если он выведен в списке тикетов, выделение работает
-      // и в нём
+      // регистре): на сайте он называется «Agent's wallet» — 's и апострофы
+      // при сравнении отбрасываются, поэтому здесь без них
       column: 'agent wallet',
       // Выделение короче — не искать: случайно задетые пара символов не
       // повод для запроса. Длиннее — это уже не номер кошелька
@@ -5387,10 +5387,16 @@
   function initWalletLookup() {
     const CFG = CONFIG.walletLookup;
 
-    // Заголовки полей приходят с &nbsp;, двоеточием и разным регистром
+    // Заголовки приходят с &nbsp;, двоеточием, разным регистром и с
+    // притяжательным 's: в форме поле называется «Agent wallet», а столбец
+    // таблицы — «Agent's wallet». Апострофы бывают прямые и типографские.
+    // Убираем 's и апострофы, чтобы оба варианта сводились к «agent wallet»
+    // («User's wallet» → «user wallet» — с кошельком агента не совпадает).
     const norm = text => (text || '')
-      .replace(/ /g, ' ')
+      .replace(/\u00a0/g, ' ')
       .replace(/:\s*$/, '')
+      .replace(/['’‘`´]s\b/gi, '')
+      .replace(/['’‘`´]/g, '')
       .replace(/\s+/g, ' ')
       .trim()
       .toLowerCase();
@@ -5985,14 +5991,15 @@
       return !!title && norm(title.textContent) === FIELD;
     }
 
-    // Ячейка столбца Agent wallet в таблице тикетов, если он выведен
+    // Ячейка столбца Agent's wallet в таблице тикетов. Заголовок ищется
+    // так же, как в «Скрине транзакции»: строка шапки (tr.table-head или
+    // thead) и ячейка с тем же cellIndex
     function inWalletColumn(el) {
       const td = el && el.closest ? el.closest('td') : null;
-      const tr = td && td.closest('tr');
       const table = td && td.closest('table');
-      if (!tr || !table) return false;
-      const idx = Array.from(tr.children).indexOf(td);
-      const head = table.querySelectorAll('thead th')[idx];
+      if (!table || td.closest('thead, tfoot')) return false;
+      const headRow = table.querySelector('tr.table-head') || table.querySelector('thead tr');
+      const head = headRow && headRow.cells[td.cellIndex];
       return !!head && norm(head.textContent).includes(COLUMN);
     }
 
