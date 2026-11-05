@@ -494,12 +494,16 @@
       // повод для запроса. Длиннее — это уже не номер кошелька
       minLength: 4,
       maxLength: 64,
-      // Столбцы ответа. Субагент — главное, ради чего ищем, — выносится
-      // в заголовок окна; ID агента показывается рядом с именем агента
+      // Столбцы ответа. Строки собираются по субагенту (ID, а если его нет —
+      // имя): у одного субагента бывает десяток строк с одним кошельком.
+      // Субагент — главное, ради чего ищем, — выносится в заголовок окна;
+      // ID агента показывается рядом с именем агента
       subagentColumn: 'NameSubagent',
       subagentIdColumn: 'idSubAgent',
       joinIds: { NameAgent: 'idAgent' },
-      // «Last used»: если строк несколько, первой идёт самая свежая
+      // Банк — в списке субагентов, когда кошелёк нашёлся у нескольких
+      bankColumn: 'BankName',
+      // «Last used»: субагенты и их строки идут от свежих к старым
       dateColumn: 'max_dt',
       // Реквизиты — строка JSON, показывается «поле — значение»
       detailsColumn: 'details',
@@ -5471,30 +5475,48 @@
       #th-wal-state.loading { color: ${ACCENT}; }
       #th-wal-state svg { width: 15px; height: 15px; flex-shrink: 0; }
 
-      #th-wal-nav {
+      /* Кошелёк у нескольких субагентов — список всех, выбранный подсвечен */
+      #th-wal-subs {
         display: none;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 10px;
+        flex-direction: column;
         background: ${T.panel};
         border-bottom: 1px solid ${T.border};
         flex-shrink: 0;
       }
-      #th-wal-counter { flex: 1; font-size: 11px; font-weight: 600; color: ${T.textDim}; }
-      #th-wal-counter b { color: ${T.text}; }
-      .th-wal-nav-btn {
-        width: 24px; height: 24px;
-        border-radius: 5px;
+      #th-wal-subs-title {
+        padding: 7px 12px 5px;
+        font-size: 11px;
+        font-weight: 700;
+        color: #d97706;
+      }
+      #th-wal-subs-list {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        padding: 0 8px 8px;
+        max-height: 150px;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+      }
+      .th-wal-sub {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        width: 100%;
+        padding: 5px 8px;
         border: 1px solid ${T.border};
+        border-radius: 6px;
         background: ${T.bg};
         color: ${T.text};
+        font: inherit;
+        text-align: left;
         cursor: pointer;
-        display: flex; align-items: center; justify-content: center;
-        padding: 0;
-        transition: background .1s;
+        transition: border-color .1s, background .1s;
       }
-      .th-wal-nav-btn:hover { background: ${T.panel}; }
-      .th-wal-nav-btn svg { width: 11px; height: 11px; }
+      .th-wal-sub:hover { border-color: ${ACCENT}; }
+      .th-wal-sub.active { border-color: ${ACCENT}; background: rgba(42,191,207,0.1); }
+      .th-wal-sub-name { font-size: 11.5px; font-weight: 700; color: ${T.textStrong}; word-break: break-word; }
+      .th-wal-sub-meta { font-size: 10.5px; color: ${T.textDim}; }
 
       #th-wal-heading {
         display: none;
@@ -5518,6 +5540,7 @@
         word-break: break-word;
       }
       #th-wal-heading-id { font-size: 11px; color: ${T.textDim}; white-space: nowrap; }
+      .th-wal-file { color: ${T.textDim}; }
 
       #th-wal-result {
         display: none;
@@ -5603,16 +5626,9 @@
         <span id="th-wal-state-text"></span>
       </div>
 
-      <div id="th-wal-nav">
-        <span id="th-wal-counter"></span>
-        <button type="button" class="th-wal-nav-btn" id="th-wal-prev" title="Предыдущая строка (стрелка влево)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-               stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-        </button>
-        <button type="button" class="th-wal-nav-btn" id="th-wal-next" title="Следующая строка (стрелка вправо)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-               stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-        </button>
+      <div id="th-wal-subs">
+        <div id="th-wal-subs-title"></div>
+        <div id="th-wal-subs-list"></div>
       </div>
 
       <div id="th-wal-heading">
@@ -5637,8 +5653,9 @@
     const stateEl = $('th-wal-state');
     const stateIcon = $('th-wal-state-icon');
     const stateText = $('th-wal-state-text');
-    const navEl = $('th-wal-nav');
-    const counterEl = $('th-wal-counter');
+    const subsEl = $('th-wal-subs');
+    const subsTitle = $('th-wal-subs-title');
+    const subsList = $('th-wal-subs-list');
     const headingEl = $('th-wal-heading');
     const headingName = $('th-wal-heading-name');
     const headingId = $('th-wal-heading-id');
@@ -5653,8 +5670,8 @@
     const ICON_ERROR = '<circle cx="12" cy="12" r="9"/><line x1="15" y1="9" x2="9" y2="15"/>'
       + '<line x1="9" y1="9" x2="15" y2="15"/>';
 
-    let found = null;      // { rows, columns, order } — ответ по текущему кошельку
-    let curIdx = 0;
+    let found = null;      // { groups, columns, order } — ответ по текущему кошельку
+    let curIdx = 0;        // выбранный субагент
     let wallet = '';
     let lastRect = null;
     let runSeq = 0;        // защита от позднего ответа по предыдущему выделению
@@ -5663,6 +5680,33 @@
     // ── Запрос ───────────────────────────────────────────────────────
 
     const str = v => (v === null || v === undefined ? '' : String(v).trim());
+
+    // Строки листа — записи об использовании реквизитов: один кошелёк
+    // у одного субагента может дать десяток строк с разным текстом
+    // реквизитов. Поэтому строки собираются по субагентам: в каждой
+    // группе строки от свежих к старым, группы — по последнему Last used.
+    const byDateDesc = (a, b) => str(b[CFG.dateColumn]).localeCompare(str(a[CFG.dateColumn]));
+    function groupBySubagent(data) {
+      const map = new Map();
+      data.forEach(row => {
+        if (!row || typeof row !== 'object') return;
+        const key = str(row[CFG.subagentIdColumn]) || str(row[CFG.subagentColumn]);
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(row);
+      });
+      return Array.from(map.values()).map(rows => {
+        rows.sort(byDateDesc);
+        const dates = rows.map(r => str(r[CFG.dateColumn])).filter(Boolean);
+        return {
+          rows,
+          latest: rows[0],
+          name: str(rows[0][CFG.subagentColumn]),
+          id: str(rows[0][CFG.subagentIdColumn]),
+          last: dates[0] || '',
+          first: dates[dates.length - 1] || '',
+        };
+      }).sort((a, b) => b.last.localeCompare(a.last));
+    }
 
     const cache = new Map();   // кошелёк → { at, promise }
     function lookup(w) {
@@ -5676,10 +5720,9 @@
         const order = Array.isArray(json.columns_allow) && json.columns_allow.length
           ? json.columns_allow
           : Object.keys(columns).length ? Object.keys(columns) : Object.keys(json.data[0] || {});
-        // Самая свежая строка — первой
-        const rows = json.data.slice().sort((a, b) => str(b[CFG.dateColumn]).localeCompare(str(a[CFG.dateColumn])));
-        log('Кошелёк', w, '— строк в Payment references:', rows.length);
-        return { rows, columns, order };
+        const groups = groupBySubagent(json.data);
+        log('Кошелёк', w, '— строк в Payment references:', json.data.length, ', субагентов:', groups.length);
+        return { groups, columns, order };
       });
       cache.set(w, { at: Date.now(), promise });
       promise.catch(() => {
@@ -5709,13 +5752,17 @@
       if (pos < text.length) el.appendChild(document.createTextNode(text.slice(pos)));
     }
 
+    // Путь к файлу реквизитов (BTDocuments/…/requisites/<хеш>.jpg) —
+    // показываем только имя файла, полный путь в подсказке
+    const FILE_RX = /^[\w.-]+(\/[\w.-]+)+\.(jpe?g|png|gif|webp|bmp|pdf)$/i;
+
     // details — строка JSON вида {"Номер кошелька": "0103…"}: каждое поле
     // отдельно, название над значением (названия бывают на арабском)
     function renderDetails(el, text) {
       let obj = null;
       try { obj = JSON.parse(text); } catch (err) { obj = null; }
       const pairs = obj && typeof obj === 'object' && !Array.isArray(obj)
-        ? Object.keys(obj).map(k => [k.replace(/_/g, ' '), str(obj[k])])
+        ? Object.keys(obj).map(k => [k.replace(/_+/g, ' ').trim(), str(obj[k])])
         : [['', text]];
       pairs.forEach(([key, value]) => {
         const line = document.createElement('div');
@@ -5727,51 +5774,106 @@
           line.appendChild(k);
         }
         const v = document.createElement('div');
-        appendHighlighted(v, value, wallet);
+        if (FILE_RX.test(value)) {
+          v.className = 'th-wal-file';
+          v.textContent = value.split('/').pop();
+          v.title = value;
+        } else {
+          appendHighlighted(v, value, wallet);
+        }
         line.appendChild(v);
         el.appendChild(line);
       });
     }
 
+    function plural(n, one, few, many) {
+      const m10 = n % 10;
+      const m100 = n % 100;
+      if (m10 === 1 && m100 !== 11) return one;
+      if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+      return many;
+    }
+    const recordsText = n => `${n} ${plural(n, 'запись', 'записи', 'записей')}`;
+
+    function addRow(label, fill) {
+      const line = document.createElement('div');
+      line.className = 'th-wal-row';
+      const l = document.createElement('div');
+      l.className = 'th-wal-col-label';
+      l.textContent = label;
+      const v = document.createElement('div');
+      v.className = 'th-wal-col-value';
+      if (typeof fill === 'function') fill(v); else v.textContent = fill;
+      line.appendChild(l);
+      line.appendChild(v);
+      resultEl.appendChild(line);
+    }
+
+    // Выбранный субагент: заголовок и столбцы. Если строк у него несколько,
+    // в обычных столбцах — все разные значения (обычно одно), Last used —
+    // самый свежий, реквизиты — из самой свежей строки, и отдельной
+    // строкой — сколько всего записей и дата первой.
     function renderResult() {
-      const row = found.rows[curIdx];
-      headingName.textContent = str(row[CFG.subagentColumn]) || '—';
-      const subId = str(row[CFG.subagentIdColumn]);
-      headingId.textContent = subId ? `ID ${subId}` : '';
+      const g = found.groups[curIdx];
+      headingName.textContent = g.name || '—';
+      headingId.textContent = g.id ? `ID ${g.id}` : '';
       headingEl.style.display = 'flex';
 
       const skip = new Set([CFG.subagentColumn, CFG.subagentIdColumn, ...Object.values(CFG.joinIds)]);
       resultEl.innerHTML = '';
       found.order.forEach(key => {
-        if (skip.has(key) || !(key in row)) return;
-        let text = str(row[key]);
+        if (skip.has(key) || !(key in g.latest)) return;
+        const label = str(found.columns[key]) || key;
+        if (key === CFG.dateColumn) {
+          if (g.last) addRow(label, g.last);
+          if (g.rows.length > 1) {
+            addRow('Записей', recordsText(g.rows.length) + (g.first ? `, первая ${g.first}` : ''));
+          }
+          return;
+        }
+        if (key === CFG.detailsColumn) {
+          const text = str(g.latest[key]);
+          if (text) addRow(label, v => renderDetails(v, text));
+          return;
+        }
         const idKey = CFG.joinIds[key];
-        const id = idKey ? str(row[idKey]) : '';
-        if (id) text = text ? `${text} (${id})` : id;
-        if (!text) return;
-
-        const line = document.createElement('div');
-        line.className = 'th-wal-row';
-        const label = document.createElement('div');
-        label.className = 'th-wal-col-label';
-        label.textContent = str(found.columns[key]) || key;
-        const value = document.createElement('div');
-        value.className = 'th-wal-col-value';
-        if (key === CFG.detailsColumn) renderDetails(value, text);
-        else value.textContent = text;
-        line.appendChild(label);
-        line.appendChild(value);
-        resultEl.appendChild(line);
+        const values = [];
+        g.rows.forEach(row => {
+          let text = str(row[key]);
+          const id = idKey ? str(row[idKey]) : '';
+          if (id) text = text ? `${text} (${id})` : id;
+          if (text && !values.includes(text)) values.push(text);
+        });
+        if (values.length) addRow(label, values.join(', '));
       });
       resultEl.style.display = 'flex';
       resultEl.scrollTop = 0;
     }
 
-    function renderNav() {
-      const n = found ? found.rows.length : 0;
-      if (n < 2) { navEl.style.display = 'none'; return; }
-      navEl.style.display = 'flex';
-      counterEl.innerHTML = `Строка <b>${curIdx + 1}</b> из <b>${n}</b>`;
+    // Список субагентов — только если кошелёк нашёлся у нескольких
+    function renderSubs() {
+      const n = found ? found.groups.length : 0;
+      if (n < 2) { subsEl.style.display = 'none'; return; }
+      subsTitle.textContent = `Кошелёк есть у ${n} ${plural(n, 'субагента', 'субагентов', 'субагентов')}`;
+      subsList.innerHTML = '';
+      found.groups.forEach((g, i) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'th-wal-sub' + (i === curIdx ? ' active' : '');
+        b.dataset.idx = String(i);
+        const name = document.createElement('span');
+        name.className = 'th-wal-sub-name';
+        name.textContent = g.name || '—';
+        const meta = document.createElement('span');
+        meta.className = 'th-wal-sub-meta';
+        const bank = str(g.latest[CFG.bankColumn]);
+        const count = g.rows.length > 1 ? recordsText(g.rows.length) : '';
+        meta.textContent = [g.id ? `ID ${g.id}` : '', bank, g.last, count].filter(Boolean).join(' · ');
+        b.appendChild(name);
+        b.appendChild(meta);
+        subsList.appendChild(b);
+      });
+      subsEl.style.display = 'flex';
     }
 
     function showState(kind, text, iconMarkup) {
@@ -5780,7 +5882,7 @@
       stateIcon.innerHTML = iconMarkup;
       stateText.textContent = text;
       resultEl.style.display = 'none';
-      navEl.style.display = 'none';
+      subsEl.style.display = 'none';
       headingEl.style.display = 'none';
     }
 
@@ -5796,12 +5898,12 @@
         const res = await lookup(w);
         if (seq !== runSeq) return;
         found = res;
-        if (!res.rows.length) {
+        if (!res.groups.length) {
           showState('empty', 'Кошелька нет в Payment references', ICON_EMPTY);
         } else {
           stateEl.style.display = 'none';
+          renderSubs();
           renderResult();
-          renderNav();
         }
       } catch (err) {
         if (seq !== runSeq) return;
@@ -5932,15 +6034,23 @@
 
     // ── События ──────────────────────────────────────────────────────
 
-    function step(delta) {
-      if (!found || found.rows.length < 2) return;
-      curIdx = (curIdx + delta + found.rows.length) % found.rows.length;
+    function select(idx) {
+      if (!found || !found.groups[idx]) return;
+      curIdx = idx;
+      subsList.querySelectorAll('.th-wal-sub').forEach((b, i) => b.classList.toggle('active', i === idx));
+      const active = subsList.children[idx];
+      if (active && active.scrollIntoView) active.scrollIntoView({ block: 'nearest' });
       renderResult();
-      renderNav();
       if (lastRect) place(lastRect);
     }
-    $('th-wal-prev').addEventListener('click', () => step(-1));
-    $('th-wal-next').addEventListener('click', () => step(1));
+    function step(delta) {
+      if (!found || found.groups.length < 2) return;
+      select((curIdx + delta + found.groups.length) % found.groups.length);
+    }
+    subsList.addEventListener('click', e => {
+      const b = e.target instanceof Element ? e.target.closest('.th-wal-sub') : null;
+      if (b) select(Number(b.dataset.idx));
+    });
 
     document.addEventListener('mouseup', e => {
       if (popup.contains(e.target)) return;
@@ -5967,8 +6077,11 @@
       // иначе они нужны для движения курсора в поле
       const t = e.target;
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-      if (e.key === 'ArrowLeft') step(-1);
-      if (e.key === 'ArrowRight') step(1);
+      // ↑/↓ — только когда фокус в самом окне (на кнопке субагента), иначе
+      // они прокручивают страницу
+      const inPopup = popup.contains(t);
+      if (e.key === 'ArrowLeft' || (inPopup && e.key === 'ArrowUp')) { if (inPopup) e.preventDefault(); step(-1); }
+      if (e.key === 'ArrowRight' || (inPopup && e.key === 'ArrowDown')) { if (inPopup) e.preventDefault(); step(1); }
     });
 
     document.addEventListener('scroll', e => {
