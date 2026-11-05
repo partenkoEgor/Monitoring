@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Team Helper
 // @namespace    th-management-team-helper
-// @version      1.43
-// @description  Тринадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто его выставил, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке, обмен сохранёнными фильтрами с коллегами через текстовый код и значок у Transaction ID, который показывает скрин, приложенный к транзакции в отчётах Deposit requests и Withdrawal requests. На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
+// @version      1.44
+// @description  Тринадцать помощников в одном скрипте: превью вложений при наведении с полноэкранным просмотром (поворот на 90° и масштабирование колесом мыши), тултип на статусе тикета (для закрытых — предыдущий статус и кто его выставил, для In progress и In progress (M) — у кого в работе; с именем и отделом из справочника админов), поиск лимитов по странице Confluence при выделении текста, справочник админов (имя и отдел по логину) в окне истории тикета, автоподстановка своего Reddy ID в модалку экспорта файла, автоподстановка диапазона дат в фильтр, кнопка «Данные тикета» в форме редактирования и в каждой строке таблицы, которая копирует собранные поля и опциональный шаблон комментария в буфер обмена, кнопка «Добавить шаблонный комментарий» над Comment (internal) с готовыми текстами по статусу тикета, компактные кнопки вместо длинных ссылок на файлы в таблице, копирование значения любой ячейки по клику, копирование всего столбца кнопкой на заголовке, обмен сохранёнными фильтрами с коллегами через текстовый код и значок у Transaction ID, который показывает скрин, приложенный к транзакции в отчётах Deposit requests и Withdrawal requests (отчёт выбирается по типу тикета). На страницах отчётов requestwithdrawal и requestrefill работает только превью вложений. Каждую функцию можно включить или выключить в блоке CONFIG или через панель настроек на странице (кнопка в левом нижнем углу).
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -402,9 +402,13 @@
 
     // ── Скрин транзакции по Transaction ID ───────────────────────────
     txScreen: {
-      // Где искать транзакцию — по порядку, до первой найденной. Запрос тот
-      // же, что делает страница отчёта по Apply с номером в поле ID (дату
-      // фильтра сервер при заполненном ID не учитывает).
+      // Где искать транзакцию. Запрос тот же, что делает страница отчёта
+      // по Apply с номером в поле ID (дату фильтра сервер при заполненном
+      // ID не учитывает). Номера депозитов и выводов из разных серий могут
+      // совпадать, поэтому сначала по тикету определяется его тип (см.
+      // ticketTypes) и запрос идёт только в отчёт этого типа. Если тип
+      // узнать не удалось — во все отчёты по порядку, до первой находки.
+      //   type       — тип тикета, к которому относится отчёт
       //   form       — остальные поля формы отчёта, как их шлёт сама
       //                страница (date_from, date_to и id скрипт добавляет сам)
       //   userColumn — колонка ответа с User ID: у отчётов она называется по-разному
@@ -413,6 +417,7 @@
       //                &report_id=<reportId>&user_id=...[&type=<fileType>]
       sources: [
         {
+          type: 'deposit',
           label: 'Deposit requests',
           url: '/en/admin/report/requestrefill',
           form: {
@@ -426,6 +431,7 @@
           pathPrefix: '/',
         },
         {
+          type: 'withdrawal',
           label: 'Withdrawal requests',
           url: '/en/admin/report/requestwithdrawal',
           form: {
@@ -439,6 +445,28 @@
           pathPrefix: '',
         },
       ],
+      // Тип тикета — поле idTypePayment в ответе списка тикетов. В таблице
+      // его нет, поэтому скрипт делает тот же запрос, что страница тикетов
+      // при поиске по Ticket ID: даты пустые, остальные фильтры пустые,
+      // idTicket — номер тикета строкой (скрипт подставляет сам).
+      ticketUrl: '/en/admin/backoffice/paymentsupport',
+      ticketForm: {
+        dateFrom: '', dateTo: '', isVip: false, myTickets: false, isSupport: null,
+        userId: null, transactionId: '', uniqueTransferNumber: null,
+        numberWallet: null, walletNumber: null, selectDtChange: null,
+        agentId: [], subAgentId: [], topicId: [], subTopicId: [], refIds: [],
+        countryIds: [], currencyIds: null, departments: [], adminSelect: [],
+        externalStatus: [], internalStatus: [], idStatusUser: [],
+        requestTypeIds: [], depositTransactionStatus: [], withdrawalTransactionStatus: [],
+        nameColumnToSort: null, orderBy: -1, page: 1, perPage: 100,
+      },
+      // Заголовок столбца с номером тикета в таблице тикетов
+      ticketColumn: 'Ticket ID',
+      // idTypePayment → тип из sources: 1 — депозиты («Unsuccessful
+      // deposit»), 2 — выводы («I didn't receive my withdrawal», «Error while
+      // withdrawing funds»). Значения нет в списке — тип неизвестен, и
+      // транзакция ищется во всех отчётах по порядку.
+      ticketTypes: { 1: 'deposit', 2: 'withdrawal' },
       // Через сколько ответ по транзакции считается устаревшим (мс). До
       // этого повторное наведение запрос не повторяет.
       cacheTtl: 5 * 60 * 1000,
@@ -4937,12 +4965,14 @@
   // Скрин, приложенный к транзакции, есть только в отчётах Deposit requests
   // (колонка User info) и Withdrawal requests (Payout confirmation), а у
   // тикета — лишь номер транзакции. Значок рядом с номером делает тот же
-  // запрос, что страница отчёта по Apply с ID (сначала в депозитах, потом
-  // в выводах), достаёт из строки ссылку на файл и отдаёт её превью
+  // запрос, что страница отчёта по Apply с ID (в отчёт по типу тикета —
+  // депозит или вывод; тип неизвестен — сначала депозиты, потом выводы),
+  // достаёт из строки ссылку на файл и отдаёт её превью
   // вложений: окно, Fullscreen и Open in new tab — те же, что у обычных ссылок.
   function initTxScreen() {
     const CFG = CONFIG.txScreen;
     const HEADER = 'transaction id';
+    const TICKET_HEADER = CFG.ticketColumn.trim().toLowerCase();
     const TX_ID_RE = /^\d{5,20}$/;
     // Путь к файлу в любом поле строки: у депозита он лежит в dopparam —
     // JSON с полями формы оплаты, где имя поля зависит от платёжки, —
@@ -5001,7 +5031,7 @@
       };
     }
 
-    async function fetchRows(src, txId) {
+    async function postJson(url, body) {
       const headers = {
         'Content-Type': 'application/json',
         'Accept': 'application/json, text/plain, */*',
@@ -5011,22 +5041,25 @@
 
       let r;
       try {
-        r = await fetch(src.url, {
+        r = await fetch(url, {
           method: 'POST',
           credentials: 'same-origin',
           headers,
-          body: JSON.stringify(reportPayload(src, txId)),
+          body: JSON.stringify(body),
         });
       } catch (err) {
         throw new Error('нет связи с сервером');
       }
       if (!r.ok) throw new Error(`сервер ответил ${r.status}`);
-      let json;
       try {
-        json = await r.json();
+        return await r.json();
       } catch (err) {
         throw new Error('сервер ответил не данными — возможно, истекла сессия, обновите страницу');
       }
+    }
+
+    async function fetchRows(src, txId) {
+      const json = await postJson(src.url, reportPayload(src, txId));
 
       // Таблица приходит строкой JSON в поле data: {Success, Value: {Columns, Data}}
       let data = json && json.data;
@@ -5068,9 +5101,38 @@
       return '/admin/amazon/?' + parts.join('&');
     }
 
-    async function findTransaction(txId) {
-      for (const src of CFG.sources) {
-        const rows = await fetchRows(src, txId);
+    // ── Тип тикета: депозит или вывод ────────────────────────────────
+
+    // Тип тикета не меняется — запоминаем на всё время страницы. Сбой
+    // запроса не мешает искать скрин: тип просто остаётся неизвестным.
+    const ticketTypes = new Map();   // ticketId → Promise<'deposit'|'withdrawal'|null>
+
+    function ticketType(ticketId) {
+      if (!ticketId) return Promise.resolve(null);
+      if (ticketTypes.has(ticketId)) return ticketTypes.get(ticketId);
+      const p = postJson(CFG.ticketUrl, { ...CFG.ticketForm, idTicket: ticketId })
+        .then(json => {
+          const rows = json && Array.isArray(json.data) ? json.data : [];
+          const row = rows.find(r => String(r.idTicket) === ticketId);
+          const type = row ? CFG.ticketTypes[String(row.idTypePayment)] || null : null;
+          log('Тип тикета', ticketId, row ? row.idTypePayment : 'не найден', type);
+          return type;
+        })
+        .catch(err => {
+          log('Не удалось узнать тип тикета', ticketId, err);
+          ticketTypes.delete(ticketId);
+          return null;
+        });
+      ticketTypes.set(ticketId, p);
+      return p;
+    }
+
+    async function findTransaction(txId, ticketId) {
+      const type = await ticketType(ticketId);
+      const sources = type ? CFG.sources.filter(src => src.type === type) : CFG.sources;
+      const where = sources.map(src => src.label).join(', ');
+      for (const src of sources) {
+        const rows = await cachedRows(src, txId);
         const row = rows.find(r => String(r.id) === txId);
         if (!row) continue;
         const files = extractFiles(row).map(path => fileLink(src, path, row[src.userColumn]));
@@ -5079,34 +5141,54 @@
           ? { state: 'ok', files, source: src.label }
           : { state: 'none', source: src.label };
       }
-      return { state: 'missing' };
+      return { state: 'missing', where };
     }
 
     // ── Кэш ответов ──────────────────────────────────────────────────
 
-    const results = new Map();   // txId → { at, res }
-    const pending = new Map();   // txId → Promise
+    // Ответ отчёта по номеру транзакции — общий для всех тикетов с этим
+    // номером: второй тикет с той же транзакцией отчёт заново не спрашивает
+    const rowsCache = new Map();   // «отчёт|номер» → { at, promise }
 
-    function knownResult(txId) {
-      const hit = results.get(txId);
+    function cachedRows(src, txId) {
+      const key = `${src.label}|${txId}`;
+      const hit = rowsCache.get(key);
+      if (hit && Date.now() - hit.at < CFG.cacheTtl) return hit.promise;
+      const promise = fetchRows(src, txId);
+      rowsCache.set(key, { at: Date.now(), promise });
+      // Ошибку не запоминаем — следующее наведение спросит заново
+      promise.catch(() => rowsCache.delete(key));
+      return promise;
+    }
+
+    // Итог зависит и от тикета (его тип выбирает отчёт), поэтому ключ —
+    // номер транзакции вместе с номером тикета
+    const results = new Map();   // ключ → { at, res }
+    const pending = new Map();   // ключ → Promise
+
+    function keyOf(btn) {
+      return `${btn.dataset.txId}|${btn.dataset.ticketId || ''}`;
+    }
+
+    function knownResult(key) {
+      const hit = results.get(key);
       return hit && Date.now() - hit.at < CFG.cacheTtl ? hit.res : null;
     }
 
-    function lookup(txId) {
-      if (pending.has(txId)) return pending.get(txId);
-      const p = findTransaction(txId)
+    function lookup(key, txId, ticketId) {
+      if (pending.has(key)) return pending.get(key);
+      const p = findTransaction(txId, ticketId)
         .catch(err => {
           log('Не удалось найти транзакцию', txId, err);
           return { state: 'error', message: err.message };
         })
         .then(res => {
-          pending.delete(txId);
-          // Ошибку не запоминаем — следующее наведение спросит заново
-          if (res.state !== 'error') results.set(txId, { at: Date.now(), res });
-          else results.delete(txId);
+          pending.delete(key);
+          if (res.state !== 'error') results.set(key, { at: Date.now(), res });
+          else results.delete(key);
           return res;
         });
-      pending.set(txId, p);
+      pending.set(key, p);
       return p;
     }
 
@@ -5142,7 +5224,7 @@
       } else if (res.state === 'missing') {
         btn.classList.add('th-txs-missing');
         btn.dataset.note = 'не найдена';
-        btn.title = `Транзакции ${txId} нет в ${WHERE}`;
+        btn.title = `Транзакции ${txId} нет в ${res.where || WHERE}`;
       } else {
         btn.classList.add('th-txs-error');
         btn.dataset.note = 'ошибка';
@@ -5150,46 +5232,48 @@
       }
     }
 
-    // Одна транзакция может стоять в нескольких строках — обновляем все
-    function renderAll(txId, res) {
+    // Одна транзакция одного тикета может стоять в нескольких строках —
+    // обновляем все значки с тем же ключом
+    function renderAll(key, res) {
       document.querySelectorAll('.th-txs-btn').forEach(btn => {
-        if (btn.dataset.txId === txId) render(btn, res);
+        if (keyOf(btn) === key) render(btn, res);
       });
     }
 
     function check(btn) {
-      const txId = btn.dataset.txId;
-      const known = knownResult(txId);
+      const key = keyOf(btn);
+      const known = knownResult(key);
       if (known) return Promise.resolve(known);
-      renderAll(txId, { state: 'loading' });
-      return lookup(txId).then(res => {
-        renderAll(txId, res);
+      renderAll(key, { state: 'loading' });
+      return lookup(key, btn.dataset.txId, btn.dataset.ticketId || '').then(res => {
+        renderAll(key, res);
         return res;
       });
     }
 
     // Ответ пришёл, пока курсор на значке, — показываем превью сразу, не
     // дожидаясь, пока мышь сдвинется (окно превью открывается по mouseover)
-    function showIfHovered(btn, txId, res) {
-      if (res.state !== 'ok' || !btn.isConnected || btn.dataset.txId !== txId) return;
+    function showIfHovered(btn, key, res) {
+      if (res.state !== 'ok' || !btn.isConnected || keyOf(btn) !== key) return;
       if (btn.matches(':hover')) btn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
     }
 
     function onHover(btn) {
-      const txId = btn.dataset.txId;
-      if (!txId || knownResult(txId)) return;
-      check(btn).then(res => showIfHovered(btn, txId, res));
+      if (!btn.dataset.txId) return;
+      const key = keyOf(btn);
+      if (knownResult(key)) return;
+      check(btn).then(res => showIfHovered(btn, key, res));
     }
 
     function onClick(btn) {
-      const txId = btn.dataset.txId;
-      if (!txId) return;
-      const known = knownResult(txId);
+      if (!btn.dataset.txId) return;
+      const key = keyOf(btn);
+      const known = knownResult(key);
       if (known && known.state === 'ok') {
         window.open(known.files[0], '_blank', 'noopener');
         return;
       }
-      check(btn).then(res => showIfHovered(btn, txId, res));
+      check(btn).then(res => showIfHovered(btn, key, res));
     }
 
     function makeButton() {
@@ -5212,18 +5296,27 @@
 
     // Шапка бывает и в <thead>, и в <tr class="table-head"> (окно «История
     // тикета» собрано без <thead>) — ищем в обоих местах
-    function txColumnIndex(table) {
+    function columnIndex(table, header) {
       const th = Array.from(table.querySelectorAll('tr.table-head th, thead th'))
-        .find(h => h.textContent.replace(/\s+/g, ' ').trim().toLowerCase() === HEADER);
+        .find(h => h.textContent.replace(/\s+/g, ' ').trim().toLowerCase() === header);
       return th ? th.cellIndex : -1;
     }
 
-    // Значок ставится в конец ячейки, а номер сайт может переписать в той
-    // же ячейке (пагинация, новый фильтр) — поэтому на каждом проходе
-    // сверяем номер на значке с текстом ячейки
+    // Номер тикета из той же строки; нет столбца или в ячейке не номер —
+    // пустая строка, тогда тип тикета не запрашивается
+    function rowTicketId(row, idx) {
+      const cell = idx < 0 ? null : row.cells[idx];
+      const text = cell ? cell.textContent.replace(/\s+/g, '') : '';
+      return /^\d{3,20}$/.test(text) ? text : '';
+    }
+
+    // Значок ставится в конец ячейки, а номер транзакции и тикета сайт
+    // может переписать в той же строке (пагинация, новый фильтр) — поэтому
+    // на каждом проходе сверяем их со значком
     function processTable(table) {
-      const idx = txColumnIndex(table);
+      const idx = columnIndex(table, HEADER);
       if (idx < 0) return;
+      const ticketIdx = columnIndex(table, TICKET_HEADER);
       Array.from(table.rows).forEach(row => {
         const cell = row.cells[idx];
         if (!cell || cell.tagName !== 'TD') return;
@@ -5237,9 +5330,11 @@
           btn = makeButton();
           cell.appendChild(btn);
         }
-        if (btn.dataset.txId !== txId) {
+        const ticketId = rowTicketId(row, ticketIdx);
+        if (btn.dataset.txId !== txId || (btn.dataset.ticketId || '') !== ticketId) {
           btn.dataset.txId = txId;
-          render(btn, knownResult(txId));
+          btn.dataset.ticketId = ticketId;
+          render(btn, knownResult(keyOf(btn)));
         }
       });
     }
