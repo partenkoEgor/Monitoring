@@ -42,6 +42,9 @@ const FAST_CONFIG = {
   autopilotTableQuietPeriod: 30,
   autopilotEmptyConfirm: 120,
   autopilotBetweenChunksDelay: 5,
+  verifyRowWait: 150,
+  verifyFieldLoadTimeout: 1200,
+  verifyRetryDelay: 50,
 };
 
 function loadScript(which, overrides) {
@@ -103,6 +106,10 @@ function processingDate(hoursAgo) {
 //     saveRejected(id): сервер отвечает на сохранение success: false
 //     omitAgentFiles: Set тикетов, у которых в ответе списка нет поля
 //       documentsExternal (колонки Agent's files) вовсе
+//     hideTxInTable: true — колонка Transaction ID в таблице пустая, даже
+//       если номер в тикете есть (таблица не успела перечитаться)
+//     modalFillDelay: мс — окно Edit заполняет поле Transaction ID уже
+//       сохранённого номера не сразу, а с задержкой (медленный сайт)
 function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, behaviour = {}, configOverrides, also = [] } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body>
     <form id="filter_form">
@@ -283,7 +290,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
         'External Status': t.externalStatus,
         'Ticket ID': id,
         Amount: '100',
-        'Transaction ID': t.txId || '',
+        'Transaction ID': site.behaviour.hideTxInTable ? '' : t.txId || '',
         'Transaction Amount': '100',
         'Transaction Status': t.txStatus || '',
         'Processing Date': processingDate(t.hoursAgo == null ? 2 : t.hoursAgo),
@@ -346,6 +353,14 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
 
     let chosen = null;
     const txInput = wrap.querySelector('.tx-id');
+    // Медленный сайт: номер, который уже есть в тикете, окно показывает не
+    // сразу. Скрипт за это время в поле не пишет — заполняем, только если
+    // поле так и осталось пустым.
+    if (site.behaviour.modalFillDelay && t.txId) {
+      const loaded = t.txId;
+      txInput.value = '';
+      setTimeout(() => { if (txInput.value === '') txInput.value = loaded; }, site.behaviour.modalFillDelay);
+    }
     const commentArea = wrap.querySelector('.comment-internal');
     commentArea.value = t.insideComment || '';
     let waves = false;

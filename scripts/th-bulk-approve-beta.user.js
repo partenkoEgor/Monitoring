@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.31
+// @version      0.32
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -48,6 +48,15 @@
     // (см. verifyAmountSaved). Выключать стоит только для отладки: без этого
     // тикет может закрыться со статусом, но без суммы, и никто не заметит.
     verifyAmountSaved: true,
+    // Сколько ждать (мс), пока значение появится в строке таблицы после Apply
+    // (с 3.3.1 / 0.32): на медленном сайте таблица перечитывается не сразу
+    verifyRowWait: 5000,
+    // Сколько ждать (мс), пока окно Edit при перепроверке заполнит поле
+    verifyFieldLoadTimeout: 6000,
+    // Сколько раз открыть окно, если поле так и осталось пустым, и пауза (мс)
+    // между попытками — прежде чем объявить, что значение не сохранилось
+    verifyFieldAttempts: 2,
+    verifyRetryDelay: 5000,
     // С какого возраста тикет считается зависшим (часы). Возраст берётся из
     // колонки Processing Date и считается на момент обработки тикета.
     staleAfterHours: 24,
@@ -2203,23 +2212,52 @@
   async function verifyFieldSaved(opts) {
     const { ticketId, workflow, fieldLabel, expected, readFromRow, isSame, rowSourceName } = opts;
 
-    let row;
-    try {
-      // Таблица после Apply обычно перечитывается — даём строке вернуться
-      row = await waitFor(() => findRowByTicketId(ticketId), 5000);
-    } catch (e) {
-      if (e instanceof StopSignal) throw e;
-      return { verdict: 'unverified', note: 'строка пропала из таблицы после сохранения' };
+    // Быстрый путь: значение уже видно в списке — значит, сервер его принял.
+    // Таблица после Apply перечитывается не мгновенно, а на перегруженном
+    // сайте строка какое-то время показывает старое значение, поэтому
+    // смотрим её несколько раз, а не один (с 3.3.1 / 0.32). Колонки нет
+    // (readFromRow вернул null) — ждать в таблице нечего, сразу в окно.
+    let row = null;
+    const rowDeadline = Date.now() + CONFIG.verifyRowWait;
+    for (;;) {
+      row = findRowByTicketId(ticketId) || row;
+      const rowValue = row ? readFromRow(row) : undefined;
+      if (rowValue !== null && rowValue !== undefined && rowValue !== '' && isSame(rowValue, expected)) {
+        return { verdict: 'saved', stored: rowValue, note: `подтверждено по ${rowSourceName}` };
+      }
+      if ((row && rowValue === null) || Date.now() >= rowDeadline) break;
+      await interruptibleSleep(250);
     }
+    if (!row) return { verdict: 'unverified', note: 'строка пропала из таблицы после сохранения' };
 
-    // Быстрый путь: значение уже видно в списке — значит, сервер его принял
-    const rowValue = readFromRow(row);
-    if (rowValue !== null && rowValue !== '' && isSame(rowValue, expected)) {
-      return { verdict: 'saved', stored: rowValue, note: `подтверждено по ${rowSourceName}` };
+    // Путь сомнения: в списке по-прежнему не то — открываем тикет и смотрим
+    // само поле. Окно заполняет поля не сразу, а когда догрузит данные
+    // тикета; ложное «поле пустое» на медленном сайте (529) уже
+    // останавливало прогон, хотя номер сохранялся. Поэтому пустое поле —
+    // ещё не приговор: ждём, пока оно заполнится, а если нет — закрываем
+    // окно, выжидаем и смотрим ещё раз.
+    let attempt = 0;
+    for (;;) {
+      attempt++;
+      const check = await readFieldFromEditWindow(row, opts);
+      if (check.verdict !== 'empty') return check;
+      if (attempt >= CONFIG.verifyFieldAttempts) {
+        return {
+          verdict: 'not-saved',
+          stored: '',
+          note: attempt > 1 ? `поле пустое (проверено ${attempt} раза)` : 'поле пустое',
+        };
+      }
+      await interruptibleSleep(CONFIG.verifyRetryDelay);
+      row = findRowByTicketId(ticketId) || row;
     }
+  }
 
-    // Путь сомнения: в списке по-прежнему не то — но это может быть и просто
-    // неперечитанная таблица. Открываем тикет и смотрим само поле.
+  // Одна перепроверка через окно Edit: открыть, убедиться, что это тот
+  // тикет, дождаться, пока поле заполнится, прочитать и закрыть окно.
+  // verdict 'empty' — поле так и осталось пустым за отведённое время.
+  async function readFieldFromEditWindow(row, opts) {
+    const { ticketId, workflow, fieldLabel, expected, isSame } = opts;
     const editLink = getEditLinkFromRow(row);
     if (!editLink) {
       return { verdict: 'unverified', note: 'в строке нет кнопки Edit для перепроверки' };
@@ -2260,20 +2298,26 @@
         return { verdict: 'unverified', note: `в окне проверки нет поля ${fieldLabel}` };
       }
 
-      const input = group.querySelector(
-        'input.mx-input, input[type="text"]:not(.multiselect__input)'
-      );
-      const stored = input ? input.value.trim() : '';
-
-      if (stored !== '' && isSame(stored, expected)) {
-        return { verdict: 'saved', stored, note: 'подтверждено по полю в окне' };
+      const readStored = () => {
+        const input = group.querySelector(
+          'input.mx-input, input[type="text"]:not(.multiselect__input)'
+        );
+        return input ? input.value.trim() : '';
+      };
+      // Ждём, пока поле заполнится: пустое сразу после открытия — это
+      // обычно ещё не загруженные данные, а не несохранённое значение
+      const loadDeadline = Date.now() + CONFIG.verifyFieldLoadTimeout;
+      let stored = readStored();
+      while (stored === '' && Date.now() < loadDeadline) {
+        await interruptibleSleep(200);
+        stored = readStored();
       }
 
-      return {
-        verdict: 'not-saved',
-        stored,
-        note: stored === '' ? 'поле пустое' : `в поле "${stored}"`,
-      };
+      if (stored === '') return { verdict: 'empty', stored };
+      if (isSame(stored, expected)) {
+        return { verdict: 'saved', stored, note: 'подтверждено по полю в окне' };
+      }
+      return { verdict: 'not-saved', stored, note: `в поле "${stored}"` };
     } finally {
       // Окно проверки обязано закрыться при ЛЮБОМ исходе: незакрытая модалка
       // роняет следующий тикет каскадом (stale-modal-before-edit), из-за
