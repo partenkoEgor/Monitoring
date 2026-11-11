@@ -970,6 +970,33 @@ const scenarios = {
     const r = await page.run({ button: LIST_BTN, listText: `${ids[0]}\t24085716901` });
     check('бета рядом работает как обычно', /Успешно: 1/.test(r.text) && site.saves.length === 1, r.text.slice(0, 300));
   },
+
+  async 30() {
+    console.log('\n[30] Проверка Transaction ID на медленном сайте: поле в окне заполняется не сразу — это не «не сохранился» (3.3.1 / 0.32)');
+    // Номер сохраняется, но таблица его не показывает, а окно Edit заполняет
+    // поле с задержкой. Раньше скрипт читал поле сразу, видел пустое и после
+    // трёх таких тикетов останавливал прогон.
+    const a = makeTickets(4);
+    const pageA = createPage({ tickets: a.tickets, onScreen: ['19999999'], behaviour: { hideTxInTable: true, modalFillDelay: 700 } });
+    const rA = await pageA.run({ button: LIST_BTN, listText: a.listText });
+    check('медленное окно: прогон не остановлен, все 4 закрыты',
+      !/ПРОГОН ОСТАНОВЛЕН/.test(rA.text) && /Успешно: 4/.test(rA.text) && pageA.site.saves.length === 4, rA.text.slice(0, 500));
+    check('медленное окно: «не сохранился» нет', !/НЕ сохранился/.test(rA.text), rA.text);
+
+    // А вот если номер правда не сохранился — поле пустое и после ожидания,
+    // и при второй попытке — это по-прежнему ловится и останавливает прогон
+    const b = makeTickets(4);
+    const pageB = createPage({
+      tickets: b.tickets, onScreen: ['19999999'],
+      behaviour: { hideTxInTable: true, modalFillDelay: 50, dropsTransactionId: () => true },
+    });
+    const rB = await pageB.run({ button: LIST_BTN, listText: b.listText });
+    check('правда не сохранился: прогон остановлен после 3 тикетов',
+      /ПРОГОН ОСТАНОВЛЕН АВТОМАТИЧЕСКИ/.test(rB.text) && /не сохранился Transaction ID/.test(rB.text) &&
+      pageB.site.saves.length === 3, rB.text.slice(0, 600));
+    check('правда не сохранился: окно открывали дважды на тикет (2 попытки) плюс основной проход',
+      pageB.site.modalOpens.filter((id) => id === b.ids[0]).length === 3, JSON.stringify(pageB.site.modalOpens));
+  },
 };
 
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map((x) => x.trim())) : null;
