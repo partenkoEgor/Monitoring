@@ -21,15 +21,15 @@ function check(name, cond, dump) {
 
 // ───── фикстура .xlsx ─────
 const HEADER = ['Ticket ID', 'Date created', 'Ticket type', 'Agent', 'Country', 'Status', 'User wallet', "Agent's wallet",
-  'Check amount', 'Provider ID', 'Topic', 'Additional parameters', 'Estimated closing date Q80'];
+  'Check amount', 'Provider ID', 'Topic', 'Additional parameters', 'Estimated closing date Q80', 'Processing date', 'Processing time'];
 // число → числовая ячейка, { date } → дата через стиль, '' → пустая ячейка <c/>
 const ROWS = [
-  [1001, '2026-11-18 10:00:00', 'SMP M', 'SendMePay', 'Egypt', 'New', '01121797231', 'TR96 0006 2001 2050 0006 6043 91 ', 500, '', "I didn't receive my withdrawal", '{"wallet_owner": "Ali Hassan"}', { date: 46347.5 }],
-  [1002, '2026-11-17 09:00:00', 'SMP M', '', 'Egypt', 'In progress', '01000000001', '32275242', 700, '', 'Unsuccessful deposit', '', ''],
-  [1003, '2026-11-16 08:00:00', 'SMP M', 'BankTransfer Agents', 'Morocco', 'New', '0612345678', '32275242', 300, '', 'Unsuccessful deposit', '{"bank_name": "Kbank", "wallet_owner": "KYI SOE"}', { date: 46000.25 }],
-  [1004, '2026-11-15 07:00:00', 'BT M', 'SendMePay', 'Turkey', 'New', 'TR040001500158007311198233', '', 900, '2097734376057331712', 'Deposit error', '', ''],
-  [1005, '2026-11-14 06:00:00', 'BT M', 'BankTransfer Agents', 'Egypt', 'New', '01229219903', '43242043', 12000, '', 'Unsuccessful deposit', '', ''],
-  [1006, '2026-11-13 05:00:00', 'API', 'Repay', 'Morocco', 'Information request', '01229219904', '', 50.5, '', 'R&D <test>', '', ''],
+  [1001, '2026-11-18 10:00:00', 'SMP M', 'SendMePay', 'Egypt', 'New', '01121797231', 'TR96 0006 2001 2050 0006 6043 91 ', 500, '', "I didn't receive my withdrawal", '{"wallet_owner": "Ali Hassan"}', { date: 46347.5 }, '2026-04-12 02:48:34', 34.9583],
+  [1002, '2026-11-17 09:00:00', 'SMP M', '', 'Egypt', 'In progress', '01000000001', '32275242', 700, '', 'Unsuccessful deposit', '', '', '2026-11-17 14:53:54', 34.9583],
+  [1003, '2026-11-16 08:00:00', 'SMP M', 'BankTransfer Agents', 'Morocco', 'New', '0612345678', '32275242', 300, '', 'Unsuccessful deposit', '{"bank_name": "Kbank", "wallet_owner": "KYI SOE"}', { date: 46000.25 }, '2026-11-18 12:53:54', 0.5],
+  [1004, '2026-11-15 07:00:00', 'BT M', 'SendMePay', 'Turkey', 'New', 'TR040001500158007311198233', '', 900, '2097734376057331712', 'Deposit error', '', '', '2026-11-10 14:53:54', 34.9583],
+  [1005, '2026-11-14 06:00:00', 'BT M', 'BankTransfer Agents', 'Egypt', 'New', '01229219903', '43242043', 12000, '', 'Unsuccessful deposit', '', '', '2026-11-10 14:53:54', 34.9583],
+  [1006, '2026-11-13 05:00:00', 'API', 'Repay', 'Morocco', 'Information request', '01229219904', '', 50.5, '', 'R&D <test>', '', '', '', ''],
 ];
 const xe = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 function cell(v, s) {
@@ -73,7 +73,7 @@ function fixture() {
 // ───── сценарии ─────
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'report-viewer-'));
-  const file = path.join(dir, 'report.xlsx');
+  const file = path.join(dir, '51279294749_20261118145354.xlsx'); // как приходит из системы: время выгрузки в имени
   fs.writeFileSync(file, fixture());
 
   const browser = await chromium.launch();
@@ -81,7 +81,8 @@ function fixture() {
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  page.on('dialog', (d) => d.accept());
+  let promptAnswer = null;
+  page.on('dialog', (d) => (d.type() === 'prompt' ? d.accept(promptAnswer) : d.accept()));
   const open = async (f = file) => {
     await page.setInputFiles('#fileInput', f);
     await page.waitForSelector('#drop', { state: 'hidden' });
@@ -113,6 +114,32 @@ function fixture() {
     check('дата из стиля превращена в текст', cells.q80 === '2026-11-21 12:00:00' && cells.q80b === '2025-12-09 06:00:00', cells.q80 + ' | ' + cells.q80b);
     check('Wallet owner и Bank name вынесены из JSON', cells.owner === 'KYI SOE' && cells.bank === 'Kbank', cells.owner + ' | ' + cells.bank);
     check('типы колонок: сумма — число, дата — дата', cells.amountKind === 'num' && cells.dateKind === 'date');
+
+    console.log('\nProcessing time от Processing date до выгрузки');
+    const pt = () => page.evaluate(() => D.vals[colIdx('Processing time')].join('|'));
+    check('время выгрузки взято из имени файла', (await page.textContent('#fileInfo')).includes('выгрузка 2026-11-18 14:53:54 (из имени файла)'), await page.textContent('#fileInfo'));
+    check('Processing time пересчитан, потолок 34,9583 снят', (await pt()) === '220.5037|1|0.0833|8|8|', await pt());
+    await page.click('.th:has-text("Processing time")');
+    await page.click('.th:has-text("Processing time")');
+    check('сортировка по пересчитанному значению', (await ids())[0] === '1001' && (await ids())[5] === '1006', JSON.stringify(await ids()));
+    await page.evaluate(() => { sortSpec = []; resetAll(); });
+    await page.selectOption('#rangeAdd', 'Processing time');
+    await page.fill('.rg input[data-b="min"]', '7');
+    await page.waitForTimeout(500);
+    check('диапазон «от 7 дней» по пересчитанным значениям', JSON.stringify(await ids()) === '["1001","1004","1005"]', JSON.stringify(await ids()));
+    await page.evaluate(() => { F.ranges = {}; resetAll(); });
+    await page.click('#gbody .tr >> nth=0');
+    check('в карточке понятная длительность', (await page.textContent('#cardBody .kv:has(.k:text-is("Processing time")) .v')).includes('220 д 12 ч 5 мин')
+      || (await page.textContent('#cardBody')).includes('220 д 12 ч 5 мин'), await page.textContent('#cardBody .kv:has-text("Processing time")'));
+    await page.click('#cardClose');
+    promptAnswer = '2026-11-18 12:53:54';
+    await page.click('#expTime');
+    check('время выгрузки можно поправить вручную', (await pt()) === '220.4204|0.9167|0|7.9167|7.9167|' && (await page.textContent('#fileInfo')).includes('(вручную)'), await pt());
+    const noStamp = path.join(dir, 'report.xlsx');
+    fs.copyFileSync(file, noStamp);
+    await open(noStamp);
+    check('без времени в имени — берётся последняя дата в файле', (await page.textContent('#fileInfo')).includes('выгрузка 2026-11-18 12:53:54 (по последней дате в файле)') && (await pt()).startsWith('220.4204|'), await page.textContent('#fileInfo'));
+    await open();
 
     console.log('\nВстроенный набор «SMP — агент не SendMePay»');
     await page.click('#presets .pr:first-child .pa');
@@ -175,13 +202,13 @@ function fixture() {
     console.log('\nВыгрузка в .xlsx');
     await page.click('#exportBtn');
     const [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-exp="all"]')]);
-    const out = path.join(dir, 'out.xlsx');
+    const out = path.join(dir, dl.suggestedFilename()); // имя важно: по нему восстанавливается время выгрузки
     await dl.saveAs(out);
-    check('имя файла латиницей', dl.suggestedFilename() === 'report_filtered_6.xlsx', dl.suggestedFilename());
+    check('имя файла латиницей и с временем выгрузки', dl.suggestedFilename() === '51279294749_20261118145354_filtered_6.xlsx', dl.suggestedFilename());
     const before = await page.evaluate(() => JSON.stringify({ n: D.cols.map((c) => c.name), v: D.vals }));
     await open(out);
     const after = await page.evaluate(() => JSON.stringify({ n: D.cols.map((c) => c.name), v: D.vals }));
-    check('выгруженный файл читается обратно без потерь', before === after);
+    check("выгруженный файл читается обратно без потерь", before === after, (() => { const a = JSON.parse(before), b = JSON.parse(after); return JSON.stringify(a.n) !== JSON.stringify(b.n) ? a.n + " ≠ " + b.n : a.v.map((col, i) => JSON.stringify(col) === JSON.stringify(b.v[i]) ? "" : a.n[i] + ": " + JSON.stringify(col) + " ≠ " + JSON.stringify(b.v[i])).filter(Boolean).join("; "); })());
 
     console.log('\nПамять между сессиями');
     await page.click(facetBox('Agent', 'SendMePay'));

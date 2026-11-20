@@ -47,6 +47,8 @@ header { height: 46px; display: flex; align-items: center; gap: 12px; padding: 0
 header h1 { font-size: 15px; margin: 0; font-weight: 650; white-space: nowrap; }
 header h1 small { font-weight: 400; color: var(--muted); font-size: 11px; margin-left: 4px; }
 #fileInfo { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#fileInfo a { color: inherit; text-decoration: underline dotted; }
+#fileInfo a:hover { color: var(--accent); }
 header .sp { flex: 1; }
 
 #app { display: flex; height: calc(100% - 46px); position: relative; }
@@ -291,7 +293,7 @@ body.dragging #dragOverlay { display: flex; }
 
 <script>
 'use strict';
-const VERSION = '1.0';
+const VERSION = '1.1';
 
 // ───────────────────────── настройки под выгрузку ─────────────────────────
 // Колонки с идентификаторами: хранятся как текст (ведущие нули, 19-значные ID),
@@ -304,7 +306,7 @@ const FACET_ORDER = ['Ticket type', 'Agent', 'Country', 'Status', 'External Stat
   "Customer's account currency", 'Payment method', 'Subagent', 'Referal', 'Recipient', 'From',
   'Response to customer', 'Bank name'];
 const FACET_OPEN_DEFAULT = ['Ticket type', 'Agent', 'Country', 'Status', 'External Status'];
-const DEFAULT_VISIBLE = ['Ticket ID', 'Date created', 'Ticket type', 'Country', 'Status', 'External Status',
+const DEFAULT_VISIBLE = ['Ticket ID', 'Date created', 'Processing time', 'Ticket type', 'Country', 'Status', 'External Status',
   'Transaction Status', 'Agent', 'Subagent', 'Payment method', 'Check amount', 'Ticket currency',
   'Transactions amount', 'User ID', 'User wallet', "Agent's wallet", 'Wallet owner', 'Transaction ID',
   'Unique transfer number', 'Topic', 'Internal comment'];
@@ -703,6 +705,76 @@ function buildData(fileName, parsed) {
   D = { fileName, n, cols, vals, nums, codes, dicts, facetCols, hay: null, byName: new Map(cols.map((c, i) => [c.name, i])) };
 }
 const colIdx = (name) => (D.byName.has(name) ? D.byName.get(name) : -1);
+
+// ───────────────────────── время выгрузки и Processing time ─────────────────────────
+// Processing time в выгрузке считается по-своему и упирается в потолок 34,9583 дня,
+// поэтому пересчитываем его сами: дней от Processing date до момента выгрузки.
+const PT_COL = 'Processing time', PD_COL = 'Processing date';
+function parseTs(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(v || '');
+  if (!m) return null;
+  const [, y, mo, d, h = '0', mi = '0', se = '0'] = m;
+  if (+mo < 1 || +mo > 12 || +d < 1 || +d > 31 || +h > 23 || +mi > 59 || +se > 59) return null;
+  return Date.UTC(+y, +mo - 1, +d, +h, +mi, +se) / 1000;
+}
+function exportTimeFromName(name) { // последние 14 цифр подряд: ГГГГММДДччммсс
+  const re = /(?:^|\D)(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?!\d)/g;
+  let m, last = null;
+  while ((m = re.exec(name))) { last = m; re.lastIndex = m.index + 1; }
+  if (!last) return null;
+  const str = `${last[1]}-${last[2]}-${last[3]} ${last[4]}:${last[5]}:${last[6]}`;
+  return parseTs(str) != null ? str : null;
+}
+function latestDateInFile() {
+  let hi = '';
+  D.cols.forEach((c, i) => { if (c.kind !== 'date' || /^Estimated/i.test(c.name)) return; for (const v of D.vals[i]) if (v > hi) hi = v; });
+  return hi.length >= 16 ? hi.slice(0, 19) : null;
+}
+function fmtDays(d) {
+  if (!isFinite(d)) return '';
+  const neg = d < 0; let m = Math.round(Math.abs(d) * 1440);
+  const days = Math.floor(m / 1440); m -= days * 1440; const h = Math.floor(m / 60); m -= h * 60;
+  const parts = []; if (days) parts.push(days + ' д'); if (h) parts.push(h + ' ч'); if (m || !parts.length) parts.push(m + ' мин');
+  return (neg ? '−' : '') + parts.join(' ');
+}
+function setExportTime(fileName) {
+  const fromName = exportTimeFromName(fileName);
+  if (fromName) { D.exportTime = fromName; D.exportSrc = 'из имени файла'; }
+  else { D.exportTime = latestDateInFile(); D.exportSrc = 'по последней дате в файле'; }
+  recalcProcessingTime();
+}
+function recalcProcessingTime() {
+  const c = colIdx(PT_COL), pd = colIdx(PD_COL), t = parseTs(D.exportTime);
+  if (c < 0 || pd < 0 || t == null) return;
+  const vals = D.vals[c], src = D.vals[pd], nums = new Float64Array(D.n);
+  for (let r = 0; r < D.n; r++) {
+    const p = parseTs(src[r]);
+    if (p == null) { vals[r] = ''; nums[r] = NaN; continue; }
+    const days = +((t - p) / 86400).toFixed(4);
+    vals[r] = String(days); nums[r] = days;
+  }
+  D.nums[c] = nums; D.cols[c].kind = 'num'; D.cols[c].numeric = true; D.cols[c].recalc = true;
+  D.hay = null; // строка поиска собрана из старых значений
+}
+function renderFileInfo() {
+  const dc = colIdx('Date created'); let range = '';
+  if (dc >= 0) { let lo = '', hi = ''; for (const v of D.vals[dc]) { if (!v) continue; if (!lo || v < lo) lo = v; if (v > hi) hi = v; } if (lo) range = ` · создано ${lo.slice(0, 10)} — ${hi.slice(0, 10)}`; }
+  const exp = D.exportTime ? `выгрузка ${D.exportTime} (${D.exportSrc})` : 'время выгрузки неизвестно';
+  $('fileInfo').innerHTML = `${esc(D.fileName)} · ${fmtInt(D.n)} строк${esc(range)} · <a href="#" id="expTime" title="От этого момента считается Processing time. Клик — изменить">${esc(exp)}</a> · открыт за ${D.loadSecs} с`;
+  $('fileInfo').title = $('fileInfo').textContent;
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#expTime')) return;
+  e.preventDefault();
+  const v = prompt('Время выгрузки — от него считается Processing time.\nФормат: ГГГГ-ММ-ДД ЧЧ:ММ:СС', D.exportTime || '');
+  if (v == null) return;
+  const s = v.trim().replace('T', ' ');
+  if (parseTs(s) == null) { alert('Не понял время. Пример: 2026-11-18 14:53:54'); return; }
+  D.exportTime = s.length === 16 ? s + ':00' : s.length === 10 ? s + ' 00:00:00' : s; D.exportSrc = 'вручную';
+  recalcProcessingTime(); renderFileInfo();
+  if (F.q.trim()) ensureHay();
+  apply(); toast('Processing time пересчитан от ' + D.exportTime);
+});
 function ensureHay() {
   if (D.hay) return;
   const hay = new Array(D.n);
@@ -817,7 +889,8 @@ function renderHead() {
   $('ghead').innerHTML = vc.map((c) => {
     const col = D.cols[c]; const si = sortSpec.findIndex((s) => s.col === col.name);
     const so = si >= 0 ? `<span class="so">${sortSpec[si].dir === 'desc' ? '▼' : '▲'}${sortSpec.length > 1 ? si + 1 : ''}</span>` : '';
-    return `<div class="th" data-c="${c}" style="width:${col.w}px" title="${esc(col.name)} — клик: сортировка, Shift+клик: добавить к сортировке">${esc(col.name)}${so}<span class="rz"></span></div>`;
+    const tip = col.recalc ? `${col.name} — пересчитано: дней от ${PD_COL} до выгрузки (${D.exportTime}).\n` : `${col.name} — `;
+    return `<div class="th" data-c="${c}" style="width:${col.w}px" title="${esc(tip)}клик: сортировка, Shift+клик: добавить к сортировке">${esc(col.name)}${col.recalc ? ' <span class="muted">дн</span>' : ''}${so}<span class="rz"></span></div>`;
   }).join('');
 }
 function renderGrid() {
@@ -839,7 +912,8 @@ function drawRows() {
     h += `<div class="tr${r === selRow ? ' sel' : ''}" data-i="${i}" style="top:${i * RH}px">`;
     for (const c of vc) {
       const col = D.cols[c]; const v = D.vals[c][r];
-      h += `<div class="td ${col.kind}" style="width:${col.w}px"${v.length > 20 ? ` title="${esc(v.slice(0, 500))}"` : ''}>${esc(fmtCell(c, v))}</div>`;
+      const tip = col.recalc ? (v ? fmtDays(D.nums[c][r]) : '') : v.length > 20 ? v.slice(0, 500) : '';
+      h += `<div class="td ${col.kind}" style="width:${col.w}px"${tip ? ` title="${esc(tip)}"` : ''}>${esc(fmtCell(c, v))}</div>`;
     }
     h += '</div>';
   }
@@ -907,7 +981,8 @@ function openCard(r) {
     if (!v && !showEmptyInCard) return;
     if (v && v[0] === '{' && col.name === 'Additional parameters') { try { v = JSON.stringify(JSON.parse(v), null, 2); } catch (e) { /* как есть */ } }
     const canFilter = v && (col.facet || col.kind === 'id' || col.kind === 'text');
-    h += `<div class="kv" data-c="${c}"><div class="k">${esc(col.name)}</div><div class="v${v ? '' : ' empty'}" ${v ? 'title="Клик — скопировать"' : ''}>${v ? esc(v) : 'пусто'}</div>` +
+    const shown = v && col.recalc ? `${esc(v)} <span class="muted">· ${esc(fmtDays(D.nums[c][r]))}</span>` : v ? esc(v) : 'пусто';
+    h += `<div class="kv" data-c="${c}"><div class="k">${esc(col.name)}${col.recalc ? '<br><span style="font-size:11px">дней от Processing date до выгрузки</span>' : ''}</div><div class="v${v ? '' : ' empty'}" ${v ? 'title="Клик — скопировать"' : ''}>${shown}</div>` +
       (canFilter ? `<button class="fx" title="${col.facet ? 'Показать только тикеты с этим значением' : 'Найти все тикеты с этим значением'}">⌕</button>` : '<span></span>') + '</div>';
   });
   $('cardBody').innerHTML = h;
@@ -1285,13 +1360,11 @@ async function loadFile(file) {
     const parsed = await readXlsx(file, (p) => { $('busyBar').style.width = Math.round(p * 100) + '%'; $('busyText').textContent = `Читаю файл… ${Math.round(p * 100)}%`; });
     $('busyText').textContent = 'Готовлю таблицу…'; await sleep(10);
     buildData(file.name, parsed);
+    setExportTime(file.name);
     selRow = -1; $('card').hidden = true;
     $('drop').hidden = true;
-    const secs = ((performance.now() - t0) / 1000).toFixed(1).replace('.', ',');
-    const dc = colIdx('Date created'); let range = '';
-    if (dc >= 0) { let lo = '', hi = ''; for (const v of D.vals[dc]) { if (!v) continue; if (!lo || v < lo) lo = v; if (v > hi) hi = v; } if (lo) range = ` · создано ${lo.slice(0, 10)} — ${hi.slice(0, 10)}`; }
-    $('fileInfo').textContent = `${file.name} · ${fmtInt(D.n)} строк${range} · открыт за ${secs} с`;
-    $('fileInfo').title = $('fileInfo').textContent;
+    D.loadSecs = ((performance.now() - t0) / 1000).toFixed(1).replace('.', ',');
+    renderFileInfo();
     if (colIdx('Ticket ID') < 0) toast('Внимание: в файле нет колонки Ticket ID — это точно та выгрузка?');
     renderFacets(); apply();
     $('grid').focus();
