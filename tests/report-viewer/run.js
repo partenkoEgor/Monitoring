@@ -77,7 +77,23 @@ function fixture() {
   fs.writeFileSync(file, fixture());
 
   const browser = await chromium.launch();
+  // окно «Сохранить как» в headless не нажать — сохранение страницы идёт обычным скачиванием;
+  // плюс имитация расширения вроде Dark Reader, которое подмешивает узлы в страницу до её скриптов
+  const initPage = (c) => c.addInitScript(() => {
+    Object.defineProperty(window, 'showSaveFilePicker', { value: undefined });
+    new MutationObserver((ms, obs) => {
+      if (document.documentElement) document.documentElement.setAttribute('data-darkreader-scheme', 'dark');
+      if (document.head && !document.head.querySelector('.darkreader')) {
+        const st = document.createElement('style'); st.className = 'darkreader'; st.textContent = '/* ext */';
+        document.head.appendChild(st);
+      }
+      if (document.body && !document.getElementById('ext-junk')) {
+        const d = document.createElement('div'); d.id = 'ext-junk'; document.body.appendChild(d); obs.disconnect();
+      }
+    }).observe(document, { childList: true, subtree: true });
+  });
   const ctx = await browser.newContext({ acceptDownloads: true });
+  await initPage(ctx);
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
@@ -209,6 +225,44 @@ function fixture() {
     await open(out);
     const after = await page.evaluate(() => JSON.stringify({ n: D.cols.map((c) => c.name), v: D.vals }));
     check("выгруженный файл читается обратно без потерь", before === after, (() => { const a = JSON.parse(before), b = JSON.parse(after); return JSON.stringify(a.n) !== JSON.stringify(b.n) ? a.n + " ≠ " + b.n : a.v.map((col, i) => JSON.stringify(col) === JSON.stringify(b.v[i]) ? "" : a.n[i] + ": " + JSON.stringify(col) + " ≠ " + JSON.stringify(b.v[i])).filter(Boolean).join("; "); })());
+
+    console.log('\nНаборы внутри файла страницы');
+    await page.click('#presetShareBtn');
+    const [dlPage] = await Promise.all([page.waitForEvent('download'), page.click('#savePageBtn')]);
+    await page.click('.modal .mx');
+    const saved = path.join(dir, 'shared', dlPage.suggestedFilename());
+    await dlPage.saveAs(saved);
+    const html = fs.readFileSync(saved, 'utf8');
+    const BLOCK = '<script id="embedded-presets" type="application/json">';
+    check('страница скачивается как report-viewer.html', dlPage.suggestedFilename() === 'report-viewer.html', dlPage.suggestedFilename());
+    check('в файле один блок наборов, и в нём сохранённый набор', html.split(BLOCK).length === 2 && html.includes('Египет и Марокко — New'));
+    check('в файл не попали данные выгрузки и открытые окна', !html.includes('KYI SOE') && !html.includes('Ali Hassan') && !html.includes('class="modal-bg"') && html.includes('<div id="gbody"></div>') && html.includes('<div id="drop">'),
+      ['KYI SOE', 'Ali Hassan', 'class="modal-bg"'].filter((x) => html.includes(x)).join(', ') + (html.includes('<div id="gbody"></div>') ? '' : ' gbody не пустой') + (html.includes('<div id="drop">') ? '' : ' drop скрыт'));
+    check('в файл не попало то, что подмешало расширение', !html.includes('darkreader') && !html.includes('ext-junk'));
+    check('файл начинается с <!doctype html>', html.startsWith('<!doctype html>'));
+
+    const ctx2 = await browser.newContext({ acceptDownloads: true }); // браузер коллеги: свои настройки пустые
+    await initPage(ctx2);
+    const page2 = await ctx2.newPage();
+    page2.on('pageerror', (e) => errors.push('коллега: ' + e.message));
+    page2.on('dialog', (d) => d.accept());
+    await page2.goto('file://' + saved);
+    check('у коллеги наборы из файла видны сразу, ещё до открытия выгрузки', (await page2.textContent('#presets')).includes('Египет и Марокко — New'));
+    await page2.setInputFiles('#fileInput', file); await page2.waitForSelector('#drop', { state: 'hidden' });
+    await page2.click('#presets .pr:has-text("Египет и Марокко — New") .pa');
+    const ids2 = await page2.evaluate(() => Array.from(rows, (r) => D.vals[colIdx('Ticket ID')][r]));
+    check('набор из файла работает у коллеги', JSON.stringify(ids2) === '["1001","1003","1005"]', JSON.stringify(ids2));
+    await page2.click('#presetShareBtn');
+    const [dlAgain] = await Promise.all([page2.waitForEvent('download'), page2.click('#savePageBtn')]);
+    await page2.click('.modal .mx');
+    const again = path.join(dir, 'again.html'); await dlAgain.saveAs(again);
+    const html2 = fs.readFileSync(again, 'utf8');
+    check('копия с копии не разрастается', html2.split(BLOCK).length === 2 && Math.abs(html2.length - html.length) < 100, html2.length - html.length);
+    await page2.hover('#presets .pr:has-text("Египет и Марокко — New")');
+    await page2.click('#presets .pr:has-text("Египет и Марокко — New") .px');
+    await page2.goto('file://' + saved);
+    check('удалённый у себя набор не возвращается при повторном открытии того же файла', !(await page2.textContent('#presets')).includes('Египет и Марокко — New'), await page2.textContent('#presets'));
+    await ctx2.close();
 
     console.log('\nПамять между сессиями');
     await page.click(facetBox('Agent', 'SendMePay'));

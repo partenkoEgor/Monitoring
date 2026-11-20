@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Разбор выгрузки</title>
-<style>
+<style id="app-style">
 :root {
   --bg: #f4f5f7; --panel: #ffffff; --panel2: #eef0f3; --line: #dcdfe4; --line-weak: #eceef1;
   --text: #1c2127; --muted: #6a737d; --accent: #2f6fde; --accent-weak: #e3ecfb; --accent-text: #fff;
@@ -227,7 +227,7 @@ body.dragging #dragOverlay { display: flex; }
       <div class="row2"><button class="btn" id="listBtn">Поиск по списку…</button></div>
     </div>
     <div class="sec">
-      <div class="sec-h">Наборы фильтров <span class="sp"></span><button class="btn" id="presetSaveBtn">Сохранить</button><button class="btn" id="presetShareBtn" title="Экспорт и импорт наборов">⇄</button></div>
+      <div class="sec-h">Наборы <span class="sp"></span><button class="btn" id="presetSaveBtn">Сохранить</button><button class="btn" id="presetShareBtn" title="Передать наборы коллегам: файлом страницы или текстом">Поделиться</button></div>
       <div id="presets"></div>
       <div id="presetSave" hidden><input id="presetName" placeholder="Название набора"><button class="btn primary" id="presetSaveOk">OK</button></div>
     </div>
@@ -291,9 +291,27 @@ body.dragging #dragOverlay { display: flex; }
 <div id="busy" hidden><div class="bx"><div id="busyText">Читаю файл…</div><div class="bar"><div id="busyBar"></div></div></div></div>
 <div id="toast"></div>
 
-<script>
+<!-- Наборы фильтров, вшитые в файл кнопкой «Поделиться» → «Сохранить страницу с наборами». Править руками не нужно. -->
+<script id="embedded-presets" type="application/json">{"savedAt":"","id":"","presets":[]}</script>
+<script id="app-script">
 'use strict';
-const VERSION = '1.1';
+const VERSION = '1.2';
+
+// Исходный вид страницы — снимается до любых изменений, чтобы сохранять копию с вшитыми наборами.
+// Всё, что могли подмешать расширения браузера, выбрасывается: остаются только свои узлы.
+const PRISTINE = (() => {
+  const root = document.documentElement.cloneNode(true);
+  [...root.attributes].forEach((a) => { if (a.name !== 'lang') root.removeAttribute(a.name); });
+  const head = root.querySelector('head'), body = root.querySelector('body');
+  [...head.children].forEach((el) => {
+    const keep = (el.tagName === 'META' && (el.hasAttribute('charset') || el.getAttribute('name') === 'viewport')) || el.tagName === 'TITLE' || el.id === 'app-style';
+    if (!keep) el.remove();
+  });
+  [...body.attributes].forEach((a) => body.removeAttribute(a.name));
+  const BODY_IDS = ['app', 'dragOverlay', 'busy', 'toast', 'embedded-presets', 'app-script'];
+  [...body.children].forEach((el) => { if (el.tagName !== 'HEADER' && !BODY_IDS.includes(el.id)) el.remove(); });
+  return '<!doctype html>\n' + root.outerHTML + '\n';
+})();
 
 // ───────────────────────── настройки под выгрузку ─────────────────────────
 // Колонки с идентификаторами: хранятся как текст (ведущие нули, 19-значные ID),
@@ -1180,7 +1198,7 @@ $('presets').addEventListener('click', (e) => {
     userPresets = userPresets.filter((x) => x !== p); store.set('presets', userPresets); renderPresets(); return;
   }
   const f = normFilters(p.f); f.list = null; F = f;
-  $('q').value = F.q; apply(); toast('Набор: ' + p.name);
+  $('q').value = F.q; apply(); if (!D) { saveFilters(); renderPresets(); } toast('Набор: ' + p.name);
 });
 $('presetSaveBtn').onclick = () => { const s = $('presetSave'); s.hidden = !s.hidden; if (!s.hidden) { $('presetName').value = ''; $('presetName').focus(); } };
 function savePreset() {
@@ -1195,20 +1213,62 @@ function savePreset() {
 }
 $('presetSaveOk').onclick = savePreset;
 $('presetName').addEventListener('keydown', (e) => { if (e.key === 'Enter') savePreset(); if (e.key === 'Escape') $('presetSave').hidden = true; });
+function validPresets(arr) {
+  return (Array.isArray(arr) ? arr : []).filter((p) => p && typeof p.name === 'string' && p.name.trim() && p.f && typeof p.f === 'object')
+    .map((p) => ({ name: p.name.trim(), f: p.f }));
+}
+// Наборы, вшитые в этот файл: добавляются к своим один раз на каждый сохранённый файл,
+// чтобы удалённый у себя набор не возвращался при каждом открытии того же файла.
+function importEmbeddedPresets() {
+  let emb; try { emb = JSON.parse($('embedded-presets').textContent); } catch (e) { return; }
+  const list = validPresets(emb && emb.presets);
+  if (!list.length || !emb.id) return;
+  const seen = store.get('embedSeen', []);
+  if (seen.includes(emb.id)) return;
+  for (const p of list) { const ex = userPresets.find((x) => x.name === p.name); if (ex) ex.f = p.f; else userPresets.push(p); }
+  store.set('presets', userPresets); markEmbedSeen(emb.id);
+  toast(`Из файла добавлено наборов фильтров: ${list.length}`);
+}
+function markEmbedSeen(id) { const seen = store.get('embedSeen', []).filter((x) => x !== id); seen.push(id); store.set('embedSeen', seen.slice(-100)); }
+async function savePageWithPresets() {
+  const payload = { savedAt: new Date().toISOString(), id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8), presets: userPresets };
+  const json = JSON.stringify(payload).replace(/</g, '\\u003c');
+  const re = /(<script id="embedded-presets" type="application\/json">)[\s\S]*?(<\/script>)/;
+  if (!re.test(PRISTINE)) { alert('Не удалось собрать страницу: не найден блок с наборами.'); return; }
+  const blob = new Blob([PRISTINE.replace(re, (m, a, b) => a + json + b)], { type: 'text/html' });
+  const name = 'report-viewer.html';
+  const done = () => { markEmbedSeen(payload.id); toast(`Страница сохранена, наборов внутри: ${userPresets.length}`); };
+  if (window.showSaveFilePicker) { // Chrome, Edge: можно выбрать свой файл и заменить его
+    try {
+      const h = await window.showSaveFilePicker({ suggestedName: name, types: [{ description: 'Страница HTML', accept: { 'text/html': ['.html'] } }] });
+      const w = await h.createWritable(); await w.write(blob); await w.close(); done(); return;
+    } catch (e) { if (e && e.name === 'AbortError') return; /* иначе — обычное скачивание */ }
+  }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  done();
+}
 $('presetShareBtn').onclick = () => {
   const body = document.createElement('div');
-  body.innerHTML = `<div class="muted">Чтобы поделиться наборами, скопируйте этот текст и отправьте коллеге. Чтобы добавить чужие наборы — вставьте их текст сюда и нажмите «Импортировать».</div>
-    <textarea id="shareText" rows="10" style="margin-top:8px">${esc(JSON.stringify(userPresets))}</textarea>`;
-  modal('Обмен наборами', body, [
+  const n = userPresets.length;
+  body.innerHTML = `<h4 style="margin:0 0 4px">Файлом страницы</h4>
+    <div class="muted">Сохраняет копию этой страницы, внутри которой лежат ваши наборы (${n}). Отправьте файл коллеге — при открытии наборы появятся у него в списке.
+    ${window.showSaveFilePicker ? 'Чтобы наборы хранились в вашем собственном файле, выберите его при сохранении и замените.' : 'Файл скачается как report-viewer.html.'}
+    Данные выгрузки в файл не попадают.</div>
+    <div style="margin:8px 0 16px"><button class="btn primary" id="savePageBtn"${n ? '' : ' disabled'}>Сохранить страницу с наборами</button>${n ? '' : ' <span class="muted">сначала сохраните хотя бы один набор</span>'}</div>
+    <h4 style="margin:0 0 4px">Текстом</h4>
+    <div class="muted">Скопируйте текст и отправьте коллеге. Чтобы добавить чужие наборы — вставьте их текст сюда и нажмите «Импортировать».</div>
+    <textarea id="shareText" rows="7" style="margin-top:8px">${esc(JSON.stringify(userPresets))}</textarea>`;
+  body.querySelector('#savePageBtn').onclick = () => savePageWithPresets();
+  modal('Поделиться наборами', body, [
     { label: 'Скопировать', onClick: () => { copyText(body.querySelector('#shareText').value); return false; } },
     { label: 'Импортировать', primary: true, onClick: () => {
       let arr; try { arr = JSON.parse(body.querySelector('#shareText').value); } catch (e) { toast('Текст не похож на наборы фильтров'); return false; }
       if (!Array.isArray(arr)) { toast('Текст не похож на наборы фильтров'); return false; }
       let added = 0;
-      for (const p of arr) {
-        if (!p || typeof p.name !== 'string' || !p.f) continue;
+      for (const p of validPresets(arr)) {
         const ex = userPresets.find((x) => x.name === p.name);
-        if (ex) ex.f = p.f; else userPresets.push({ name: p.name, f: p.f });
+        if (ex) ex.f = p.f; else userPresets.push(p);
         added++;
       }
       store.set('presets', userPresets); renderPresets(); toast('Наборов добавлено или обновлено: ' + added);
@@ -1397,6 +1457,8 @@ document.addEventListener('keydown', (e) => {
 });
 $('ver').textContent = 'v' + VERSION;
 $('q').value = F.q;
+importEmbeddedPresets();
+renderPresets(); // наборы видны и до открытия выгрузки
 </script>
 </body>
 </html>
