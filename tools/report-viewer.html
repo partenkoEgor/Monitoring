@@ -1,0 +1,1329 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Разбор выгрузки</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --panel2: #eef0f3; --line: #dcdfe4; --line-weak: #eceef1;
+  --text: #1c2127; --muted: #6a737d; --accent: #2f6fde; --accent-weak: #e3ecfb; --accent-text: #fff;
+  --neg: #c4362f; --neg-weak: #fbe9e8; --ok: #2b8a3e;
+  --row-alt: #f9fafb; --row-hover: #edf2fb; --row-sel: #d9e6fb; --shadow: 0 6px 24px rgba(20,30,50,.16);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1013; --panel: #16191e; --panel2: #1c2026; --line: #2a2f37; --line-weak: #20242a;
+    --text: #e2e5e9; --muted: #8b949e; --accent: #5b9bff; --accent-weak: #1b2940; --accent-text: #0e1013;
+    --neg: #ff7b72; --neg-weak: #3a1d1c; --ok: #56d364;
+    --row-alt: #13161a; --row-hover: #1b2230; --row-sel: #213350; --shadow: 0 6px 24px rgba(0,0,0,.5);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e1013; --panel: #16191e; --panel2: #1c2026; --line: #2a2f37; --line-weak: #20242a;
+  --text: #e2e5e9; --muted: #8b949e; --accent: #5b9bff; --accent-weak: #1b2940; --accent-text: #0e1013;
+  --neg: #ff7b72; --neg-weak: #3a1d1c; --ok: #56d364;
+  --row-alt: #13161a; --row-hover: #1b2230; --row-sel: #213350; --shadow: 0 6px 24px rgba(0,0,0,.5);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+button { font: inherit; color: inherit; cursor: pointer; }
+input, select, textarea { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+.btn { border: 1px solid var(--line); background: var(--panel); border-radius: 6px; padding: 5px 10px; white-space: nowrap; }
+.btn:hover { border-color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.btn.ghost { border-color: transparent; background: transparent; }
+.btn.ghost:hover { background: var(--panel2); }
+.btn:disabled { opacity: .5; cursor: default; }
+.muted { color: var(--muted); }
+[hidden] { display: none !important; }
+
+header { height: 46px; display: flex; align-items: center; gap: 12px; padding: 0 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+header h1 { font-size: 15px; margin: 0; font-weight: 650; white-space: nowrap; }
+header h1 small { font-weight: 400; color: var(--muted); font-size: 11px; margin-left: 4px; }
+#fileInfo { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+header .sp { flex: 1; }
+
+#app { display: flex; height: calc(100% - 46px); position: relative; }
+aside { width: 310px; flex: none; background: var(--panel); border-right: 1px solid var(--line); overflow-y: auto; padding: 10px 10px 40px; }
+main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+.sec { margin-bottom: 14px; }
+.sec-h { display: flex; align-items: center; gap: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+.sec-h .sp { flex: 1; }
+.sec-h .btn { text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12px; padding: 2px 8px; }
+#q { width: 100%; }
+.row2 { display: flex; gap: 6px; margin-top: 6px; }
+.row2 .btn { flex: 1; }
+
+#presets .pr { display: flex; align-items: center; gap: 4px; border-radius: 6px; }
+#presets .pr button.pa { flex: 1; text-align: left; border: 0; background: none; padding: 5px 8px; border-radius: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#presets .pr:hover { background: var(--panel2); }
+#presets .pr.active { background: var(--accent-weak); }
+#presets .pr.active button.pa { color: var(--accent); font-weight: 600; }
+#presets .pr .px { border: 0; background: none; color: var(--muted); padding: 2px 6px; visibility: hidden; }
+#presets .pr:hover .px { visibility: visible; }
+#presets .pr .px:hover { color: var(--neg); }
+#presetSave { display: flex; gap: 4px; margin-top: 4px; }
+#presetSave input { flex: 1; min-width: 0; }
+
+.facet { border: 1px solid var(--line-weak); border-radius: 8px; margin-bottom: 6px; background: var(--panel); }
+.facet.has { border-color: var(--accent); }
+.facet.has.out { border-color: var(--neg); }
+.fh { display: flex; align-items: center; gap: 6px; padding: 6px 8px; cursor: pointer; user-select: none; }
+.fh .tw { width: 10px; color: var(--muted); transition: transform .12s; font-size: 10px; }
+.facet.open .fh .tw { transform: rotate(90deg); }
+.fh .fn { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fbadge { font-size: 11px; background: var(--accent); color: var(--accent-text); border-radius: 9px; padding: 0 7px; line-height: 17px; }
+.facet.out .fbadge { background: var(--neg); }
+.fbadge:empty { display: none; }
+.seg { display: none; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.facet.open .seg { display: inline-flex; }
+.seg button { border: 0; background: var(--panel); padding: 0 8px; line-height: 20px; font-weight: 700; color: var(--muted); }
+.seg button.on[data-mode="in"] { background: var(--accent); color: var(--accent-text); }
+.seg button.on[data-mode="out"] { background: var(--neg); color: #fff; }
+.fclr { border: 0; background: none; color: var(--muted); padding: 0 4px; font-size: 15px; line-height: 1; }
+.fclr:hover { color: var(--neg); }
+.fb { display: none; padding: 0 8px 8px; }
+.facet.open .fb { display: block; }
+.fs { width: 100%; margin-bottom: 4px; padding: 3px 7px; font-size: 12px; }
+.fi { display: flex; align-items: center; gap: 6px; padding: 2px 2px; border-radius: 4px; cursor: pointer; }
+.fi:hover { background: var(--panel2); }
+.fi input { margin: 0; accent-color: var(--accent); }
+.facet.out .fi input { accent-color: var(--neg); }
+.fi .fv { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fi .fv.empty { font-style: italic; color: var(--muted); }
+.fi .fc { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+.fi.zero .fv, .fi.zero .fc { opacity: .45; }
+.facet.out .fi.on .fv { text-decoration: line-through; color: var(--neg); }
+.fb .more { border: 0; background: none; color: var(--accent); padding: 4px 2px; font-size: 12px; }
+
+.rg { border: 1px solid var(--line-weak); border-radius: 8px; padding: 6px 8px; margin-bottom: 6px; }
+.rg.has { border-color: var(--accent); }
+.rgh { display: flex; align-items: center; font-weight: 600; margin-bottom: 4px; }
+.rgh span { flex: 1; }
+.rgi { display: flex; align-items: center; gap: 4px; }
+.rgi input { flex: 1; min-width: 0; padding: 3px 6px; font-size: 12px; }
+.rgq { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+.rgq button { border: 1px solid var(--line); background: var(--panel); border-radius: 12px; padding: 0 8px; font-size: 12px; line-height: 20px; }
+.rgq button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+#rangeAdd { width: 100%; }
+
+#toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+#count { font-weight: 650; white-space: nowrap; }
+#count .muted { font-weight: 400; }
+#chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
+.chip { display: inline-flex; align-items: center; gap: 4px; max-width: 420px; background: var(--accent-weak); color: var(--text); border-radius: 12px; padding: 1px 4px 1px 10px; font-size: 12px; line-height: 20px; }
+.chip.out { background: var(--neg-weak); }
+.chip .cl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip .cl.link { cursor: pointer; text-decoration: underline dotted; }
+.chip button { border: 0; background: none; padding: 0 4px; color: var(--muted); font-size: 14px; line-height: 1; }
+.chip button:hover { color: var(--neg); }
+#resetAll { font-size: 12px; padding: 2px 8px; }
+.tb-actions { display: flex; gap: 6px; margin-left: auto; }
+.menu-wrap { position: relative; }
+.menu { position: absolute; right: 0; top: calc(100% + 4px); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); padding: 4px; z-index: 20; min-width: 230px; }
+.menu button { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 6px 10px; border-radius: 5px; }
+.menu button:hover { background: var(--panel2); }
+
+#work { flex: 1; display: flex; min-height: 0; position: relative; }
+#grid { flex: 1; min-width: 0; overflow: auto; position: relative; background: var(--panel); outline: none; }
+#ghead { position: sticky; top: 0; z-index: 3; display: flex; width: max-content; min-width: 100%; background: var(--panel2); border-bottom: 1px solid var(--line); }
+.th { flex: none; position: relative; padding: 0 8px; height: 32px; line-height: 32px; font-weight: 600; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-right: 1px solid var(--line); cursor: pointer; user-select: none; }
+.th:hover { background: var(--row-hover); }
+.th .so { color: var(--accent); margin-left: 3px; font-size: 11px; }
+.th .rz { position: absolute; right: 0; top: 0; bottom: 0; width: 6px; cursor: col-resize; }
+.th .rz:hover { background: var(--accent); }
+#gbody { position: relative; width: max-content; min-width: 100%; }
+.tr { position: absolute; left: 0; display: flex; height: 28px; cursor: pointer; min-width: 100%; }
+.tr:nth-child(even) { background: var(--row-alt); }
+.tr:hover { background: var(--row-hover); }
+.tr.sel { background: var(--row-sel); }
+.td { flex: none; padding: 0 8px; line-height: 28px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-right: 1px solid var(--line-weak); border-bottom: 1px solid var(--line-weak); }
+.td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.td.id, .td.date { font-variant-numeric: tabular-nums; }
+#gempty { position: absolute; inset: 60px 0 auto 0; text-align: center; color: var(--muted); }
+
+#card { flex: none; width: 420px; max-width: 100%; background: var(--panel); border-left: 1px solid var(--line); display: flex; flex-direction: column; }
+#card .ch { display: flex; align-items: center; gap: 6px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+#card .ch h2 { flex: 1; font-size: 15px; margin: 0; }
+#card .cb { overflow-y: auto; padding: 6px 12px 30px; flex: 1; }
+#card .cf { padding: 6px 12px; border-bottom: 1px solid var(--line-weak); }
+.kv { display: grid; grid-template-columns: 150px 1fr auto; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--line-weak); align-items: start; }
+.kv .k { color: var(--muted); font-size: 12px; word-break: break-word; }
+.kv .v { white-space: pre-wrap; word-break: break-word; cursor: copy; border-radius: 4px; }
+.kv .v:hover { background: var(--panel2); }
+.kv .v.empty { color: var(--muted); font-style: italic; cursor: default; }
+.kv .fx { border: 0; background: none; color: var(--muted); padding: 0 2px; opacity: .35; font-size: 15px; }
+.kv:hover .fx { opacity: 1; }
+.kv .fx:hover { color: var(--accent); }
+
+#drop { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 16px; background: var(--bg); z-index: 15; }
+#drop .box { max-width: 560px; width: 100%; border: 2px dashed var(--line); border-radius: 14px; padding: 48px 24px; text-align: center; background: var(--panel); cursor: pointer; }
+#drop .box:hover, body.dragging #drop .box { border-color: var(--accent); background: var(--accent-weak); }
+#drop h2 { margin: 0 0 8px; font-size: 18px; }
+#drop p { margin: 4px 0; }
+#dragOverlay { position: fixed; inset: 0; background: color-mix(in srgb, var(--accent) 18%, transparent); border: 3px dashed var(--accent); z-index: 40; pointer-events: none; display: none; align-items: center; justify-content: center; font-size: 20px; font-weight: 650; }
+body.dragging #dragOverlay { display: flex; }
+
+#busy { position: fixed; inset: 0; background: color-mix(in srgb, var(--bg) 70%, transparent); z-index: 50; display: flex; align-items: center; justify-content: center; }
+#busy .bx { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 22px; box-shadow: var(--shadow); width: 320px; }
+#busy .bar { height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; margin-top: 10px; }
+#busy .bar div { height: 100%; width: 0; background: var(--accent); transition: width .1s; }
+
+.modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 60; display: flex; align-items: center; justify-content: center; padding: 16px; }
+.modal { background: var(--panel); border-radius: 12px; box-shadow: var(--shadow); width: 560px; max-width: 100%; max-height: 90vh; display: flex; flex-direction: column; }
+.modal .mh { display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.modal .mh h3 { flex: 1; margin: 0; font-size: 15px; }
+.modal .mb { padding: 12px 16px; overflow-y: auto; }
+.modal .mf { display: flex; justify-content: flex-end; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); }
+.modal textarea { width: 100%; resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+.modal label.blk { display: block; margin: 10px 0 4px; }
+.modal select { width: 100%; }
+.colgrid { columns: 2; column-gap: 16px; }
+.colgrid label { display: flex; gap: 6px; align-items: center; padding: 2px 0; break-inside: avoid; }
+.help h4 { margin: 12px 0 4px; }
+.help ul { margin: 4px 0; padding-left: 20px; }
+.help kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; font-size: 11px; }
+
+#toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; z-index: 70; opacity: 0; transition: opacity .15s; pointer-events: none; max-width: 80vw; }
+#toast.show { opacity: 1; }
+
+@media (max-width: 760px) {
+  aside { position: absolute; z-index: 12; height: 100%; transform: translateX(-100%); transition: transform .15s; }
+  body.side-open aside { transform: none; box-shadow: var(--shadow); }
+  header { gap: 4px; padding: 0 6px; }
+  header h1 { font-size: 14px; }
+  #sideToggle { display: inline-block !important; }
+  #card { position: absolute; inset: 0 0 0 auto; z-index: 10; box-shadow: var(--shadow); }
+  header h1 small, #fileInfo { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <button class="btn ghost" id="sideToggle" style="display:none" title="Фильтры">☰</button>
+  <h1>Разбор выгрузки <small id="ver"></small></h1>
+  <div id="fileInfo"></div>
+  <div class="sp"></div>
+  <button class="btn" id="openBtn">Открыть файл</button>
+  <button class="btn ghost" id="themeBtn" title="Тема: системная / светлая / тёмная" aria-label="Тема"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" style="display:block"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/></svg></button>
+  <button class="btn ghost" id="helpBtn" title="Справка">?</button>
+  <input type="file" id="fileInput" accept=".xlsx" hidden>
+</header>
+
+<div id="app">
+  <aside id="side">
+    <div class="sec">
+      <div class="sec-h">Поиск</div>
+      <input id="q" type="search" placeholder="Кошелёк, ID, имя, комментарий…  ( / )" autocomplete="off">
+      <div class="row2"><button class="btn" id="listBtn">Поиск по списку…</button></div>
+    </div>
+    <div class="sec">
+      <div class="sec-h">Наборы фильтров <span class="sp"></span><button class="btn" id="presetSaveBtn">Сохранить</button><button class="btn" id="presetShareBtn" title="Экспорт и импорт наборов">⇄</button></div>
+      <div id="presets"></div>
+      <div id="presetSave" hidden><input id="presetName" placeholder="Название набора"><button class="btn primary" id="presetSaveOk">OK</button></div>
+    </div>
+    <div class="sec">
+      <div class="sec-h">Фильтры по значениям</div>
+      <div id="facets"></div>
+    </div>
+    <div class="sec">
+      <div class="sec-h">Даты и числа</div>
+      <div id="ranges"></div>
+      <select id="rangeAdd"></select>
+    </div>
+  </aside>
+
+  <main>
+    <div id="toolbar">
+      <div id="count"></div>
+      <div id="chips"></div>
+      <div class="tb-actions">
+        <button class="btn" id="copyIdsBtn" title="Скопировать Ticket ID всех показанных тикетов, по одному в строке">Копировать Ticket ID</button>
+        <div class="menu-wrap">
+          <button class="btn" id="exportBtn">Скачать ▾</button>
+          <div class="menu" id="exportMenu" hidden>
+            <button data-exp="visible">.xlsx — только видимые колонки</button>
+            <button data-exp="all">.xlsx — все колонки</button>
+          </div>
+        </div>
+        <button class="btn" id="colsBtn">Колонки</button>
+      </div>
+    </div>
+    <div id="work">
+      <div id="grid" tabindex="0">
+        <div id="ghead"></div>
+        <div id="gbody"></div>
+        <div id="gempty" hidden>Нет тикетов под эти фильтры.<br><br><button class="btn" id="emptyReset">Сбросить фильтры</button></div>
+      </div>
+      <section id="card" hidden>
+        <div class="ch">
+          <h2 id="cardTitle"></h2>
+          <button class="btn ghost" id="cardPrev" title="Предыдущий (↑)">↑</button>
+          <button class="btn ghost" id="cardNext" title="Следующий (↓)">↓</button>
+          <button class="btn ghost" id="cardClose" title="Закрыть (Esc)">✕</button>
+        </div>
+        <div class="cf"><label class="muted"><input type="checkbox" id="cardEmpty"> показывать пустые поля</label></div>
+        <div class="cb" id="cardBody"></div>
+      </section>
+    </div>
+  </main>
+
+
+  <div id="drop">
+    <div class="box" id="dropBox">
+      <h2>Перетащите сюда выгрузку .xlsx</h2>
+      <p class="muted">или нажмите, чтобы выбрать файл</p>
+      <p class="muted" style="margin-top:16px">Файл читается прямо в браузере и никуда не отправляется.<br>Фильтры и наборы запоминаются — завтра достаточно открыть новую выгрузку.</p>
+    </div>
+  </div>
+</div>
+
+<div id="dragOverlay">Отпустите файл, чтобы открыть</div>
+<div id="busy" hidden><div class="bx"><div id="busyText">Читаю файл…</div><div class="bar"><div id="busyBar"></div></div></div></div>
+<div id="toast"></div>
+
+<script>
+'use strict';
+const VERSION = '1.0';
+
+// ───────────────────────── настройки под выгрузку ─────────────────────────
+// Колонки с идентификаторами: хранятся как текст (ведущие нули, 19-значные ID),
+// по ним работает «Поиск по списку» в режиме «во всех колонках с ID».
+const ID_COLS = ['Ticket ID', 'Transaction ID', 'User ID', 'User wallet', "Agent's wallet",
+  'Unique transfer number', 'Provider ID', 'Agent ID', 'Subagent ID', 'Admin ID', 'Referal ID'];
+// Фильтры-галочки в этом порядке; остальные колонки с небольшим числом значений добавятся в конец.
+const FACET_ORDER = ['Ticket type', 'Agent', 'Country', 'Status', 'External Status', 'Customer status',
+  'Transaction Status', 'Topic', 'Subtopic', 'Department', 'Type', 'Ticket currency',
+  "Customer's account currency", 'Payment method', 'Subagent', 'Referal', 'Recipient', 'From',
+  'Response to customer', 'Bank name'];
+const FACET_OPEN_DEFAULT = ['Ticket type', 'Agent', 'Country', 'Status', 'External Status'];
+const DEFAULT_VISIBLE = ['Ticket ID', 'Date created', 'Ticket type', 'Country', 'Status', 'External Status',
+  'Transaction Status', 'Agent', 'Subagent', 'Payment method', 'Check amount', 'Ticket currency',
+  'Transactions amount', 'User ID', 'User wallet', "Agent's wallet", 'Wallet owner', 'Transaction ID',
+  'Unique transfer number', 'Topic', 'Internal comment'];
+const LONG_TEXT = ['Internal comment', "User's comment", 'Response to customer', 'Additional parameters', 'Support details'];
+// Поля из JSON в «Additional parameters», которые выносятся в отдельные колонки.
+const JSON_EXTRAS = { 'Additional parameters': [['wallet_owner', 'Wallet owner'], ['bank_name', 'Bank name'], ['requisite', 'Requisite'], ['support_details', 'Support details']] };
+const BUILTIN_PRESETS = [
+  { name: 'SMP — агент не SendMePay', builtin: true,
+    f: { facets: { 'Ticket type': { mode: 'in', vals: ['SMP M'] }, 'Agent': { mode: 'out', vals: ['SendMePay'] } } } },
+];
+
+// ───────────────────────── хранение настроек ─────────────────────────
+const LS = 'report-viewer:v1:';
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(LS + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(LS + k, JSON.stringify(v)); } catch (e) { /* приватный режим */ } },
+};
+
+// ───────────────────────── утилиты ─────────────────────────
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmtInt = (n) => n.toLocaleString('ru-RU');
+const normId = (v) => String(v).toLowerCase().replace(/\s+/g, '');
+const pad2 = (n) => (n < 10 ? '0' : '') + n;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function todayStr(offsetDays = 0) {
+  const d = new Date(); d.setDate(d.getDate() + offsetDays);
+  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+let toastTimer = 0;
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+}
+async function copyText(text, msg) {
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) {
+    const ta = document.createElement('textarea'); ta.value = text; ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
+  }
+  toast(msg || 'Скопировано');
+}
+function debounce(fn, ms) { let t = 0; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+// ───────────────────────── чтение .xlsx ─────────────────────────
+// Свой минимальный читатель: zip через DecompressionStream, лист разбирается потоком.
+function unzipIndex(u8) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  let eocd = -1;
+  for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('Это не файл .xlsx (архив не распознан).');
+  const count = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  const map = new Map(); const dec = new TextDecoder();
+  for (let k = 0; k < count; k++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) break;
+    const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true), usize = dv.getUint32(p + 24, true);
+    const nl = dv.getUint16(p + 28, true), el = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true), lho = dv.getUint32(p + 42, true);
+    map.set(dec.decode(u8.subarray(p + 46, p + 46 + nl)), { method, csize, usize, lho });
+    p += 46 + nl + el + cl;
+  }
+  return map;
+}
+function entryStream(u8, e, onBytes) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const start = e.lho + 30 + dv.getUint16(e.lho + 26, true) + dv.getUint16(e.lho + 28, true);
+  let s = new Blob([u8.subarray(start, start + e.csize)]).stream();
+  if (e.method === 8) s = s.pipeThrough(new DecompressionStream('deflate-raw'));
+  else if (e.method !== 0) throw new Error('Неподдерживаемое сжатие в архиве.');
+  if (onBytes) s = s.pipeThrough(new TransformStream({ transform(ch, c) { onBytes(ch.length); c.enqueue(ch); } }));
+  return s;
+}
+function unesc(s) {
+  if (s.indexOf('&') >= 0) {
+    s = s.replace(/&(lt|gt|amp|quot|apos|#\d+|#x[0-9a-fA-F]+);/g, (m, g) => {
+      if (g === 'lt') return '<'; if (g === 'gt') return '>'; if (g === 'amp') return '&';
+      if (g === 'quot') return '"'; if (g === 'apos') return "'";
+      return String.fromCodePoint(g[1] === 'x' || g[1] === 'X' ? parseInt(g.slice(2), 16) : parseInt(g.slice(1), 10));
+    });
+  }
+  if (s.indexOf('_x') >= 0) s = s.replace(/_x([0-9A-Fa-f]{4})_/g, (m, h) => String.fromCharCode(parseInt(h, 16)));
+  return s;
+}
+function attr(head, name) {
+  const k = head.indexOf(' ' + name + '="');
+  if (k < 0) return null;
+  const a = k + name.length + 3;
+  return head.slice(a, head.indexOf('"', a));
+}
+function textRuns(inner) { // все <t>…</t> внутри <is>/<si>, кроме фонетики <rPh>
+  let out = '', p = 0;
+  for (;;) {
+    p = inner.indexOf('<t', p); if (p < 0) break;
+    const ch = inner.charCodeAt(p + 2);
+    if (ch !== 62 && ch !== 32) { p += 2; continue; }
+    const gt = inner.indexOf('>', p);
+    if (inner.charCodeAt(gt - 1) === 47) { p = gt + 1; continue; }
+    const rph = inner.lastIndexOf('<rPh', p);
+    const end = inner.indexOf('</t>', gt);
+    if (rph < 0 || inner.lastIndexOf('</rPh>', p) > rph) out += inner.slice(gt + 1, end);
+    p = end + 4;
+  }
+  return unesc(out);
+}
+function colFromRef(ref) {
+  let n = 0;
+  for (let i = 0; i < ref.length; i++) { const c = ref.charCodeAt(i); if (c < 65 || c > 90) break; n = n * 26 + (c - 64); }
+  return n - 1;
+}
+function isDateFmt(id, code) {
+  if ((id >= 14 && id <= 22) || (id >= 45 && id <= 47) || (id >= 27 && id <= 36) || (id >= 50 && id <= 58)) return true;
+  if (!code) return false;
+  const c = code.replace(/"[^"]*"/g, '').replace(/\[[^\]]*\]/g, '').replace(/\\./g, '');
+  return /[ymdhs]/i.test(c);
+}
+function parseDateStyles(xml) {
+  const set = new Set(); if (!xml) return set;
+  const custom = {};
+  xml.replace(/<numFmt\b[^>]*>/g, (m) => { const id = attr(' ' + m.slice(8), 'numFmtId'); const code = attr(' ' + m.slice(8), 'formatCode'); if (id) custom[id] = unesc(code || ''); return m; });
+  const cx = xml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/);
+  if (!cx) return set;
+  let i = 0;
+  cx[1].replace(/<xf\b[^>]*>/g, (m) => { const id = +(attr(' ' + m.slice(3), 'numFmtId') || 0); if (isDateFmt(id, custom[id])) set.add(i); i++; return m; });
+  return set;
+}
+
+async function readXlsx(file, onProgress) {
+  if (typeof DecompressionStream === 'undefined') throw new Error('Браузер слишком старый: нужен свежий Chrome, Edge, Firefox или Safari.');
+  const u8 = new Uint8Array(await file.arrayBuffer());
+  const entries = unzipIndex(u8);
+  const textOf = async (name) => {
+    const e = entries.get(name) || entries.get('/' + name);
+    if (!e) return null;
+    return new TextDecoder().decode(await new Response(entryStream(u8, e)).arrayBuffer());
+  };
+  const wb = (await textOf('xl/workbook.xml')) || '';
+  const date1904 = /date1904="(1|true)"/.test(wb);
+  let sheetPath = null;
+  const sm = wb.match(/<sheet\b[^>]*>/);
+  if (sm) {
+    const rid = (sm[0].match(/\b[\w]*:?id="([^"]+)"/) || [])[1];
+    const rels = (await textOf('xl/_rels/workbook.xml.rels')) || '';
+    const rm = rels.match(/<Relationship\b[^>]*>/g) || [];
+    for (const r of rm) {
+      if (attr(' ' + r.slice(13), 'Id') === rid) {
+        const t = attr(' ' + r.slice(13), 'Target');
+        sheetPath = t.startsWith('/') ? t.slice(1) : 'xl/' + t.replace(/^\.\//, '');
+      }
+    }
+  }
+  if (!sheetPath || !(entries.has(sheetPath) || entries.has('/' + sheetPath))) {
+    sheetPath = [...entries.keys()].filter((k) => /^\/?xl\/worksheets\/sheet\d*\.xml$/.test(k)).sort()[0];
+  }
+  if (!sheetPath) throw new Error('В файле не найден лист с данными.');
+  const sstXml = await textOf('xl/sharedStrings.xml');
+  const sst = [];
+  if (sstXml) { let p = 0; for (;;) { p = sstXml.indexOf('<si', p); if (p < 0) break; const e = sstXml.indexOf('</si>', p); if (e < 0) break; sst.push(textRuns(sstXml.slice(p, e))); p = e + 5; } }
+  const dateStyles = parseDateStyles(await textOf('xl/styles.xml'));
+  const serialToStr = (x) => {
+    if (date1904) x += 1462;
+    const d = new Date(Math.round((x - 25569) * 86400) * 1000);
+    return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate()) + ' ' + pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ':' + pad2(d.getUTCSeconds());
+  };
+
+  const out = []; // [{r, cells}]
+  const numCnt = [], strCnt = [];
+  let nextRow = 0;
+  function parseCells(s, a, b) {
+    const cells = []; let col = 0, p = a;
+    for (;;) {
+      p = s.indexOf('<c', p); if (p < 0 || p >= b) break;
+      const ch = s.charCodeAt(p + 2);
+      if (ch !== 32 && ch !== 62 && ch !== 47) { p += 2; continue; }
+      const gt = s.indexOf('>', p);
+      const head = s.slice(p + 2, s.charCodeAt(gt - 1) === 47 ? gt - 1 : gt);
+      const ref = attr(head, 'r'); if (ref) col = colFromRef(ref);
+      let val = '', isNum = false;
+      if (s.charCodeAt(gt - 1) === 47) { p = gt + 1; }
+      else {
+        const ce = s.indexOf('</c>', gt);
+        const inner = s.slice(gt + 1, ce);
+        const t = attr(head, 't');
+        if (t === 'inlineStr') val = textRuns(inner);
+        else {
+          const vs = inner.indexOf('<v>'); const v = vs < 0 ? '' : inner.slice(vs + 3, inner.indexOf('</v>', vs));
+          if (t === 's') val = sst[+v] || '';
+          else if (t === 'str' || t === 'e') val = unesc(v);
+          else if (t === 'b') val = v === '1' ? 'TRUE' : 'FALSE';
+          else if (t === 'd') val = v.replace('T', ' ').slice(0, 19);
+          else if (v !== '') {
+            const st = attr(head, 's');
+            if (st && dateStyles.has(+st)) val = serialToStr(+v);
+            else { val = v; isNum = true; }
+          }
+        }
+        p = ce + 4;
+      }
+      if (val !== '') {
+        cells[col] = val;
+        if (out.length) { if (isNum) numCnt[col] = (numCnt[col] || 0) + 1; else strCnt[col] = (strCnt[col] || 0) + 1; } // первая строка — заголовок
+      }
+      col++;
+    }
+    return cells;
+  }
+  function parseRows(s) {
+    let p = 0;
+    for (;;) {
+      p = s.indexOf('<row', p); if (p < 0) return;
+      const ch = s.charCodeAt(p + 4);
+      if (ch !== 32 && ch !== 62 && ch !== 47) { p += 4; continue; }
+      const gt = s.indexOf('>', p);
+      const r = attr(s.slice(p + 4, gt), 'r');
+      const ri = r ? parseInt(r, 10) - 1 : nextRow;
+      nextRow = ri + 1;
+      if (s.charCodeAt(gt - 1) === 47) { p = gt + 1; continue; }
+      const end = s.indexOf('</row>', gt);
+      const cells = parseCells(s, gt + 1, end);
+      if (cells.length) out.push({ r: ri, cells });
+      p = end + 6;
+    }
+  }
+
+  const e = entries.get(sheetPath) || entries.get('/' + sheetPath);
+  let got = 0;
+  const reader = entryStream(u8, e, (n) => { got += n; }).pipeThrough(new TextDecoderStream()).getReader();
+  let buf = '', last = performance.now();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += value;
+    const k = buf.lastIndexOf('</row>');
+    if (k >= 0) { parseRows(buf.slice(0, k + 6)); buf = buf.slice(k + 6); }
+    if (performance.now() - last > 80) { onProgress && onProgress(e.usize ? got / e.usize : 0); await sleep(0); last = performance.now(); }
+  }
+  parseRows(buf);
+  if (!out.length) throw new Error('Лист пустой.');
+  out.sort((a, b) => a.r - b.r);
+  const width = Math.max(...out.map((o) => o.cells.length));
+  const header = []; for (let i = 0; i < width; i++) header.push((out[0].cells[i] || '').trim());
+  const rows = out.slice(1).map((o) => o.cells);
+  // числовая колонка — все непустые значения записаны в файле числами
+  const numeric = header.map((h, i) => (numCnt[i] || 0) > 0 && !(strCnt[i] > 0));
+  return { header, rows, numeric };
+}
+
+// ───────────────────────── запись .xlsx ─────────────────────────
+const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(u8) { let c = 0xffffffff; for (let i = 0; i < u8.length; i++) c = CRC_TABLE[(c ^ u8[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+async function deflateRaw(u8) { return new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer()); }
+async function makeZip(files) {
+  const enc = new TextEncoder(); const parts = []; const central = []; let offset = 0;
+  const now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  for (const f of files) {
+    const name = enc.encode(f.name); const data = f.data; const crc = crc32(data); const comp = await deflateRaw(data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, 8, true);
+    lh.setUint16(10, dosTime, true); lh.setUint16(12, dosDate, true); lh.setUint32(14, crc, true);
+    lh.setUint32(18, comp.length, true); lh.setUint32(22, data.length, true); lh.setUint16(26, name.length, true); lh.setUint16(28, 0, true);
+    parts.push(lh.buffer, name, comp);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true); ch.setUint16(10, 8, true);
+    ch.setUint16(12, dosTime, true); ch.setUint16(14, dosDate, true); ch.setUint32(16, crc, true);
+    ch.setUint32(20, comp.length, true); ch.setUint32(24, data.length, true); ch.setUint16(28, name.length, true);
+    ch.setUint32(42, offset, true);
+    central.push(ch.buffer, name);
+    offset += 30 + name.length + comp.length;
+  }
+  const cdSize = central.reduce((s, b) => s + b.byteLength, 0);
+  const eo = new DataView(new ArrayBuffer(22));
+  eo.setUint32(0, 0x06054b50, true); eo.setUint16(8, files.length, true); eo.setUint16(10, files.length, true);
+  eo.setUint32(12, cdSize, true); eo.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, eo.buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+function colLetter(i) { let s = ''; i++; while (i > 0) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; }
+const xmlEsc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+async function buildXlsx(colIdx, rowIdx) {
+  const parts = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews><cols>'];
+  colIdx.forEach((c, j) => parts.push(`<col min="${j + 1}" max="${j + 1}" width="${Math.max(10, Math.min(60, Math.round(D.cols[c].w / 7)))}" customWidth="1"/>`));
+  parts.push('</cols><sheetData><row r="1">');
+  colIdx.forEach((c, j) => parts.push(`<c r="${colLetter(j)}1" t="inlineStr" s="1"><is><t>${xmlEsc(D.cols[c].name)}</t></is></c>`));
+  parts.push('</row>');
+  const numRe = /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/;
+  for (let k = 0; k < rowIdx.length; k++) {
+    const r = rowIdx[k]; const rn = k + 2; let s = `<row r="${rn}">`;
+    for (let j = 0; j < colIdx.length; j++) {
+      const c = colIdx[j]; const v = D.vals[c][r];
+      if (v === '') continue;
+      const ref = colLetter(j) + rn;
+      if (D.cols[c].numeric && numRe.test(v) && v.replace(/[^0-9]/g, '').length <= 15) s += `<c r="${ref}"><v>${v}</v></c>`;
+      else s += `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xmlEsc(v)}</t></is></c>`;
+    }
+    parts.push(s + '</row>');
+  }
+  parts.push(`</sheetData><autoFilter ref="A1:${colLetter(colIdx.length - 1)}${rowIdx.length + 1}"/></worksheet>`);
+  const sheet = new Uint8Array(await new Blob(parts).arrayBuffer());
+  const enc = new TextEncoder();
+  const files = [
+    { name: '[Content_Types].xml', data: enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>') },
+    { name: '_rels/.rels', data: enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>') },
+    { name: 'xl/workbook.xml', data: enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Report" sheetId="1" r:id="rId1"/></sheets><definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">Report!$A$1:$' + colLetter(colIdx.length - 1) + '$' + (rowIdx.length + 1) + '</definedName></definedNames></workbook>') },
+    { name: 'xl/_rels/workbook.xml.rels', data: enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>') },
+    { name: 'xl/styles.xml', data: enc.encode('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="3"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFD3D3D3"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>') },
+    { name: 'xl/worksheets/sheet1.xml', data: sheet },
+  ];
+  return makeZip(files);
+}
+
+// ───────────────────────── данные и состояние ─────────────────────────
+let D = null;            // загруженная выгрузка (по колонкам)
+let rows = new Int32Array(0); // индексы строк после фильтра и сортировки
+let facetCounts = {};
+let selRow = -1;
+const facetSearch = {}, facetLimit = {};
+function normFilters(f) {
+  f = f || {};
+  return { q: typeof f.q === 'string' ? f.q : '', facets: f.facets && typeof f.facets === 'object' ? JSON.parse(JSON.stringify(f.facets)) : {},
+    ranges: f.ranges && typeof f.ranges === 'object' ? JSON.parse(JSON.stringify(f.ranges)) : {}, list: f.list || null };
+}
+let F = normFilters(store.get('filters', {}));
+F.list = null; // список — разовая операция, между сессиями не хранится
+let sortSpec = store.get('sort', []);
+let visibleNames = store.get('visible', null);
+let widths = store.get('widths', {});
+let openFacets = new Set(store.get('openFacets', FACET_OPEN_DEFAULT));
+let userPresets = store.get('presets', []);
+let showEmptyInCard = store.get('cardEmpty', false);
+
+function saveFilters() { const { list, ...rest } = F; void list; store.set('filters', rest); }
+
+function buildData(fileName, parsed) {
+  const { header, rows: raw, numeric } = parsed;
+  const n = raw.length; const cols = []; const vals = [];
+  const seen = {};
+  const addCol = (name, arr, isNum) => {
+    let nm = name || ('Колонка ' + (cols.length + 1));
+    if (seen[nm]) nm = nm + ' (' + (++seen[nm]) + ')'; else seen[nm] = 1;
+    cols.push({ name: nm, numeric: isNum }); vals.push(arr);
+  };
+  header.forEach((h, i) => {
+    const arr = new Array(n);
+    for (let r = 0; r < n; r++) { const v = raw[r][i]; arr[r] = v === undefined ? '' : v; }
+    // копия через JSON отвязывает значения от больших кусков исходного XML, иначе они держат их в памяти
+    addCol(h, JSON.parse(JSON.stringify(arr)), numeric[i]);
+    const extras = JSON_EXTRAS[h];
+    if (extras) {
+      const ex = extras.map(() => new Array(n).fill(''));
+      let any = extras.map(() => false);
+      for (let r = 0; r < n; r++) {
+        const v = arr[r]; if (!v || v[0] !== '{') continue;
+        let o; try { o = JSON.parse(v); } catch (e) { continue; }
+        if (!o || typeof o !== 'object') continue;
+        extras.forEach(([k], j) => { const x = o[k]; if (x != null && x !== '') { ex[j][r] = typeof x === 'object' ? JSON.stringify(x) : String(x); any[j] = true; } });
+      }
+      extras.forEach(([, label], j) => { if (any[j]) addCol(label, ex[j], false); });
+    }
+  });
+  const dateRe = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}(:\d{2})?)?$/;
+  const nums = [], codes = [], dicts = [];
+  cols.forEach((c, i) => {
+    const arr = vals[i];
+    if (ID_COLS.includes(c.name)) c.kind = 'id';
+    else if (c.numeric) c.kind = 'num';
+    else {
+      let filled = 0, dates = 0;
+      for (let r = 0; r < n && filled < 500; r++) { const v = arr[r]; if (v) { filled++; if (dateRe.test(v)) dates++; } }
+      c.kind = filled && dates / filled > 0.9 ? 'date' : 'text';
+    }
+    if (c.kind === 'num') { const f = new Float64Array(n); for (let r = 0; r < n; r++) f[r] = arr[r] === '' ? NaN : parseFloat(arr[r]); nums[i] = f; }
+    // фильтр-галочки
+    let facet = false;
+    if (c.kind === 'text' || c.kind === 'id') {
+      if (FACET_ORDER.includes(c.name)) facet = true;
+      else if (c.kind === 'text' && !LONG_TEXT.includes(c.name)) {
+        const u = new Set(); for (let r = 0; r < n && u.size <= 61; r++) u.add(arr[r]);
+        facet = u.size >= 2 && u.size <= 60 && n > 20;
+      }
+    }
+    c.facet = facet;
+    if (facet) {
+      const cnt = new Map(); for (let r = 0; r < n; r++) cnt.set(arr[r], (cnt.get(arr[r]) || 0) + 1);
+      const dict = [...cnt.keys()].sort((a, b) => cnt.get(b) - cnt.get(a));
+      const idx = new Map(dict.map((v, k) => [v, k]));
+      const cd = new Uint32Array(n); for (let r = 0; r < n; r++) cd[r] = idx.get(arr[r]);
+      codes[i] = cd; dicts[i] = dict;
+    }
+    c.w = widths[c.name] || (c.kind === 'num' ? 110 : c.kind === 'date' ? 162 : c.kind === 'id' ? 140 : LONG_TEXT.includes(c.name) ? 260 : 170);
+  });
+  const facetCols = [];
+  FACET_ORDER.forEach((nm) => { const i = cols.findIndex((c) => c.name === nm && c.facet); if (i >= 0) facetCols.push(i); });
+  cols.forEach((c, i) => { if (c.facet && !facetCols.includes(i)) facetCols.push(i); });
+  D = { fileName, n, cols, vals, nums, codes, dicts, facetCols, hay: null, byName: new Map(cols.map((c, i) => [c.name, i])) };
+}
+const colIdx = (name) => (D.byName.has(name) ? D.byName.get(name) : -1);
+function ensureHay() {
+  if (D.hay) return;
+  const hay = new Array(D.n);
+  for (let r = 0; r < D.n; r++) { let s = ''; for (let c = 0; c < D.cols.length; c++) { const v = D.vals[c][r]; if (v) s += v + '\n'; } hay[r] = s.toLowerCase().replace(/[ \t ]+/g, ''); }
+  D.hay = hay;
+}
+function listCols(col) { return col === '*' ? ID_COLS.map(colIdx).filter((i) => i >= 0) : [colIdx(col)].filter((i) => i >= 0); }
+function effRange(rg) {
+  if (rg.rel != null && rg.rel !== '') {
+    const rel = +rg.rel;
+    if (rel === 0) return [todayStr(0), todayStr(0)];
+    if (rel === 1) return [todayStr(-1), todayStr(-1)];
+    return [todayStr(-(rel - 1)), todayStr(0)];
+  }
+  return [rg.min || '', rg.max || ''];
+}
+
+// ───────────────────────── фильтрация ─────────────────────────
+function run() {
+  if (!D) return;
+  const preds = [];
+  const toks = F.q.toLowerCase().split(/\s+/).filter(Boolean);
+  if (toks.length) { ensureHay(); const hay = D.hay; preds.push((r) => { const h = hay[r]; for (const t of toks) if (h.indexOf(t) < 0) return false; return true; }); }
+  if (F.list && F.list.values.length) {
+    const set = new Set(F.list.values); const cs = listCols(F.list.col);
+    preds.push((r) => { for (const c of cs) { const v = D.vals[c][r]; if (v && set.has(normId(v))) return true; } return false; });
+  }
+  for (const [name, rg] of Object.entries(F.ranges)) {
+    const c = colIdx(name); if (c < 0) continue;
+    const kind = D.cols[c].kind;
+    if (kind === 'num') {
+      const lo = rg.min === '' || rg.min == null ? NaN : parseFloat(String(rg.min).replace(',', '.'));
+      const hi = rg.max === '' || rg.max == null ? NaN : parseFloat(String(rg.max).replace(',', '.'));
+      if (isNaN(lo) && isNaN(hi)) continue;
+      const a = D.nums[c] || Float64Array.from(D.vals[c], (v) => (v === '' ? NaN : parseFloat(v)));
+      preds.push((r) => { const v = a[r]; if (isNaN(v)) return false; if (!isNaN(lo) && v < lo) return false; if (!isNaN(hi) && v > hi) return false; return true; });
+    } else {
+      const [lo, hi] = effRange(rg); if (!lo && !hi) continue;
+      const a = D.vals[c]; const hiX = hi ? hi + '￿' : '';
+      preds.push((r) => { const v = a[r]; if (!v) return false; if (lo && v < lo) return false; if (hiX && v > hiX) return false; return true; });
+    }
+  }
+  const fps = [];
+  for (const [name, fc] of Object.entries(F.facets)) {
+    const c = colIdx(name); if (c < 0 || !D.codes[c] || !fc.vals || !fc.vals.length) continue;
+    const dict = D.dicts[c]; const out = fc.mode === 'out';
+    const allowed = new Uint8Array(dict.length).fill(out ? 1 : 0); const sel = new Set(fc.vals);
+    dict.forEach((v, k) => { if (sel.has(v)) allowed[k] = out ? 0 : 1; });
+    fps.push({ c, allowed, codes: D.codes[c] });
+  }
+  const counts = {}; for (const c of D.facetCols) counts[c] = new Uint32Array(D.dicts[c].length);
+  const fcCodes = D.facetCols.map((c) => [counts[c], D.codes[c]]);
+  const res = [];
+  const n = D.n, np = preds.length, nf = fps.length;
+  outer: for (let r = 0; r < n; r++) {
+    for (let k = 0; k < np; k++) if (!preds[k](r)) continue outer;
+    let fails = 0, fp = null;
+    for (let k = 0; k < nf; k++) { const f = fps[k]; if (!f.allowed[f.codes[r]]) { fails++; fp = f; if (fails > 1) break; } }
+    if (fails === 0) { res.push(r); for (let k = 0; k < fcCodes.length; k++) fcCodes[k][0][fcCodes[k][1][r]]++; }
+    else if (fails === 1) counts[fp.c][fp.codes[r]]++;
+  }
+  facetCounts = counts;
+  rows = sortRows(res);
+}
+const collator = new Intl.Collator('ru', { sensitivity: 'base', numeric: true });
+function sortRows(arr) {
+  const specs = sortSpec.map((s) => ({ c: colIdx(s.col), dir: s.dir === 'desc' ? -1 : 1 })).filter((s) => s.c >= 0);
+  if (specs.length) {
+    const digits = /^\d+$/;
+    arr.sort((a, b) => {
+      for (const { c, dir } of specs) {
+        const nums = D.nums[c];
+        if (nums) {
+          const x = nums[a], y = nums[b]; const xn = isNaN(x), yn = isNaN(y);
+          if (xn || yn) { if (xn && yn) continue; return xn ? 1 : -1; }
+          if (x !== y) return (x < y ? -1 : 1) * dir;
+        } else {
+          const x = D.vals[c][a], y = D.vals[c][b];
+          if (!x || !y) { if (!x && !y) continue; return !x ? 1 : -1; }
+          if (x === y) continue;
+          const kind = D.cols[c].kind; let d;
+          if (kind === 'id' && digits.test(x) && digits.test(y)) d = x.length !== y.length ? x.length - y.length : (x < y ? -1 : 1);
+          else if (kind === 'text') d = collator.compare(x, y);
+          else d = x < y ? -1 : 1;
+          if (d) return d * dir;
+        }
+      }
+      return a - b;
+    });
+  }
+  return Int32Array.from(arr);
+}
+
+// ───────────────────────── таблица ─────────────────────────
+const RH = 28;
+function visibleCols() {
+  const names = visibleNames || DEFAULT_VISIBLE;
+  let v = D.cols.map((c, i) => i).filter((i) => names.includes(D.cols[i].name));
+  if (!v.length) v = D.cols.map((c, i) => i);
+  return v;
+}
+function fmtCell(c, v) {
+  if (v === '') return '';
+  if (D.cols[c].kind === 'num') {
+    const k = v.indexOf('.');
+    if (k >= 0 && v.length - k - 1 > 4 && !/e/i.test(v)) { const f = parseFloat(v); return String(+f.toFixed(4)); }
+  }
+  return v;
+}
+function renderHead() {
+  const vc = visibleCols();
+  $('ghead').innerHTML = vc.map((c) => {
+    const col = D.cols[c]; const si = sortSpec.findIndex((s) => s.col === col.name);
+    const so = si >= 0 ? `<span class="so">${sortSpec[si].dir === 'desc' ? '▼' : '▲'}${sortSpec.length > 1 ? si + 1 : ''}</span>` : '';
+    return `<div class="th" data-c="${c}" style="width:${col.w}px" title="${esc(col.name)} — клик: сортировка, Shift+клик: добавить к сортировке">${esc(col.name)}${so}<span class="rz"></span></div>`;
+  }).join('');
+}
+function renderGrid() {
+  if (!D) return;
+  renderHead();
+  const total = visibleCols().reduce((s, c) => s + D.cols[c].w, 0);
+  $('gbody').style.height = rows.length * RH + 'px';
+  $('gbody').style.width = total + 'px';
+  $('gempty').hidden = rows.length > 0;
+  drawRows();
+}
+function drawRows() {
+  const g = $('grid'); const vc = visibleCols();
+  const first = Math.max(0, Math.floor(g.scrollTop / RH) - 8);
+  const last = Math.min(rows.length, Math.ceil((g.scrollTop + g.clientHeight) / RH) + 8);
+  let h = '';
+  for (let i = first; i < last; i++) {
+    const r = rows[i];
+    h += `<div class="tr${r === selRow ? ' sel' : ''}" data-i="${i}" style="top:${i * RH}px">`;
+    for (const c of vc) {
+      const col = D.cols[c]; const v = D.vals[c][r];
+      h += `<div class="td ${col.kind}" style="width:${col.w}px"${v.length > 20 ? ` title="${esc(v.slice(0, 500))}"` : ''}>${esc(fmtCell(c, v))}</div>`;
+    }
+    h += '</div>';
+  }
+  $('gbody').innerHTML = h;
+}
+let rafPending = false;
+$('grid').addEventListener('scroll', () => { if (rafPending) return; rafPending = true; requestAnimationFrame(() => { rafPending = false; drawRows(); }); });
+window.addEventListener('resize', () => { if (D) drawRows(); });
+
+let resizing = null;
+$('ghead').addEventListener('mousedown', (e) => {
+  const rz = e.target.closest('.rz'); if (!rz) return;
+  e.preventDefault(); const th = rz.parentElement; const c = +th.dataset.c;
+  resizing = { c, x: e.clientX, w: D.cols[c].w, th, moved: false };
+});
+window.addEventListener('mousemove', (e) => {
+  if (!resizing) return;
+  const w = Math.max(50, resizing.w + e.clientX - resizing.x);
+  resizing.moved = true; D.cols[resizing.c].w = w; resizing.th.style.width = w + 'px';
+  if (!rafPending) { rafPending = true; requestAnimationFrame(() => { rafPending = false; drawRows(); }); }
+});
+window.addEventListener('mouseup', () => {
+  if (!resizing) return;
+  widths[D.cols[resizing.c].name] = D.cols[resizing.c].w; store.set('widths', widths);
+  const moved = resizing.moved; resizing = null; renderGrid();
+  if (moved) { suppressSortClick = true; setTimeout(() => { suppressSortClick = false; }, 0); }
+});
+let suppressSortClick = false;
+$('ghead').addEventListener('click', (e) => {
+  if (suppressSortClick || e.target.closest('.rz')) return;
+  const th = e.target.closest('.th'); if (!th) return;
+  const name = D.cols[+th.dataset.c].name; const i = sortSpec.findIndex((s) => s.col === name);
+  if (e.shiftKey) {
+    if (i < 0) sortSpec.push({ col: name, dir: 'asc' });
+    else if (sortSpec[i].dir === 'asc') sortSpec[i].dir = 'desc';
+    else sortSpec.splice(i, 1);
+  } else {
+    if (i < 0 || sortSpec.length > 1) sortSpec = [{ col: name, dir: 'asc' }];
+    else if (sortSpec[i].dir === 'asc') sortSpec = [{ col: name, dir: 'desc' }];
+    else sortSpec = [];
+  }
+  store.set('sort', sortSpec);
+  rows = sortRows(Array.from(rows));
+  renderGrid();
+});
+$('gbody').addEventListener('click', (e) => {
+  const tr = e.target.closest('.tr'); if (!tr) return;
+  openCard(rows[+tr.dataset.i]);
+});
+$('gbody').addEventListener('dblclick', (e) => {
+  const td = e.target.closest('.td'); const tr = e.target.closest('.tr'); if (!td || !tr) return;
+  const k = [...tr.children].indexOf(td); const c = visibleCols()[k]; const v = D.vals[c][rows[+tr.dataset.i]];
+  if (v) copyText(v, 'Скопировано: ' + (v.length > 40 ? v.slice(0, 40) + '…' : v));
+});
+
+// ───────────────────────── карточка тикета ─────────────────────────
+function openCard(r) {
+  selRow = r; $('card').hidden = false;
+  const tid = colIdx('Ticket ID');
+  $('cardTitle').textContent = tid >= 0 ? 'Тикет ' + D.vals[tid][r] : 'Строка ' + (r + 2);
+  $('cardEmpty').checked = showEmptyInCard;
+  let h = '';
+  D.cols.forEach((col, c) => {
+    let v = D.vals[c][r];
+    if (!v && !showEmptyInCard) return;
+    if (v && v[0] === '{' && col.name === 'Additional parameters') { try { v = JSON.stringify(JSON.parse(v), null, 2); } catch (e) { /* как есть */ } }
+    const canFilter = v && (col.facet || col.kind === 'id' || col.kind === 'text');
+    h += `<div class="kv" data-c="${c}"><div class="k">${esc(col.name)}</div><div class="v${v ? '' : ' empty'}" ${v ? 'title="Клик — скопировать"' : ''}>${v ? esc(v) : 'пусто'}</div>` +
+      (canFilter ? `<button class="fx" title="${col.facet ? 'Показать только тикеты с этим значением' : 'Найти все тикеты с этим значением'}">⌕</button>` : '<span></span>') + '</div>';
+  });
+  $('cardBody').innerHTML = h;
+  drawRows();
+}
+function closeCard() { $('card').hidden = true; selRow = -1; drawRows(); }
+function moveCard(d) {
+  if (selRow < 0) return;
+  let i = rows.indexOf(selRow); if (i < 0) return;
+  i = Math.max(0, Math.min(rows.length - 1, i + d));
+  openCard(rows[i]);
+  const g = $('grid'); const y = i * RH;
+  if (y < g.scrollTop) g.scrollTop = y; else if (y + RH * 2 > g.scrollTop + g.clientHeight) g.scrollTop = y - g.clientHeight + RH * 2;
+}
+$('cardClose').onclick = closeCard;
+$('cardPrev').onclick = () => moveCard(-1);
+$('cardNext').onclick = () => moveCard(1);
+$('cardEmpty').onchange = (e) => { showEmptyInCard = e.target.checked; store.set('cardEmpty', showEmptyInCard); openCard(selRow); };
+$('cardBody').addEventListener('click', (e) => {
+  const kv = e.target.closest('.kv'); if (!kv) return;
+  const c = +kv.dataset.c; const col = D.cols[c]; const v = D.vals[c][selRow];
+  if (e.target.closest('.fx')) {
+    if (col.facet) F.facets[col.name] = { mode: 'in', vals: [v] };
+    else setList(col.name, [v]);
+    apply();
+    toast(col.facet ? `Фильтр: ${col.name} = ${v}` : `Тикеты, где ${col.name} = ${v}`);
+    return;
+  }
+  if (e.target.closest('.v') && v) copyText(v, 'Скопировано: ' + (v.length > 40 ? v.slice(0, 40) + '…' : v));
+});
+
+// ───────────────────────── фильтры-галочки ─────────────────────────
+function renderFacets() {
+  $('facets').innerHTML = D.facetCols.map((c) => {
+    const name = D.cols[c].name;
+    return `<div class="facet" data-c="${c}"><div class="fh"><span class="tw">▶</span><span class="fn" title="${esc(name)}">${esc(name)}</span><span class="fbadge"></span>` +
+      `<span class="seg"><button data-mode="in" title="Показать только выбранные значения">=</button><button data-mode="out" title="Исключить выбранные значения (всё, кроме них)">≠</button></span>` +
+      `<button class="fclr" title="Сбросить этот фильтр" hidden>×</button></div><div class="fb">` +
+      (D.dicts[c].length > 8 ? `<input class="fs" type="search" placeholder="Найти значение…" value="${esc(facetSearch[c] || '')}">` : '') +
+      `<div class="fl"></div></div></div>`;
+  }).join('');
+  updateFacets();
+}
+function updateFacets() {
+  for (const el of $('facets').children) {
+    const c = +el.dataset.c; const name = D.cols[c].name; const fc = F.facets[name];
+    const has = !!(fc && fc.vals && fc.vals.length); const mode = fc && fc.mode === 'out' ? 'out' : 'in';
+    const open = openFacets.has(name);
+    el.classList.toggle('open', open); el.classList.toggle('has', has); el.classList.toggle('out', mode === 'out');
+    el.querySelector('.fbadge').textContent = has ? (mode === 'out' ? '≠ ' : '') + fc.vals.length : '';
+    el.querySelectorAll('.seg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
+    el.querySelector('.fclr').hidden = !has;
+    if (open) renderFacetList(el, c);
+  }
+}
+function renderFacetList(el, c) {
+  const dict = D.dicts[c]; const cnt = facetCounts[c]; const name = D.cols[c].name; const fc = F.facets[name];
+  const sel = new Set(fc && fc.vals ? fc.vals : []);
+  const q = (facetSearch[c] || '').toLowerCase().trim(); const lim = facetLimit[c] || 40;
+  let items = dict.map((v, k) => ({ v, n: cnt ? cnt[k] : 0 }));
+  const inDict = new Set(dict);
+  for (const v of sel) if (!inDict.has(v)) items.push({ v, n: 0 });
+  if (q) items = items.filter((it) => (it.v || '(пусто)').toLowerCase().includes(q));
+  items.sort((a, b) => (sel.has(b.v) - sel.has(a.v)) || (b.n - a.n) || collator.compare(a.v, b.v));
+  const shown = items.slice(0, lim);
+  let h = shown.map((it) => `<label class="fi${it.n ? '' : ' zero'}${sel.has(it.v) ? ' on' : ''}"><input type="checkbox" data-v="${esc(it.v)}"${sel.has(it.v) ? ' checked' : ''}>` +
+    `<span class="fv${it.v ? '' : ' empty'}" title="${esc(it.v || '(пусто)')}">${esc(it.v ? it.v.replace(/\s+/g, ' ') : '(пусто)')}</span><span class="fc">${fmtInt(it.n)}</span></label>`).join('');
+  if (!items.length) h = '<div class="muted" style="padding:4px 2px">Ничего не найдено</div>';
+  if (items.length > lim) h += `<button class="more">Показать ещё ${Math.min(40, items.length - lim)} из ${fmtInt(items.length - lim)}</button>`;
+  el.querySelector('.fl').innerHTML = h;
+}
+$('facets').addEventListener('click', (e) => {
+  const el = e.target.closest('.facet'); if (!el) return;
+  const c = +el.dataset.c; const name = D.cols[c].name;
+  const seg = e.target.closest('.seg button');
+  if (seg) {
+    const fc = F.facets[name] || (F.facets[name] = { mode: 'in', vals: [] });
+    fc.mode = seg.dataset.mode; apply(); return;
+  }
+  if (e.target.closest('.fclr')) { delete F.facets[name]; apply(); return; }
+  if (e.target.closest('.more')) { facetLimit[c] = (facetLimit[c] || 40) + 40; renderFacetList(el, c); return; }
+  if (e.target.closest('.fh')) {
+    if (openFacets.has(name)) openFacets.delete(name); else openFacets.add(name);
+    store.set('openFacets', [...openFacets]); updateFacets();
+  }
+});
+$('facets').addEventListener('change', (e) => {
+  const cb = e.target.closest('input[type=checkbox]'); if (!cb) return;
+  const name = D.cols[+e.target.closest('.facet').dataset.c].name; const v = cb.dataset.v;
+  const fc = F.facets[name] || (F.facets[name] = { mode: 'in', vals: [] });
+  if (cb.checked) { if (!fc.vals.includes(v)) fc.vals.push(v); } else fc.vals = fc.vals.filter((x) => x !== v);
+  if (!fc.vals.length && fc.mode === 'in') delete F.facets[name];
+  apply();
+});
+$('facets').addEventListener('input', (e) => {
+  if (!e.target.classList.contains('fs')) return;
+  const el = e.target.closest('.facet'); const c = +el.dataset.c;
+  facetSearch[c] = e.target.value; facetLimit[c] = 40; renderFacetList(el, c);
+});
+
+// ───────────────────────── диапазоны ─────────────────────────
+function renderRanges() {
+  const cand = D.cols.map((c, i) => i).filter((i) => (D.cols[i].kind === 'date' || D.cols[i].kind === 'num') && !(D.cols[i].name in F.ranges));
+  $('rangeAdd').innerHTML = '<option value="">+ Добавить условие по дате или числу…</option>' + cand.map((i) => `<option value="${esc(D.cols[i].name)}">${esc(D.cols[i].name)}</option>`).join('');
+  $('ranges').innerHTML = Object.entries(F.ranges).map(([name, rg]) => {
+    const c = colIdx(name); if (c < 0) return '';
+    const isDate = D.cols[c].kind === 'date';
+    const [lo, hi] = isDate ? effRange(rg) : [rg.min || '', rg.max || ''];
+    const has = !!(lo || hi);
+    let h = `<div class="rg${has ? ' has' : ''}" data-name="${esc(name)}"><div class="rgh"><span>${esc(name)}</span><button class="fclr rgx" title="Убрать условие">×</button></div><div class="rgi">`;
+    if (isDate) {
+      h += `<input type="date" data-b="min" value="${esc(lo)}" title="с"> — <input type="date" data-b="max" value="${esc(hi)}" title="по"></div><div class="rgq">` +
+        [['0', 'Сегодня'], ['1', 'Вчера'], ['7', '7 дней'], ['30', '30 дней']].map(([k, l]) => `<button data-rel="${k}" class="${String(rg.rel) === k ? 'on' : ''}">${l}</button>`).join('') + '</div>';
+    } else {
+      h += `<input type="text" inputmode="decimal" data-b="min" value="${esc(lo)}" placeholder="от"> — <input type="text" inputmode="decimal" data-b="max" value="${esc(hi)}" placeholder="до"></div>`;
+    }
+    return h + '</div>';
+  }).join('');
+}
+$('rangeAdd').onchange = (e) => { const nm = e.target.value; if (!nm) return; F.ranges[nm] = {}; saveFilters(); renderRanges(); };
+$('ranges').addEventListener('click', (e) => {
+  const rg = e.target.closest('.rg'); if (!rg) return; const name = rg.dataset.name;
+  if (e.target.closest('.rgx')) { delete F.ranges[name]; apply(); return; }
+  const q = e.target.closest('[data-rel]');
+  if (q) { const cur = F.ranges[name]; F.ranges[name] = String(cur.rel) === q.dataset.rel ? {} : { rel: q.dataset.rel }; apply(); }
+});
+const applyRangesLater = debounce(() => {
+  apply({ keepRanges: true });
+  for (const el of $('ranges').querySelectorAll('.rg')) { // подсветка и кнопки быстрых дат без перерисовки полей ввода
+    const rg = F.ranges[el.dataset.name] || {};
+    el.classList.toggle('has', !!(rg.min || rg.max || (rg.rel != null && rg.rel !== '')));
+    el.querySelectorAll('[data-rel]').forEach((b) => b.classList.toggle('on', String(rg.rel) === b.dataset.rel));
+  }
+}, 300);
+function rangeInput(name, b, v) { const rg = F.ranges[name]; if (!rg) return; delete rg.rel; rg[b] = v; applyRangesLater(); }
+$('ranges').addEventListener('input', (e) => {
+  const inp = e.target.closest('input[data-b]'); if (!inp) return; const name = inp.closest('.rg').dataset.name;
+  if (inp.type === 'date') { const rg = F.ranges[name]; if (rg.rel != null) { const [lo, hi] = effRange(rg); delete rg.rel; rg.min = lo; rg.max = hi; } }
+  rangeInput(name, inp.dataset.b, inp.value.trim());
+});
+
+// ───────────────────────── поиск по списку ─────────────────────────
+function setList(col, rawVals) {
+  const raw = []; const seen = new Set();
+  for (const v of rawVals) { const s = String(v).trim(); const k = normId(s); if (s && !seen.has(k)) { seen.add(k); raw.push(s); } }
+  const values = raw.map(normId);
+  const cs = listCols(col); const found = new Set();
+  for (let r = 0; r < D.n; r++) for (const c of cs) { const v = D.vals[c][r]; if (v) { const k = normId(v); if (seen.has(k)) found.add(k); } }
+  F.list = { col, values, raw, notFound: raw.filter((s) => !found.has(normId(s))) };
+}
+function openListModal() {
+  const opts = '<option value="*">Во всех колонках с ID и кошельками</option>' + D.cols.map((c) => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('');
+  const body = document.createElement('div');
+  body.innerHTML = `<div class="muted">Вставьте значения — по одному в строке (можно скопировать столбец из Excel). Пробелы и регистр не важны, совпадение — по значению целиком.</div>
+    <textarea id="listText" rows="12" style="margin-top:8px" placeholder="10059514&#10;10134967&#10;TR96 0006 2001 2050 0006 6043 91">${F.list ? esc(F.list.raw.join('\n')) : ''}</textarea>
+    <label class="blk">Где искать</label><select id="listCol">${opts}</select>`;
+  body.querySelector('#listCol').value = F.list ? F.list.col : '*';
+  modal('Поиск по списку', body, [
+    { label: 'Отмена' },
+    { label: 'Найти', primary: true, onClick: () => {
+      const vals = body.querySelector('#listText').value.split(/[\r\n,;\t]+/);
+      setList(body.querySelector('#listCol').value, vals);
+      if (!F.list.values.length) F.list = null;
+      apply();
+      if (F.list && F.list.notFound.length) toast(`Не найдено: ${F.list.notFound.length} из ${F.list.raw.length} — список в фильтре сверху`);
+    } },
+  ]);
+  setTimeout(() => body.querySelector('#listText').focus(), 0);
+}
+function showNotFound() {
+  const nf = F.list.notFound; const body = document.createElement('div');
+  body.innerHTML = nf.length ? `<div class="muted">Этих значений нет в выгрузке (${nf.length} из ${F.list.raw.length}):</div><textarea rows="12" readonly style="margin-top:8px">${esc(nf.join('\n'))}</textarea>`
+    : `<div>Все ${F.list.raw.length} значений найдены в выгрузке.</div>`;
+  modal('Результат поиска по списку', body, [nf.length ? { label: 'Скопировать', onClick: () => copyText(nf.join('\n')) } : null, { label: 'Закрыть', primary: true }].filter(Boolean));
+}
+$('listBtn').onclick = () => D && openListModal();
+
+// ───────────────────────── наборы фильтров ─────────────────────────
+function canon(f) {
+  f = normFilters(f); const o = { q: f.q.trim(), facets: {}, ranges: {} };
+  Object.keys(f.facets).sort().forEach((k) => { const fc = f.facets[k]; if (fc.vals && fc.vals.length) o.facets[k] = { mode: fc.mode === 'out' ? 'out' : 'in', vals: [...fc.vals].sort() }; });
+  Object.keys(f.ranges).sort().forEach((k) => { const r = f.ranges[k]; if (r.rel != null && r.rel !== '') o.ranges[k] = { rel: String(r.rel) }; else if (r.min || r.max) o.ranges[k] = { min: r.min || '', max: r.max || '' }; });
+  return JSON.stringify(o);
+}
+function allPresets() { return [...BUILTIN_PRESETS, ...userPresets]; }
+function renderPresets() {
+  const cur = canon(F);
+  $('presets').innerHTML = allPresets().map((p, i) => `<div class="pr${canon(p.f) === cur && !F.list ? ' active' : ''}" data-i="${i}"><button class="pa" title="${esc(p.name)}">${esc(p.name)}</button>` +
+    (p.builtin ? '<span class="muted" style="font-size:11px;padding-right:6px">встроенный</span>' : '<button class="px" title="Удалить набор">×</button>') + '</div>').join('');
+}
+$('presets').addEventListener('click', (e) => {
+  const pr = e.target.closest('.pr'); if (!pr) return; const p = allPresets()[+pr.dataset.i];
+  if (e.target.closest('.px')) {
+    if (!confirm(`Удалить набор «${p.name}»?`)) return;
+    userPresets = userPresets.filter((x) => x !== p); store.set('presets', userPresets); renderPresets(); return;
+  }
+  const f = normFilters(p.f); f.list = null; F = f;
+  $('q').value = F.q; apply(); toast('Набор: ' + p.name);
+});
+$('presetSaveBtn').onclick = () => { const s = $('presetSave'); s.hidden = !s.hidden; if (!s.hidden) { $('presetName').value = ''; $('presetName').focus(); } };
+function savePreset() {
+  const name = $('presetName').value.trim(); if (!name) return;
+  if (canon(F) === canon({})) { toast('Сначала выберите фильтры'); return; }
+  const { list, ...rest } = F; void list;
+  const ex = userPresets.find((p) => p.name === name);
+  if (ex) { if (!confirm(`Набор «${name}» уже есть. Заменить?`)) return; ex.f = JSON.parse(JSON.stringify(rest)); }
+  else userPresets.push({ name, f: JSON.parse(JSON.stringify(rest)) });
+  store.set('presets', userPresets); $('presetSave').hidden = true; renderPresets();
+  toast(F.list ? 'Набор сохранён (без поиска по списку)' : 'Набор сохранён');
+}
+$('presetSaveOk').onclick = savePreset;
+$('presetName').addEventListener('keydown', (e) => { if (e.key === 'Enter') savePreset(); if (e.key === 'Escape') $('presetSave').hidden = true; });
+$('presetShareBtn').onclick = () => {
+  const body = document.createElement('div');
+  body.innerHTML = `<div class="muted">Чтобы поделиться наборами, скопируйте этот текст и отправьте коллеге. Чтобы добавить чужие наборы — вставьте их текст сюда и нажмите «Импортировать».</div>
+    <textarea id="shareText" rows="10" style="margin-top:8px">${esc(JSON.stringify(userPresets))}</textarea>`;
+  modal('Обмен наборами', body, [
+    { label: 'Скопировать', onClick: () => { copyText(body.querySelector('#shareText').value); return false; } },
+    { label: 'Импортировать', primary: true, onClick: () => {
+      let arr; try { arr = JSON.parse(body.querySelector('#shareText').value); } catch (e) { toast('Текст не похож на наборы фильтров'); return false; }
+      if (!Array.isArray(arr)) { toast('Текст не похож на наборы фильтров'); return false; }
+      let added = 0;
+      for (const p of arr) {
+        if (!p || typeof p.name !== 'string' || !p.f) continue;
+        const ex = userPresets.find((x) => x.name === p.name);
+        if (ex) ex.f = p.f; else userPresets.push({ name: p.name, f: p.f });
+        added++;
+      }
+      store.set('presets', userPresets); renderPresets(); toast('Наборов добавлено или обновлено: ' + added);
+    } },
+  ]);
+};
+
+// ───────────────────────── чипы и счётчик ─────────────────────────
+function renderChips() {
+  const chips = [];
+  if (F.q.trim()) chips.push({ label: 'Поиск: ' + F.q.trim(), clear: () => { F.q = ''; $('q').value = ''; } });
+  if (F.list) {
+    const where = F.list.col === '*' ? 'ID и кошельки' : F.list.col;
+    const label = F.list.raw.length === 1 ? `${where} = ${F.list.raw[0]}` : `Список (${where}): ${F.list.raw.length}` + (F.list.notFound.length ? `, не найдено ${F.list.notFound.length}` : ', все найдены');
+    chips.push({ label, link: F.list.raw.length > 1, onLabel: showNotFound, clear: () => { F.list = null; } });
+  }
+  for (const [name, fc] of Object.entries(F.facets)) {
+    if (!fc.vals || !fc.vals.length) continue;
+    const vs = fc.vals.map((v) => v || '(пусто)');
+    const label = `${name} ${fc.mode === 'out' ? '≠' : '='} ${vs.slice(0, 3).join(', ')}${vs.length > 3 ? ` +${vs.length - 3}` : ''}`;
+    chips.push({ label, out: fc.mode === 'out', title: vs.join('\n'), clear: () => { delete F.facets[name]; } });
+  }
+  for (const [name, rg] of Object.entries(F.ranges)) {
+    const c = colIdx(name); if (c < 0) continue;
+    let lo, hi;
+    if (D.cols[c].kind === 'date') [lo, hi] = effRange(rg); else { lo = rg.min; hi = rg.max; }
+    if (!lo && !hi) continue;
+    const relName = { 0: 'сегодня', 1: 'вчера', 7: 'за 7 дней', 30: 'за 30 дней' }[rg.rel];
+    const label = `${name}: ` + (relName || (lo && hi ? (lo === hi ? lo : `${lo} — ${hi}`) : lo ? `от ${lo}` : `до ${hi}`));
+    chips.push({ label, clear: () => { delete F.ranges[name]; } });
+  }
+  const el = $('chips');
+  el.innerHTML = chips.map((ch, i) => `<span class="chip${ch.out ? ' out' : ''}" data-i="${i}" title="${esc(ch.title || ch.label)}"><span class="cl${ch.link ? ' link' : ''}">${esc(ch.label)}</span><button title="Убрать">×</button></span>`).join('') +
+    (chips.length > 1 ? '<button class="btn ghost" id="resetAll">Сбросить всё</button>' : '');
+  el.onclick = (e) => {
+    if (e.target.id === 'resetAll') { resetAll(); return; }
+    const chip = e.target.closest('.chip'); if (!chip) return; const ch = chips[+chip.dataset.i];
+    if (e.target.closest('button')) { ch.clear(); apply(); } else if (ch.onLabel) ch.onLabel();
+  };
+}
+function resetAll() { F = normFilters({}); $('q').value = ''; apply(); }
+$('emptyReset').onclick = resetAll;
+
+// ───────────────────────── применение ─────────────────────────
+function apply(opts = {}) {
+  if (!D) return;
+  saveFilters(); run();
+  if (selRow >= 0 && !$('card').hidden && rows.indexOf(selRow) < 0) closeCard();
+  $('grid').scrollTop = 0;
+  renderGrid(); updateFacets(); renderChips(); renderPresets();
+  if (!opts.keepRanges) renderRanges();
+  $('count').innerHTML = `${fmtInt(rows.length)} <span class="muted">из ${fmtInt(D.n)}</span>`;
+}
+$('q').addEventListener('input', debounce((e) => { F.q = e.target.value; apply(); }, 200));
+
+// ───────────────────────── колонки, экспорт ─────────────────────────
+$('colsBtn').onclick = () => {
+  if (!D) return;
+  const cur = new Set(visibleCols().map((c) => D.cols[c].name));
+  const body = document.createElement('div');
+  body.innerHTML = `<input type="search" id="colFilter" placeholder="Найти колонку…" style="width:100%;margin-bottom:8px">
+    <div style="display:flex;gap:6px;margin-bottom:8px"><button class="btn" data-set="main">Основные</button><button class="btn" data-set="all">Все</button><button class="btn" data-set="none">Ничего</button></div>
+    <div class="colgrid">${D.cols.map((c) => `<label data-n="${esc(c.name.toLowerCase())}"><input type="checkbox" value="${esc(c.name)}"${cur.has(c.name) ? ' checked' : ''}> ${esc(c.name)}</label>`).join('')}</div>`;
+  const sync = () => { visibleNames = [...body.querySelectorAll('.colgrid input:checked')].map((i) => i.value); store.set('visible', visibleNames); renderGrid(); };
+  body.addEventListener('change', sync);
+  body.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-set]'); if (!b) return;
+    body.querySelectorAll('.colgrid input').forEach((i) => { i.checked = b.dataset.set === 'all' || (b.dataset.set === 'main' && DEFAULT_VISIBLE.includes(i.value)); });
+    sync();
+  });
+  body.querySelector('#colFilter').oninput = (e) => { const q = e.target.value.toLowerCase(); body.querySelectorAll('.colgrid label').forEach((l) => { l.hidden = !l.dataset.n.includes(q); }); };
+  modal('Колонки таблицы', body, [{ label: 'Готово', primary: true }]);
+};
+$('copyIdsBtn').onclick = () => {
+  if (!D) return; const c = colIdx('Ticket ID');
+  if (c < 0) { toast('В выгрузке нет колонки Ticket ID'); return; }
+  if (!rows.length) { toast('Нет тикетов'); return; }
+  const ids = Array.from(rows, (r) => D.vals[c][r]).filter(Boolean);
+  copyText(ids.join('\n'), `Скопировано Ticket ID: ${fmtInt(ids.length)}`);
+};
+$('exportBtn').onclick = (e) => { e.stopPropagation(); $('exportMenu').hidden = !$('exportMenu').hidden; };
+document.addEventListener('click', () => { $('exportMenu').hidden = true; });
+$('exportMenu').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-exp]'); if (!b || !D) return;
+  if (!rows.length) { toast('Нет тикетов для выгрузки'); return; }
+  const cols = b.dataset.exp === 'all' ? D.cols.map((c, i) => i).filter((i) => !Object.values(JSON_EXTRAS).flat().some(([, l]) => l === D.cols[i].name)) : visibleCols();
+  busy(true, 'Готовлю файл…');
+  try {
+    await sleep(30);
+    const blob = await buildXlsx(cols, rows);
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = D.fileName.replace(/\.xlsx$/i, '') + `_filtered_${rows.length}.xlsx`; // латиница: кириллицу в имени Chrome для file:// игнорирует
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch (err) { alert('Не удалось сохранить файл: ' + err.message); }
+  busy(false);
+});
+
+// ───────────────────────── модальные окна ─────────────────────────
+function modal(title, bodyEl, buttons) {
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal" role="dialog"><div class="mh"><h3>${esc(title)}</h3><button class="btn ghost mx">✕</button></div><div class="mb"></div><div class="mf"></div></div>`;
+  bg.querySelector('.mb').appendChild(bodyEl);
+  const close = () => { bg.remove(); document.removeEventListener('keydown', onKey, true); };
+  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  document.addEventListener('keydown', onKey, true);
+  bg.querySelector('.mx').onclick = close;
+  bg.addEventListener('mousedown', (e) => { if (e.target === bg) close(); });
+  buttons.forEach((b) => {
+    const btn = document.createElement('button'); btn.className = 'btn' + (b.primary ? ' primary' : ''); btn.textContent = b.label;
+    btn.onclick = () => { const r = b.onClick ? b.onClick() : undefined; if (r !== false) close(); };
+    bg.querySelector('.mf').appendChild(btn);
+  });
+  document.body.appendChild(bg);
+  return close;
+}
+$('helpBtn').onclick = () => {
+  const body = document.createElement('div'); body.className = 'help';
+  body.innerHTML = `
+    <h4>Каждый день</h4>
+    <ul><li>Перетащите свежую выгрузку в окно (или «Открыть файл»). Фильтры с прошлого раза применятся сами.</li>
+    <li>Или нажмите нужный набор слева в «Наборах фильтров».</li></ul>
+    <h4>Фильтры по значениям</h4>
+    <ul><li>Галочки — показать тикеты с этими значениями. Числа рядом — сколько тикетов получится.</li>
+    <li>Кнопка <b>≠</b> в заголовке фильтра переворачивает его: «всё, кроме отмеченного». Например, Agent ≠ SendMePay.</li>
+    <li>Внутри одного фильтра значения работают как «или», между разными фильтрами — как «и».</li></ul>
+    <h4>Поиск</h4>
+    <ul><li>Строка поиска ищет по всем колонкам сразу. Несколько слов — все должны встретиться. Пробелы внутри кошельков и IBAN не мешают.</li>
+    <li>«Поиск по списку» — вставьте столбец ID или кошельков, увидите найденные тикеты и список ненайденных.</li></ul>
+    <h4>Таблица</h4>
+    <ul><li>Клик по заголовку — сортировка, <kbd>Shift</kbd>+клик — добавить вторую сортировку. Ширина колонки меняется за правый край заголовка.</li>
+    <li>Клик по строке — карточка тикета со всеми полями. Клик по значению в карточке копирует его, значок ⌕ показывает все тикеты с тем же значением (например, тот же кошелёк агента).</li>
+    <li>Двойной клик по ячейке — скопировать её.</li>
+    <li><kbd>/</kbd> — к поиску, <kbd>↑</kbd> <kbd>↓</kbd> — листать карточки, <kbd>Esc</kbd> — закрыть.</li></ul>
+    <h4>Данные</h4>
+    <ul><li>Файл читается только в этом браузере, в интернет ничего не уходит. Запоминаются только фильтры, наборы, ширина и выбор колонок.</li></ul>
+    <p class="muted">Версия ${VERSION}</p>`;
+  modal('Как пользоваться', body, [{ label: 'Понятно', primary: true }]);
+};
+
+// ───────────────────────── загрузка файла ─────────────────────────
+function busy(on, text) { $('busy').hidden = !on; if (text) $('busyText').textContent = text; $('busyBar').style.width = '0'; }
+async function loadFile(file) {
+  if (!file) return;
+  if (!/\.xlsx$/i.test(file.name)) { alert('Нужен файл .xlsx'); return; }
+  busy(true, 'Читаю файл…');
+  const t0 = performance.now();
+  try {
+    await sleep(20);
+    const parsed = await readXlsx(file, (p) => { $('busyBar').style.width = Math.round(p * 100) + '%'; $('busyText').textContent = `Читаю файл… ${Math.round(p * 100)}%`; });
+    $('busyText').textContent = 'Готовлю таблицу…'; await sleep(10);
+    buildData(file.name, parsed);
+    selRow = -1; $('card').hidden = true;
+    $('drop').hidden = true;
+    const secs = ((performance.now() - t0) / 1000).toFixed(1).replace('.', ',');
+    const dc = colIdx('Date created'); let range = '';
+    if (dc >= 0) { let lo = '', hi = ''; for (const v of D.vals[dc]) { if (!v) continue; if (!lo || v < lo) lo = v; if (v > hi) hi = v; } if (lo) range = ` · создано ${lo.slice(0, 10)} — ${hi.slice(0, 10)}`; }
+    $('fileInfo').textContent = `${file.name} · ${fmtInt(D.n)} строк${range} · открыт за ${secs} с`;
+    $('fileInfo').title = $('fileInfo').textContent;
+    if (colIdx('Ticket ID') < 0) toast('Внимание: в файле нет колонки Ticket ID — это точно та выгрузка?');
+    renderFacets(); apply();
+    $('grid').focus();
+  } catch (err) {
+    console.error(err); alert('Не удалось открыть файл: ' + err.message);
+  }
+  busy(false);
+}
+$('openBtn').onclick = () => $('fileInput').click();
+$('dropBox').onclick = () => $('fileInput').click();
+$('fileInput').onchange = (e) => { loadFile(e.target.files[0]); e.target.value = ''; };
+let dragDepth = 0;
+window.addEventListener('dragenter', (e) => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); dragDepth++; document.body.classList.add('dragging'); } });
+window.addEventListener('dragover', (e) => { if ([...e.dataTransfer.types].includes('Files')) e.preventDefault(); });
+window.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) document.body.classList.remove('dragging'); });
+window.addEventListener('drop', (e) => { e.preventDefault(); dragDepth = 0; document.body.classList.remove('dragging'); const f = e.dataTransfer.files[0]; if (f) loadFile(f); });
+
+// ───────────────────────── тема, клавиши ─────────────────────────
+const THEMES = ['', 'light', 'dark'];
+function applyTheme(t) { if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme; $('themeBtn').title = 'Тема: ' + ({ '': 'как в системе', light: 'светлая', dark: 'тёмная' }[t]) + ' (клик — сменить)'; }
+let theme = store.get('theme', ''); applyTheme(theme);
+$('themeBtn').onclick = () => { theme = THEMES[(THEMES.indexOf(theme) + 1) % 3]; store.set('theme', theme); applyTheme(theme); };
+$('sideToggle').onclick = () => document.body.classList.toggle('side-open');
+document.addEventListener('keydown', (e) => {
+  const inField = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+  if (document.querySelector('.modal-bg')) return;
+  if (e.key === '/' && !inField) { e.preventDefault(); $('q').focus(); $('q').select(); return; }
+  if (e.key === 'Escape') { if (inField) document.activeElement.blur(); else if (!$('card').hidden) closeCard(); return; }
+  if (!inField && !$('card').hidden && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) { e.preventDefault(); moveCard(e.key === 'ArrowDown' ? 1 : -1); }
+});
+$('ver').textContent = 'v' + VERSION;
+$('q').value = F.q;
+</script>
+</body>
+</html>

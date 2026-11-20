@@ -1,0 +1,11 @@
+{
+  "name": "report-viewer-tests",
+  "private": true,
+  "description": "Playwright-стенд для tools/report-viewer.html",
+  "scripts": {
+    "test": "node run.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  }
+}
