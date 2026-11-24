@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.32
+// @version      0.33
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -292,6 +292,26 @@
       // Своя память списка: обработанное здесь — не обработанное в 225
       storageKey: 'th-bulk-approve:sfp-list:v1-beta',
     },
+    {
+      // Статус по списку (с 0.33): любой статус из справочника сайта по
+      // списку Ticket ID, через окно Edit. Какой статус выставить и из каких
+      // текущих External Status брать тикеты, оператор выбирает в окне
+      // списка; комментарий в Inside comment — по желанию (дописывается
+      // через « // »). Тип тикета любой: если у тикета в окне Edit нет
+      // выбранного статуса, он пропускается. Поля searchTerm, statusMatch,
+      // saveStatusId и requiredExternalStatuses заполняет buildCustomWorkflow
+      // по выбору в окне.
+      id: 'status-list',
+      buttonLabel: 'BETA Статус по списку',
+      buttonColor: '#C2185B',
+      customStatus: true,
+      requiredExternalStatuses: [],
+      allowTicketIdList: true,
+      commentOptional: true,
+      skipIfStatusMissing: true,
+      targetStatusLabel: '(выбирается в окне)',
+      storageKey: 'th-bulk-approve:status-list:v1-beta',
+    },
   ];
 
   // Общее состояние выполнения (используется кнопкой СТОП)
@@ -323,6 +343,8 @@
     // в режиме по списку такой тикет попадает в список «посмотреть глазами».
     'wrong-external-status': 'External Status тикета не подходит для этого режима — не трогали',
     'not-in-list': 'тикета нет в поданном списке — не трогали',
+    'status-not-offered':
+      'в окне Edit у этого тикета нет выбранного статуса (видимо, другой тип тикета) — ничего не меняли',
     'wrong-ticket-type': 'тип тикета (колонка Ticket type) не подходит для этого режима — не трогали',
     'no-ticket-type-column':
       'не удалось прочитать колонку Ticket type — не с чем сверять, тикет не открывали',
@@ -469,6 +491,22 @@
           entry.finishedAt = Date.now();
         });
         noteListRequest(this.__bulkApproveMethod, this.__bulkApproveUrl, args[0], this.__bulkApproveHeaders);
+        // Справочник статусов (с 0.33) — ответ запроса, который страница
+        // шлёт при открытии окна Edit
+        if (isStatusDirectoryUrl(this.__bulkApproveUrl)) {
+          const xhr = this;
+          this.addEventListener('loadend', () => {
+            try {
+              noteStatusDirectory(
+                typeof xhr.response === 'object' && xhr.response !== null
+                  ? JSON.stringify(xhr.response)
+                  : xhr.responseText
+              );
+            } catch (e) {
+              /* см. выше */
+            }
+          });
+        }
       } catch (e) {
         /* см. выше */
       }
@@ -525,6 +563,11 @@
             result
               .then((r) => r.clone().text().then((t) => noteSaveResponse(guard, r.status, t)))
               .catch(() => noteSaveResponse(guard, 0, ''));
+          }
+          if (isStatusDirectoryUrl(input && input.url ? input.url : input)) {
+            result
+              .then((r) => r.clone().text().then((t) => noteStatusDirectory(t)))
+              .catch(() => {});
           }
           // Возвращаем ИСХОДНЫЙ промис: цепочка вызывающего не меняется
           result.then(done, done);
@@ -588,6 +631,9 @@
     saveGuard = {
       ticketId: String(ticketId),
       statusId: String(workflow.saveStatusId),
+      // У одного статуса в справочнике бывает несколько id — по одному на
+      // тип тикета (режим «Статус по списку», с 0.33). Подходит любой из них.
+      statusIds: (workflow.saveStatusIds || [workflow.saveStatusId]).map((id) => String(id)),
       expectedTx: expectedTx == null || expectedTx === '' ? null : String(expectedTx),
       // Режим Sent for processing: Inside comment, который должен уйти (с 0.29)
       expectedComment: expectedComment == null ? null : String(expectedComment),
@@ -662,10 +708,10 @@
       return block(`уходило сохранение тикета ${requestId || '(пусто)'}, а в работе тикет ${g.ticketId}`);
     }
     const statusId = readRequestField(body, 'externalStatusId');
-    if (String(statusId).trim() !== g.statusId) {
+    if (!g.statusIds.includes(String(statusId).trim())) {
       return block(
         `тикет ${g.ticketId}: уходил статус с id ${statusId == null ? '(нет поля)' : statusId}, ` +
-        `а нужен id ${g.statusId}`
+        `а нужен id ${g.statusIds.join(' или ')}`
       );
     }
     if (g.expectedTx !== null) {
@@ -722,6 +768,117 @@
   // через окно Edit со всеми проверками.
   // ------------------------------------------------------------------
   let listRequestTemplate = null; // { url, body, headers, capturedAt }
+
+  // ------------------------------------------------------------------
+  // СПРАВОЧНИК СТАТУСОВ САЙТА (с 0.33).
+  //
+  // Нужен режиму «Статус по списку»: из него оператор выбирает, какой
+  // статус выставить, а скрипт узнаёт точный id статуса для защиты
+  // сохранения. Сам скрипт справочник не запрашивает: при открытии окна
+  // Edit страница шлёт GetRequestStatusesExternal, и скрипт запоминает
+  // ответ — список { id, name, requestTypeId, … }. У одного названия может
+  // быть несколько id, по одному на тип тикета. Справочник хранится в этом
+  // браузере, чтобы не подхватывать его заново после перезагрузки.
+  // ------------------------------------------------------------------
+  const STATUS_DIRECTORY_KEY = 'th-bulk-approve:status-directory:v1-beta';
+  let statusDirectory = readStatusDirectory(); // Map id → { id, name, requestTypeId }
+
+  function isStatusDirectoryUrl(url) {
+    return matchesEndpoint(String(url == null ? '' : url), 'GetRequestStatusesExternal');
+  }
+
+  function readStatusDirectory() {
+    try {
+      const raw = window.localStorage.getItem(STATUS_DIRECTORY_KEY);
+      const list = raw ? JSON.parse(raw).statuses : [];
+      return new Map((Array.isArray(list) ? list : []).map((st) => [String(st.id), st]));
+    } catch (e) {
+      return new Map();
+    }
+  }
+
+  // Ответ разбирается терпимо: ищем в нём массив объектов с id и name,
+  // где бы он ни лежал (data, data.data и т. п.)
+  function noteStatusDirectory(text) {
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      return;
+    }
+    const found = [];
+    const walk = (v, depth) => {
+      if (depth > 5 || v == null || typeof v !== 'object') return;
+      if (Array.isArray(v)) {
+        const isList =
+          v.length > 0 &&
+          v.every((x) => x && typeof x === 'object' && x.id != null && typeof x.name === 'string');
+        if (isList) {
+          found.push(...v);
+          return;
+        }
+        v.forEach((x) => walk(x, depth + 1));
+        return;
+      }
+      Object.values(v).forEach((x) => walk(x, depth + 1));
+    };
+    walk(json, 0);
+    if (found.length === 0) return;
+    found.forEach((st) => {
+      const id = String(st.id);
+      statusDirectory.set(id, {
+        id,
+        name: String(st.name).replace(/\s+/g, ' ').trim(),
+        requestTypeId: st.requestTypeId == null ? null : String(st.requestTypeId),
+      });
+    });
+    try {
+      window.localStorage.setItem(
+        STATUS_DIRECTORY_KEY,
+        JSON.stringify({ savedAt: Date.now(), statuses: [...statusDirectory.values()] })
+      );
+    } catch (e) {
+      /* хранилище недоступно — справочник проживёт до перезагрузки страницы */
+    }
+  }
+
+  function normStatusName(value) {
+    return String(value == null ? '' : value).replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  // Названия статусов справочника без повторов, по алфавиту
+  function statusDirectoryNames() {
+    const byNorm = new Map();
+    statusDirectory.forEach((st) => {
+      if (!byNorm.has(normStatusName(st.name))) byNorm.set(normStatusName(st.name), st.name);
+    });
+    return [...byNorm.values()].sort((a, b) => a.localeCompare(b));
+  }
+
+  function statusIdsByName(name) {
+    const wanted = normStatusName(name);
+    return [...statusDirectory.values()]
+      .filter((st) => normStatusName(st.name) === wanted)
+      .map((st) => st.id);
+  }
+
+  // Рабочий режим «Статус по списку» по выбору в окне:
+  // { target, sources: [...], comment }
+  function buildCustomWorkflow(base, choice) {
+    const target = choice.target;
+    const ids = statusIdsByName(target);
+    return {
+      ...base,
+      requiredExternalStatuses: choice.sources.slice(),
+      targetStatusLabel: target,
+      // Ищем в выпадающем списке по полному названию, выбираем точное совпадение
+      searchTerm: target,
+      statusMatch: (text) => normStatusName(text) === normStatusName(target),
+      saveStatusId: ids[0],
+      saveStatusIds: ids,
+      appendComment: !!choice.comment,
+    };
+  }
 
   function headersToObject(h) {
     if (!h) return {};
@@ -3160,6 +3317,29 @@
         });
       } catch (e2) {
         if (e2 instanceof StopSignal) throw e2;
+        // Режим «Статус по списку»: список раскрылся, а нужного статуса в нём
+        // нет — у тикета другой тип, и такой статус ему не положен. Это не
+        // сбой сайта, а законный пропуск: прогон не должен из-за него вставать.
+        if (workflow.skipIfStatusMissing) {
+          const wrapper = statusGroup.querySelector('.multiselect__content-wrapper');
+          const offered = wrapper
+            ? Array.from(wrapper.querySelectorAll('.multiselect__option, [id^="null-"]'))
+                .map((o) => o.textContent.trim())
+                .filter(Boolean)
+            : [];
+          if (offered.length > 0) {
+            console.warn(
+              `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: в окне Edit нет статуса ` +
+              `"${workflow.targetStatusLabel}" — пропускаю, ничего не меняя.`
+            );
+            return failTicket(ticketId, workflow, {
+              ticketId,
+              status: 'skipped',
+              reason: 'status-not-offered',
+              externalStatus,
+            });
+          }
+        }
         console.warn(`[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: список опций статуса не раскрылся или вариант не найден.`);
         console.log(`[BulkApproveBETA/${workflow.id}] Debug — HTML поля Status:`, statusGroup.outerHTML);
         return failTicket(ticketId, workflow, { ticketId, status: 'failed', reason: 'dropdown-not-opened-or-no-match' });
@@ -3318,6 +3498,19 @@
       );
       autopilot = entered.autopilot;
       currentOverwriteTx = !!entered.overwriteTx;
+      // «Статус по списку»: рабочий режим складывается из выбора в окне
+      if (workflow.customStatus) {
+        if (!entered.custom || !entered.custom.target || statusIdsByName(entered.custom.target).length === 0) {
+          alert('Не выбран статус, который выставить, — прогон не начат.');
+          return;
+        }
+        workflow = buildCustomWorkflow(workflow, { ...entered.custom, comment: entered.commentText || '' });
+        console.log(
+          `[BulkApproveBETA/${workflow.id}] Статус "${workflow.targetStatusLabel}" ` +
+          `(id ${workflow.saveStatusIds.join(' / ')}) из: ${workflow.requiredExternalStatuses.join(', ')}` +
+          (workflow.appendComment ? `; комментарий «${entered.commentText}»` : '; без комментария')
+        );
+      }
       currentCommentText = workflow.appendComment ? entered.commentText || null : null;
       listPrecheck = autopilot ? entered.precheck || null : null;
       if (currentOverwriteTx) {
@@ -3689,6 +3882,7 @@
         results: Object.fromEntries(merged),
         notShown: [...notShown],
         runs: listRunNo,
+        customKey: currentListState.customKey || '',
       });
 
       return { merged, done, needsAttention, duplicates, dropped, droppedNew, remaining, notShown };
@@ -5060,6 +5254,9 @@
             : {},
         notShown: Array.isArray(data.notShown) ? data.notShown.map(String) : [],
         runs: typeof data.runs === 'number' && data.runs > 0 ? data.runs : 0,
+        // Режим «Статус по списку» (с 0.33): какой статус и из каких — счётчики
+        // обработанного имеют смысл только для того же выбора
+        customKey: typeof data.customKey === 'string' ? data.customKey : '',
       };
     } catch (e) {
       return null;
@@ -5120,6 +5317,51 @@
     }
   }
 
+  // Последний выбор статусов режима «Статус по списку» (с 0.33) — удобство:
+  // пропадёт — выберут заново
+  function customChoiceKey(workflow) {
+    return `th-bulk-approve:${workflow.id}-choice:v1-beta`;
+  }
+  function readCustomChoice(workflow) {
+    try {
+      const data = JSON.parse(window.localStorage.getItem(customChoiceKey(workflow)) || 'null');
+      if (data && typeof data === 'object') {
+        return {
+          target: typeof data.target === 'string' ? data.target : '',
+          sources: Array.isArray(data.sources) ? data.sources.filter((x) => typeof x === 'string') : [],
+        };
+      }
+    } catch (e) {
+      /* см. ниже */
+    }
+    return { target: '', sources: [] };
+  }
+  function writeCustomChoice(workflow, choice) {
+    try {
+      window.localStorage.setItem(customChoiceKey(workflow), JSON.stringify(choice));
+    } catch (e) {
+      /* хранилище недоступно — выбор просто не запомнится */
+    }
+  }
+
+  // Подхватить справочник статусов: открыть окно Edit первого тикета на
+  // экране, дождаться ответа GetRequestStatusesExternal и закрыть окно
+  // кнопкой Cancel. В тикете ничего не меняется. true — справочник есть.
+  async function captureStatusDirectory() {
+    if (statusDirectory.size > 0) return true;
+    if (state.isRunning || getOpenModal()) return false;
+    const row = getTicketRows()[0];
+    const editLink = row ? getEditLinkFromRow(row) : null;
+    if (!editLink) return false;
+    fireClick(editLink);
+    const end = Date.now() + CONFIG.precheckTemplateTimeout;
+    while (statusDirectory.size === 0 && Date.now() < end) await sleep(100);
+    tryCancelModal();
+    const closeEnd = Date.now() + 3000;
+    while (getOpenModal() && Date.now() < closeEnd) await sleep(100);
+    return statusDirectory.size > 0;
+  }
+
   function showTicketListWindow(workflow) {
     return new Promise((resolve) => {
       let settled = false;
@@ -5171,34 +5413,192 @@
         // Что вообще произойдёт — раньше это был текст confirm()
         const plan = document.createElement('div');
         plan.style.cssText = 'color:#444;margin-bottom:12px;white-space:pre-wrap';
-        plan.textContent = [
-          `На экране сейчас тикетов: ${rowsOnScreen}.`,
-          'Будут обработаны только те, у кого External Status — один из:',
-          ...workflow.requiredExternalStatuses.map((name) => `  • ${name}`),
-          ...(workflow.requiredTicketType
-            ? [`и при этом тип тикета (Ticket type) — ${workflow.requiredTicketType}.`]
-            : []),
-          `Остальные пропускаются. У подходящих ` +
-            (workflow.appendComment ? 'к Inside comment допишется текст ниже (через « // »), ' : '') +
-            `будет выставлен статус "${workflow.targetStatusLabel}" и нажат Apply.`,
-        ].join('\n');
+        // Что будет сделано — по рабочему режиму. У «Статуса по списку» он
+        // складывается из выбора в окне, поэтому текст перерисовывается.
+        const renderPlan = () => {
+          const wf = effectiveWorkflow();
+          if (!wf) {
+            plan.textContent =
+              `На экране сейчас тикетов: ${rowsOnScreen}.\n` +
+              'Выбери ниже статус, который выставить, и из каких статусов брать тикеты.';
+            return;
+          }
+          plan.textContent = [
+            `На экране сейчас тикетов: ${rowsOnScreen}.`,
+            'Будут обработаны только те, у кого External Status — один из:',
+            ...wf.requiredExternalStatuses.map((name) => `  • ${name}`),
+            ...(wf.requiredTicketType
+              ? [`и при этом тип тикета (Ticket type) — ${wf.requiredTicketType}.`]
+              : []),
+            `Остальные пропускаются. У подходящих ` +
+              (wf.appendComment ? 'к Inside comment допишется текст ниже (через « // »), ' : '') +
+              `будет выставлен статус "${wf.targetStatusLabel}" и нажат Apply.`,
+          ].join('\n');
+        };
         body.appendChild(plan);
+
+        // ВЫБОР СТАТУСОВ (режим «Статус по списку», с 0.33): какой выставить —
+        // из справочника сайта; из каких брать — справочник плюс статусы,
+        // которые проверка списка нашла у тикетов. Последний выбор
+        // запоминается в этом браузере.
+        const custom = workflow.customStatus ? readCustomChoice(workflow) : null;
+        const customBox = document.createElement('div');
+        let renderCustom = () => {};
+        if (custom) {
+          customBox.style.cssText = 'margin-bottom:12px';
+          body.appendChild(customBox);
+          const listCss = [
+            'border:1px solid #ccc', 'border-radius:4px', 'max-height:150px',
+            'overflow:auto', 'padding:4px 6px', 'margin-bottom:10px',
+          ].join(';');
+          const inputCss = [
+            'width:100%', 'box-sizing:border-box', 'font-size:13px', 'padding:6px 8px',
+            'border:1px solid #ccc', 'border-radius:4px', 'margin-bottom:4px',
+          ].join(';');
+          const mkLabel = (text) => {
+            const el = document.createElement('div');
+            el.textContent = text;
+            el.style.cssText = 'color:#333;margin-bottom:6px;font-weight:600';
+            return el;
+          };
+          const targetFilter = document.createElement('input');
+          targetFilter.type = 'text';
+          targetFilter.placeholder = 'Поиск статуса…';
+          targetFilter.style.cssText = inputCss;
+          const targetSelect = document.createElement('select');
+          targetSelect.className = 'bulk-approve-beta-custom-target';
+          targetSelect.size = 6;
+          targetSelect.style.cssText = 'width:100%;box-sizing:border-box;font-size:13px;margin-bottom:10px';
+          const sourceFilter = document.createElement('input');
+          sourceFilter.type = 'text';
+          sourceFilter.placeholder = 'Поиск статуса…';
+          sourceFilter.style.cssText = inputCss;
+          const sourceList = document.createElement('div');
+          sourceList.style.cssText = listCss;
+          const directoryNote = document.createElement('div');
+          directoryNote.style.cssText = 'color:#8a5a00;margin-bottom:8px;white-space:pre-wrap';
+          const captureBtn = document.createElement('button');
+          captureBtn.type = 'button';
+          captureBtn.className = 'bulk-approve-beta-custom-capture';
+          captureBtn.textContent = 'Подхватить список статусов';
+          captureBtn.style.cssText = [
+            'padding:6px 14px', 'border:1px solid #C2185B', 'border-radius:4px',
+            'background:#fff', 'color:#C2185B', 'font-size:13px', 'cursor:pointer', 'margin-bottom:10px',
+          ].join(';');
+
+          customBox.appendChild(mkLabel('Какой статус выставить:'));
+          customBox.appendChild(directoryNote);
+          customBox.appendChild(captureBtn);
+          customBox.appendChild(targetFilter);
+          customBox.appendChild(targetSelect);
+          customBox.appendChild(mkLabel('Из каких текущих статусов брать тикеты (остальные пропускаются):'));
+          customBox.appendChild(sourceFilter);
+          customBox.appendChild(sourceList);
+
+          const matchesFilter = (name, filter) =>
+            !filter.value.trim() || normStatusName(name).includes(normStatusName(filter.value));
+
+          renderCustom = () => {
+            const names = statusDirectoryNames();
+            directoryNote.textContent =
+              names.length === 0
+                ? 'Список статусов сайта ещё не подхвачен. Нажми кнопку — скрипт откроет окно Edit ' +
+                  'первого тикета на экране, запомнит список статусов и закроет окно, ничего не меняя.'
+                : '';
+            directoryNote.style.display = names.length === 0 ? 'block' : 'none';
+            captureBtn.style.display = names.length === 0 ? 'inline-block' : 'none';
+
+            targetSelect.innerHTML = '';
+            names
+              .filter((n) => matchesFilter(n, targetFilter) || n === custom.target)
+              .forEach((n) => {
+                const opt = document.createElement('option');
+                opt.value = n;
+                opt.textContent = n;
+                opt.selected = n === custom.target;
+                targetSelect.appendChild(opt);
+              });
+
+            // Исходные статусы: справочник, найденные у тикетов списка и уже
+            // отмеченные — без повторов
+            const seen = new Map();
+            const addName = (n) => {
+              if (n && !seen.has(normStatusName(n))) seen.set(normStatusName(n), n);
+            };
+            custom.sources.forEach(addName);
+            precheckStatuses().forEach(addName);
+            names.forEach(addName);
+            sourceList.innerHTML = '';
+            [...seen.values()]
+              .sort((a, b) => a.localeCompare(b))
+              .filter((n) => matchesFilter(n, sourceFilter) || custom.sources.includes(n))
+              .forEach((n) => {
+                const row = document.createElement('label');
+                row.style.cssText = 'display:flex;gap:6px;align-items:center;cursor:pointer;font-size:13px';
+                const box = document.createElement('input');
+                box.type = 'checkbox';
+                box.className = 'bulk-approve-beta-custom-source';
+                box.value = n;
+                box.checked = custom.sources.includes(n);
+                box.addEventListener('change', () => {
+                  custom.sources = box.checked
+                    ? [...custom.sources, n]
+                    : custom.sources.filter((x) => x !== n);
+                  choiceChanged();
+                });
+                const text = document.createElement('span');
+                text.textContent = n;
+                row.appendChild(box);
+                row.appendChild(text);
+                sourceList.appendChild(row);
+              });
+            if (sourceList.childElementCount === 0) {
+              sourceList.textContent = 'Пока нечего выбрать: вставь список или подхвати список статусов.';
+            }
+          };
+
+          targetFilter.addEventListener('input', () => renderCustom());
+          sourceFilter.addEventListener('input', () => renderCustom());
+          targetSelect.addEventListener('change', () => {
+            custom.target = targetSelect.value;
+            choiceChanged();
+          });
+          captureBtn.addEventListener('click', async () => {
+            if (captureBtn.disabled) return;
+            captureBtn.disabled = true;
+            captureBtn.textContent = 'Подхватываю…';
+            const ok = await captureStatusDirectory();
+            captureBtn.disabled = false;
+            captureBtn.textContent = 'Подхватить список статусов';
+            if (!ok) {
+              directoryNote.textContent =
+                'Не удалось подхватить список статусов. Выведи на экран хотя бы один тикет ' +
+                '(или открой любой тикет через Edit и закрой его) и попробуй снова.';
+              return;
+            }
+            renderCustom();
+            refresh();
+          });
+        }
 
         // Текст для Inside comment (режим Sent for processing, с 0.29): один
         // на все тикеты. Последний введённый запоминается в этом браузере.
         let commentInput = null;
-        if (workflow.appendComment) {
+        if (workflow.appendComment || workflow.commentOptional) {
           const commentLabel = document.createElement('div');
           commentLabel.textContent =
             'Текст, который допишется в Inside comment каждого тикета ' +
-            '(старый комментарий останется, новый текст пойдёт после « // »):';
+            '(старый комментарий останется, новый текст пойдёт после « // »)' +
+            (workflow.commentOptional ? ' — необязательно, пустое поле = комментарий не трогать:' : ':');
           commentLabel.style.cssText = 'color:#333;margin-bottom:6px;font-weight:600';
           body.appendChild(commentLabel);
           commentInput = document.createElement('input');
           commentInput.type = 'text';
           commentInput.className = 'bulk-approve-beta-comment-text';
           commentInput.value = readCommentDraft(workflow);
-          commentInput.placeholder = 'Например: Sent for processing to the agent';
+          commentInput.placeholder = workflow.commentOptional
+            ? 'Можно оставить пустым'
+            : 'Например: Sent for processing to the agent';
           commentInput.style.cssText = [
             'width:100%', 'box-sizing:border-box', 'font-size:14px', 'padding:8px',
             'border:1px solid #ccc', 'border-radius:4px', 'margin-bottom:12px',
@@ -5361,6 +5761,10 @@
 
         let parsed = null;
         let lastBlocked = true;
+        // Сам список разобран с ошибками — проверять на сайте нечего. Отдельно
+        // от lastBlocked: невыбранный статус («Статус по списку») запуск
+        // закрывает, а проверку списка — нет, по ней как раз и выбирают.
+        let lastListBlocked = true;
 
         // status: idle | running | done | failed | expired | unavailable
         const precheck = { key: null, gen: 0, status: 'idle', progress: '', result: null, detail: '' };
@@ -5401,11 +5805,22 @@
               'с истёкшей сессией сайт не сохранит ни одного тикета.'
             );
             color = '#B00020';
+          } else if (precheck.status === 'done' && !precheck.result) {
+            // «Статус по списку» без выбора: показываем, в каких статусах
+            // тикеты списка, — по этому и выбирают, из каких брать
+            const d = precheck.data;
+            const found = d.ids.filter((id) => d.rows.has(id));
+            lines.push(`Проверено на сайте: ${d.ids.length}, сайт нашёл: ${found.length}`);
+            lines.push('Статусы тикетов из списка:');
+            countByStatus(found.map((id) => ({ externalStatus: d.rows.get(id).externalStatus }))).forEach(
+              ([name, count]) => lines.push(`  • ${name}: ${count}`)
+            );
+            lines.push('Выбери выше статус и отметь, из каких статусов брать тикеты.');
           } else if (precheck.status === 'done') {
             const r = precheck.result;
             lines.push(`Проверено на сайте: ${r.checked}`);
             lines.push(
-              `  • к прогону (статус ${workflow.requiredExternalStatuses.join(' / ')}` +
+              `  • к прогону (статус ${(effectiveWorkflow() || workflow).requiredExternalStatuses.join(' / ')}` +
                 (workflow.requiredTicketType ? `, тип ${workflow.requiredTicketType}` : '') +
                 `): ${r.ready.length}`
             );
@@ -5529,7 +5944,8 @@
             } else if (workflow.fillTransactionIdFromList) {
               dupChecks = new Map();
             }
-            precheck.result = summarizePrecheck(workflow, ids, pairs, res.rows, dupChecks);
+            precheck.data = { ids, pairs, rows: res.rows, dupChecks };
+            recomputePrecheck();
             precheck.status = 'done';
             window.__bulkApprovePrecheck = precheck.result;
           } catch (e) {
@@ -5541,7 +5957,11 @@
           } finally {
             // refresh, а не только блок проверки: строка «Автопилот прогонит»
             // выше считается по итогу проверки
-            if (!cancelled()) refresh();
+            if (!cancelled()) {
+              // Статусы тикетов списка — в выбор «из каких брать»
+              renderCustom();
+              refresh();
+            }
           }
         };
 
@@ -5549,13 +5969,14 @@
         // и перезапускается, только если изменился набор пар.
         const updatePrecheck = (remainingIds) => {
           const wanted =
-            !lastBlocked && autoBox.checked && !autoBox.disabled && remainingIds.length > 0;
+            !lastListBlocked && autoBox.checked && !autoBox.disabled && remainingIds.length > 0;
           if (!wanted) {
             if (precheck.key !== null || precheck.status !== 'idle') {
               precheck.gen++;
               precheck.key = null;
               precheck.status = 'idle';
               precheck.result = null;
+              precheck.data = null;
             }
             renderPrecheck();
             return;
@@ -5568,6 +5989,7 @@
           precheck.key = key;
           precheck.gen++;
           precheck.result = null;
+          precheck.data = null;
           precheck.detail = '';
           if (!siteQueryAvailable()) {
             precheck.status = 'unavailable';
@@ -5586,7 +6008,7 @@
         const savedFingerprintOf = (p) =>
           saved
             ? listFingerprint(parseListForWorkflow(workflow, saved.text).pairs) ===
-              listFingerprint(p)
+                listFingerprint(p) && (saved.customKey || '') === customKey()
             : false;
 
         const refresh = () => {
@@ -5635,7 +6057,7 @@
             // После проверки на сайте — сколько реально пойдёт в пачки
             const checked =
               precheck.status === 'done' && precheck.key === precheckKeyFor(remainingIds);
-            const toRun = checked ? precheck.result.ready.length : remainingCount;
+            const toRun = checked && precheck.result ? precheck.result.ready.length : remainingCount;
             const chunkCount = Math.ceil(toRun / CONFIG.autopilotChunkSize);
             lines.push(
               toRun === 0
@@ -5676,27 +6098,40 @@
             });
           }
 
-          const commentMissing = !!commentInput && commentText() === '';
+          const commentMissing =
+            !!commentInput && !workflow.commentOptional && commentText() === '';
           if (commentMissing) {
             lines.push('');
             lines.push('Впиши текст для Inside comment — без него запуск закрыт.');
           }
+          const choiceProblem = customChoiceProblem();
+          if (choiceProblem) {
+            lines.push('');
+            lines.push(choiceProblem);
+          }
 
           const blocked =
             commentMissing ||
+            !!choiceProblem ||
             parsed.pairs.size === 0 ||
             parsed.badLines.length > 0 ||
             parsed.duplicateTickets.length > 0 ||
             parsed.duplicateTransactions.length > 0;
 
           status.textContent = lines.join('\n');
-          status.style.color = blocked && (parsed.pairs.size > 0 || commentMissing) ? '#B00020' : '#555';
+          status.style.color =
+            blocked && (parsed.pairs.size > 0 || commentMissing || !!choiceProblem) ? '#B00020' : '#555';
           lastBlocked = blocked;
+          lastListBlocked =
+            parsed.pairs.size === 0 ||
+            parsed.badLines.length > 0 ||
+            parsed.duplicateTickets.length > 0 ||
+            parsed.duplicateTransactions.length > 0;
           updatePrecheck(remainingIds);
           updateRunButton();
 
           // По экрану запускать нечего, если экран пуст (или не задан текст комментария)
-          const screenOff = rowsOnScreen === 0 || commentMissing;
+          const screenOff = rowsOnScreen === 0 || commentMissing || !!choiceProblem;
           screenBtn.disabled = screenOff;
           screenBtn.style.opacity = screenOff ? '0.5' : '1';
           screenBtn.style.cursor = screenOff ? 'default' : 'pointer';
@@ -5706,9 +6141,58 @@
         const commentText = () =>
           commentInput ? commentInput.value.replace(/\s+/g, ' ').trim() : '';
 
+        // Рабочий режим с учётом выбора в окне; null — выбор ещё не сделан
+        function effectiveWorkflow() {
+          if (!custom) return workflow;
+          if (customChoiceProblem()) return null;
+          return buildCustomWorkflow(workflow, { ...custom, comment: commentText() });
+        }
+        function customChoiceProblem() {
+          if (!custom) return null;
+          if (!custom.target) return 'Выбери статус, который выставить.';
+          if (statusIdsByName(custom.target).length === 0) {
+            return `Статуса "${custom.target}" нет в списке статусов сайта — выбери другой.`;
+          }
+          if (custom.sources.length === 0) return 'Отметь хотя бы один статус, из которого брать тикеты.';
+          if (custom.sources.some((src) => normalizeExternalStatus(src) === normalizeExternalStatus(custom.target))) {
+            return 'Статус, который выставить, не может быть среди статусов, из которых брать.';
+          }
+          return null;
+        }
+        function customKey() {
+          return custom ? `${custom.target}|${custom.sources.slice().sort().join('|')}` : '';
+        }
+        // Статусы тикетов, которые нашла проверка списка
+        function precheckStatuses() {
+          const d = precheck.data;
+          if (!d) return [];
+          return [...new Set(d.ids.filter((id) => d.rows.has(id)).map((id) => d.rows.get(id).externalStatus))];
+        }
+        function recomputePrecheck() {
+          const d = precheck.data;
+          const wf = effectiveWorkflow();
+          precheck.result = d && wf ? summarizePrecheck(wf, d.ids, d.pairs, d.rows, d.dupChecks) : null;
+          window.__bulkApprovePrecheck = precheck.result;
+        }
+        function choiceChanged() {
+          writeCustomChoice(workflow, custom);
+          recomputePrecheck();
+          renderCustom();
+          renderPlan();
+          renderPrecheck();
+          refresh();
+        }
+
         area.addEventListener('input', refresh);
         autoBox.addEventListener('change', refresh);
-        if (commentInput) commentInput.addEventListener('input', refresh);
+        if (commentInput) {
+          commentInput.addEventListener('input', () => {
+            renderPlan();
+            refresh();
+          });
+        }
+        renderCustom();
+        renderPlan();
         refresh();
 
         resetBtn.addEventListener('click', () => {
@@ -5720,7 +6204,11 @@
         screenBtn.addEventListener('click', () => {
           if (screenBtn.disabled) return;
           if (commentInput) writeCommentDraft(workflow, commentText());
-          finish({ pairs: null, state: null, autopilot: false, overwriteTx: false, commentText: commentText() });
+          finish({
+            pairs: null, state: null, autopilot: false, overwriteTx: false,
+            commentText: commentText(),
+            custom: custom ? { target: custom.target, sources: custom.sources.slice() } : null,
+          });
         });
         runBtn.addEventListener('click', () => {
           if (runBtn.disabled) return;
@@ -5737,11 +6225,13 @@
             results: keep ? { ...saved.results } : {},
             notShown: keep ? saved.notShown.slice() : [],
             runs: keep ? saved.runs : 0,
+            customKey: customKey(),
           };
           writeListStorage(storageKey, state);
           if (commentInput) writeCommentDraft(workflow, commentText());
           finish({
             commentText: commentText(),
+            custom: custom ? { target: custom.target, sources: custom.sources.slice() } : null,
             pairs: parsed.pairs,
             state,
             autopilot: autoBox.checked && !autoBox.disabled,

@@ -880,9 +880,10 @@ const scenarios = {
     check('одна кнопка меню, меню закрыто', menuBtn && menu && menu.style.display === 'none' &&
       menuBtn.textContent === 'Bulk Approve BETA ▴');
     const items = [...menu.querySelectorAll('button')].map((b) => b.id);
-    check('в меню все 6 действий с прежними id', items.join(',') ===
+    check('в меню все 7 действий с прежними id', items.join(',') ===
       ['bulk-approve-beta-btn', 'bulk-approve-beta-btn-239', 'bulk-approve-beta-btn-225-list',
-        'bulk-approve-beta-btn-sfp', 'bulk-approve-beta-btn-agent-files', 'bulk-approve-beta-btn-ticket-state'].join(','),
+        'bulk-approve-beta-btn-sfp', 'bulk-approve-beta-btn-status-list',
+        'bulk-approve-beta-btn-agent-files', 'bulk-approve-beta-btn-ticket-state'].join(','),
       items.join(','));
     menuBtn.click();
     check('клик открывает меню', menu.style.display === 'flex' && menuBtn.textContent === 'Bulk Approve BETA ▾');
@@ -996,6 +997,72 @@ const scenarios = {
       pageB.site.saves.length === 3, rB.text.slice(0, 600));
     check('правда не сохранился: окно открывали дважды на тикет (2 попытки) плюс основной проход',
       pageB.site.modalOpens.filter((id) => id === b.ids[0]).length === 3, JSON.stringify(pageB.site.modalOpens));
+  },
+
+  async 31() {
+    console.log('\n[31] Статус по списку: статус из справочника сайта, только из отмеченных статусов, комментарий по желанию (0.33)');
+    if (!IS_BETA) return console.log('  — только бета');
+    const BTN = 'BETA Статус по списку';
+    const TARGET = '238 Revision needed (M)'; // id 218
+    const { tickets, ids } = makeTickets(5);
+    tickets[ids[0]].insideComment = 'старый';
+    tickets[ids[3]].externalStatus = '209 Sent for processing (M)'; // не из отмеченных
+    // У ids[4] окно Edit не предлагает выбранный статус (другой тип тикета)
+    const behaviour = {
+      listApi: true, statusDirectory: true,
+      optionsFor: (id) => (id === ids[4] ? ['225 Approved by agent', 'Approved (M)'] : undefined) || [
+        '225 Approved by agent', '239 Response to user (M)', '238 Revision needed (M)',
+        '55 Sent for processing', '209 Sent for processing (M)', 'Approved (M)',
+      ],
+    };
+    const page = createPage({ tickets, onScreen: ['19999999', ids[0]], behaviour });
+    const listText = ids.join('\n');
+
+    // Без выбора статуса запуск закрыт; справочник подхватывается кнопкой
+    const w0 = await page.run({ button: BTN, listText, onlyWindow: true, custom: { capture: true } });
+    check('без выбора статуса запуск закрыт', w0.startDisabled && w0.screenDisabled && /Выбери статус, который выставить/.test(w0.windowText), w0.windowText);
+    check('справочник подхвачен через окно Edit и запомнен',
+      page.site.directoryRequests >= 1 && !page.d.querySelector('.modal_wrap') &&
+      /238 Revision needed/.test(page.w.localStorage.getItem('th-bulk-approve:status-directory:v1-beta') || ''));
+    check('подхват ничего не сохранил', page.site.saves.length === 0);
+    check('проверка списка без выбора показывает статусы тикетов', /Статусы тикетов из списка:/.test(w0.precheckText) &&
+      /Approved \(M\): 4/.test(w0.precheckText), w0.precheckText);
+
+    const r = await page.run({ button: BTN, listText, comment: 'Revision', custom: { target: TARGET, sources: ['Approved (M)'] } });
+    check('проверка списка: к прогону 4, другой статус 1',
+      /к прогону \(статус Approved \(M\)\): 4/.test(r.precheckText) && /другой статус — пропущу, не открывая: 1/.test(r.precheckText), r.precheckText);
+    const saves = page.site.saves;
+    const saveOf = (id) => saves.find((x) => x.requestId === id);
+    check('сохранено 3 тикета, все со статусом id 218', saves.length === 3 && saves.every((x) => String(x.externalStatusId) === '218'),
+      JSON.stringify(saves));
+    check('комментарий дописан через « // » и в пустой — просто текст',
+      saveOf(ids[0]).commentSupport === 'старый // Revision' && saveOf(ids[1]).commentSupport === 'Revision', JSON.stringify(saves));
+    check('чужой статус даже не открывался', !page.site.modalOpens.includes(ids[3]), JSON.stringify(page.site.modalOpens));
+    check('статуса нет в окне — пропуск, а не сбой; прогон не остановлен',
+      !saveOf(ids[4]) && /нет выбранного статуса/.test(r.text) && !/ПРОГОН ОСТАНОВЛЕН/.test(r.text) && /Успешно: 3/.test(r.text), r.text.slice(0, 900));
+    const mem = JSON.parse(page.w.localStorage.getItem('th-bulk-approve:status-list:v1-beta') || 'null');
+    check('своя память, с выбором статусов', mem && mem.done.length === 3 && mem.customKey === `${TARGET}|Approved (M)`,
+      JSON.stringify(mem && { done: mem.done, customKey: mem.customKey }));
+
+    // Без комментария: Inside comment не трогается; защита сохранения
+    // не пускает чужой статус
+    const b = makeTickets(2, 22800000);
+    b.tickets[b.ids[0]].insideComment = 'не трогать';
+    const pageB = createPage({ tickets: b.tickets, onScreen: ['19999999', ...b.ids], behaviour: { statusDirectory: true } });
+    const rb = await pageB.run({ button: BTN, byScreen: true, comment: '', custom: { capture: true, target: TARGET, sources: ['Approved (M)'] } });
+    check('без комментария: Inside comment не изменён',
+      pageB.site.saves.length === 2 && pageB.site.saves[0].commentSupport === 'не трогать' && pageB.site.saves[1].commentSupport === '',
+      JSON.stringify(pageB.site.saves));
+    check('без комментария: в отчёте нет строк про комментарий', !/Inside comment/.test(rb.text), rb.text);
+
+    const g = makeTickets(1, 22900000);
+    const pageG = createPage({
+      tickets: g.tickets, onScreen: ['19999999', ...g.ids],
+      behaviour: { statusDirectory: true, saveTamper: (id, f) => { f.externalStatusId = '388'; } },
+    });
+    const rg = await pageG.run({ button: BTN, byScreen: true, custom: { capture: true, target: TARGET, sources: ['Approved (M)'] } });
+    check('чужой статус в запросе: защита не пустила', /ЗАЩИТА СОХРАНЕНИЯ: тикет 22900001: уходил статус с id 388, а нужен id 218/.test(rg.text) &&
+      pageG.site.saves.length === 0, rg.text.slice(0, 400));
   },
 };
 
