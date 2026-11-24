@@ -74,12 +74,12 @@ const COLUMNS = [
 
 const STATUS_OPTIONS = [
   '225 Approved by agent', '239 Response to user (M)', '238 Revision needed (M)',
-  '55 Sent for processing', '209 Sent for processing (M)',
+  '55 Sent for processing', '209 Sent for processing (M)', 'Approved (M)',
 ];
 // id статусов в запросе сохранения — как в GetRequestStatusesExternal сайта
 const STATUS_IDS = {
   '225 Approved by agent': 212, '239 Response to user (M)': 219, '238 Revision needed (M)': 218,
-  '55 Sent for processing': 317, '209 Sent for processing (M)': 204,
+  '55 Sent for processing': 317, '209 Sent for processing (M)': 204, 'Approved (M)': 300,
 };
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -108,6 +108,10 @@ function processingDate(hoursAgo) {
 //       documentsExternal (колонки Agent's files) вовсе
 //     hideTxInTable: true — колонка Transaction ID в таблице пустая, даже
 //       если номер в тикете есть (таблица не успела перечитаться)
+//     statusDirectory: true — окно Edit при открытии шлёт
+//       GetRequestStatusesExternal и получает справочник статусов
+//     optionsFor(id): какие статусы окно Edit предлагает этому тикету
+//       (по умолчанию — все STATUS_OPTIONS)
 //     modalFillDelay: мс — окно Edit заполняет поле Transaction ID уже
 //       сохранённого номера не сразу, а с задержкой (медленный сайт)
 function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, behaviour = {}, configOverrides, also = [] } = {}) {
@@ -353,6 +357,23 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
 
     let chosen = null;
     const txInput = wrap.querySelector('.tx-id');
+    // Справочник статусов — как у сайта: окно при открытии запрашивает его
+    if (site.behaviour.statusDirectory) {
+      const x = new w.XMLHttpRequest();
+      x.open('POST', '/admin/backoffice/GetRequestStatusesExternal');
+      x.__duration = 15;
+      x.__onServer = (req) => {
+        site.directoryRequests = (site.directoryRequests || 0) + 1;
+        req.responseText = JSON.stringify({
+          data: STATUS_OPTIONS.map((name) => ({
+            id: STATUS_IDS[name], name, requestTypeId: 4,
+            externalJson: { payments: 1, id_answer: null, withdrawal: 1 }, answers: [1333, 1334],
+          })),
+          success: true,
+        });
+      };
+      x.send(JSON.stringify({}));
+    }
     // Медленный сайт: номер, который уже есть в тикете, окно показывает не
     // сразу. Скрипт за это время в поле не пишет — заполняем, только если
     // поле так и осталось пустым.
@@ -383,7 +404,8 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
     const renderOptions = () => {
       const q = msInput.value.trim().toLowerCase();
       content.innerHTML = '';
-      STATUS_OPTIONS.filter((o) => !q || o.toLowerCase().includes(q)).forEach((o) => {
+      const offered = site.behaviour.optionsFor ? site.behaviour.optionsFor(id) : STATUS_OPTIONS;
+      offered.filter((o) => !q || o.toLowerCase().includes(q)).forEach((o) => {
         const opt = d.createElement('span');
         opt.className = 'multiselect__option';
         opt.textContent = o;
@@ -482,7 +504,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
 
   // Один прогон, как его делает оператор: кнопка → окно списка → запуск →
   // отчёт. Возвращает текст отчёта, блоки для копирования и память после.
-  async function run({ button, listText, autopilot = true, byScreen = false, closeReport = true, onlyWindow = false, overwrite = false, comment }) {
+  async function run({ button, listText, autopilot = true, byScreen = false, closeReport = true, onlyWindow = false, overwrite = false, comment, custom }) {
     const btn = [...d.querySelectorAll('button')].find((b) => b.textContent === button);
     if (!btn) throw new Error('нет кнопки ' + button);
     btn.click();
@@ -496,6 +518,27 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
     if (commentBox && comment !== undefined) {
       commentBox.value = comment;
       commentBox.dispatchEvent(new w.Event('input', { bubbles: true }));
+    }
+    // «Статус по списку»: подхватить справочник, выбрать статус и исходные
+    if (custom) {
+      if (custom.capture) {
+        overlay.querySelector(`.${prefix}-custom-capture`).click();
+        await until(() => overlay.querySelector(`.${prefix}-custom-target option`), 5000)
+          .catch(() => { throw new Error('справочник статусов не подхватился: ' + overlay.textContent); });
+      }
+      if (custom.target !== undefined) {
+        const sel = overlay.querySelector(`.${prefix}-custom-target`);
+        sel.value = custom.target;
+        sel.dispatchEvent(new w.Event('change', { bubbles: true }));
+      }
+      for (const src of custom.sources || []) {
+        const box = await until(() => [...overlay.querySelectorAll(`.${prefix}-custom-source`)].find((b) => b.value === src), 5000)
+          .catch(() => { throw new Error('нет статуса ' + src + ' среди исходных: ' + overlay.textContent); });
+        if (!box.checked) {
+          box.checked = true;
+          box.dispatchEvent(new w.Event('change', { bubbles: true }));
+        }
+      }
     }
     const auto = overlay.querySelector(`.${prefix}-autopilot`);
     if (auto && auto.checked !== autopilot) {
