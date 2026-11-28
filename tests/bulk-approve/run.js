@@ -1123,6 +1123,43 @@ const scenarios = {
     check('SMP с чужим id в запросе: защита не пустила',
       /уходил статус с id 219, а нужен id 331/.test(textG) && pageG.site.saves.length === 0, textG.slice(0, 400));
   },
+
+  async 33() {
+    console.log('\n[33] Bulk Response: Amount = 0 → сумма из Transaction Amount и у SMP, и у BT M; поле «Amount by/on receipt» (0.35)');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids } = makeTickets(4);
+    const set = (id, externalStatus, extra) => Object.assign(tickets[id], { externalStatus, txStatus: 'rejected', txId: '7' + id }, extra);
+    set(ids[0], '203 Sent (M)', { amount: '0', txAmount: '1500' });           // BT M, Amount = 0
+    set(ids[1], '52 Sent', { amount: '0', txAmount: '250.5' });               // SMP, Amount = 0, поле «Amount on receipt»
+    set(ids[2], 'Limit reached on the recipient side', { amount: '300' });  // SMP, сумма есть — не трогать
+    set(ids[3], '53 The money has not been sent, cancel it', { amount: '0', txAmount: '0' }); // брать нечего
+    const SMP_OPTIONS = ['70 Response to user', '84 Response to user (limit)'];
+    const page = createPage({
+      tickets, onScreen: ['19999999', ...ids],
+      behaviour: {
+        optionsFor: (id) => (id === ids[0] ? ['239 Response to user (M)'] : SMP_OPTIONS),
+        amountLabelFor: (id) => (id === ids[1] ? 'Amount on receipt' : undefined),
+      },
+    });
+    [...page.d.querySelectorAll('button')].find((b) => b.textContent === 'BETA Bulk Response (239)').click();
+    const end = Date.now() + 30000;
+    let report;
+    while (!(report = page.d.querySelector(`.${page.prefix}-report-overlay`)) && Date.now() < end) {
+      await new Promise((res) => setTimeout(res, 20));
+    }
+    const text = report ? report.querySelector(`.${page.prefix}-report-text`).textContent : '';
+    const saveOf = (id) => page.site.saves.find((x) => x.requestId === id);
+    check('BT M с Amount = 0: сумма из Transaction Amount, статус 219',
+      saveOf(ids[0]) && Number(saveOf(ids[0]).amount) === 1500 && String(saveOf(ids[0]).externalStatusId) === '219',
+      JSON.stringify(page.site.saves));
+    check('SMP с Amount = 0: сумма вписана в «Amount on receipt», статус 331',
+      saveOf(ids[1]) && Number(saveOf(ids[1]).amount) === 250.5 && String(saveOf(ids[1]).externalStatusId) === '331',
+      JSON.stringify(page.site.saves));
+    check('SMP с суммой: поле не трогали', saveOf(ids[2]) && saveOf(ids[2]).amount === '', JSON.stringify(saveOf(ids[2])));
+    check('брать нечего: тикет не открывали', !page.site.modalOpens.includes(ids[3]), JSON.stringify(page.site.modalOpens));
+    check('отчёт: подставлено 2, сохранение суммы проверено', /из них с подставленной суммой: 2/.test(text) &&
+      !/НЕ сохранилась/.test(text) && /Успешно: 3/.test(text), text.slice(0, 900));
+  },
 };
 
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map((x) => x.trim())) : null;

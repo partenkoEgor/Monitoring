@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.34
+// @version      0.35
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -2325,16 +2325,24 @@
     }
   }
 
+  // label — название поля или несколько вариантов названия (с 0.35)
   function findFieldGroup(modal, label) {
+    const labels = [].concat(label).map((l) => l.toLowerCase());
     const groups = modal.querySelectorAll('.form-add .input-group');
     for (const g of groups) {
       const titleEl = g.querySelector(':scope > span.title, :scope > [class*="title"]');
-      if (titleEl && titleEl.textContent.trim().toLowerCase().startsWith(label.toLowerCase())) {
+      const title = titleEl ? titleEl.textContent.trim().toLowerCase() : '';
+      if (title && labels.some((l) => title.startsWith(l))) {
         return g;
       }
     }
     return null;
   }
+
+  // Поле суммы по чеку в окне Edit. У BT M оно подписано «Amount by
+  // receipt»; сайт в тексте ошибки называет его «Amount on receipt» — на
+  // случай такой подписи (например, у тикетов SMP, с 0.35) понимаем обе.
+  const AMOUNT_RECEIPT_LABELS = ['Amount by receipt', 'Amount on receipt'];
 
   // Пытается аккуратно закрыть открытую модалку кнопкой Cancel (используется при остановке)
   function tryCancelModal() {
@@ -2482,7 +2490,7 @@
         group = await waitFor(() => findFieldGroup(modal, fieldLabel));
       } catch (e) {
         if (e instanceof StopSignal) throw e;
-        return { verdict: 'unverified', note: `в окне проверки нет поля ${fieldLabel}` };
+        return { verdict: 'unverified', note: `в окне проверки нет поля ${[].concat(fieldLabel).join(' / ')}` };
       }
 
       const readStored = () => {
@@ -2527,7 +2535,7 @@
     return verifyFieldSaved({
       ticketId,
       workflow,
-      fieldLabel: 'Amount by receipt',
+      fieldLabel: AMOUNT_RECEIPT_LABELS,
       expected: expectedAmount,
       readFromRow: (row) => {
         const amount = getAmountFromRow(row);
@@ -3136,7 +3144,7 @@
     if (amountToFill) {
       let amountGroup;
       try {
-        amountGroup = await waitFor(() => findFieldGroup(modal, 'Amount by receipt'));
+        amountGroup = await waitFor(() => findFieldGroup(modal, AMOUNT_RECEIPT_LABELS));
       } catch (e) {
         if (e instanceof StopSignal) throw e;
         console.warn(
