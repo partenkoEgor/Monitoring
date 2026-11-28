@@ -1064,6 +1064,65 @@ const scenarios = {
     check('чужой статус в запросе: защита не пустила', /ЗАЩИТА СОХРАНЕНИЯ: тикет 22900001: уходил статус с id 388, а нужен id 218/.test(rg.text) &&
       pageG.site.saves.length === 0, rg.text.slice(0, 400));
   },
+
+  async 32() {
+    console.log('\n[32] Bulk Response для SMP: те же статусы без «(M)» → «70 Response to user» (id 331), BT M → 239 (id 219) (0.34)');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids } = makeTickets(6);
+    const set = (id, externalStatus, txStatus) => Object.assign(tickets[id], { externalStatus, txStatus, txId: '7' + id });
+    set(ids[0], '203 Sent (M)', 'rejected');                               // BT M → 219
+    set(ids[1], '52 Sent', 'rejected');                                    // SMP → 331
+    set(ids[2], 'Limit reached on the recipient side', 'rejected');        // SMP, в таблице без кода → 331
+    set(ids[3], '53 The money has not been sent, cancel it', 'OK');        // транзакция не отклонена
+    set(ids[4], "46 Recipient's details are not correct", 'rejected');     // SMP, но в окне только цель BT M
+    set(ids[5], '84 Response to user (limit)', 'rejected');                // не исходный статус
+    const SMP_OPTIONS = ['70 Response to user', '84 Response to user (limit)', '81 Revision needed'];
+    const behaviour = {
+      optionsFor: (id) => {
+        if (id === ids[0]) return ['239 Response to user (M)', '238 Revision needed (M)'];
+        if (id === ids[4]) return ['239 Response to user (M)', '84 Response to user (limit)'];
+        return SMP_OPTIONS;
+      },
+    };
+    const page = createPage({ tickets, onScreen: ['19999999', ...ids], behaviour });
+    [...page.d.querySelectorAll('button')].find((b) => b.textContent === 'BETA Bulk Response (239)').click();
+    const end = Date.now() + 30000;
+    let report;
+    while (!(report = page.d.querySelector(`.${page.prefix}-report-overlay`)) && Date.now() < end) {
+      await new Promise((res) => setTimeout(res, 20));
+    }
+    const text = report ? report.querySelector(`.${page.prefix}-report-text`).textContent : '';
+    const saveOf = (id) => page.site.saves.find((x) => x.requestId === id);
+    check('BT M: «239 Response to user (M)», id 219', saveOf(ids[0]) && String(saveOf(ids[0]).externalStatusId) === '219',
+      JSON.stringify(page.site.saves));
+    check('SMP: «70 Response to user», id 331 — и по статусу с кодом, и без',
+      saveOf(ids[1]) && String(saveOf(ids[1]).externalStatusId) === '331' &&
+      saveOf(ids[2]) && String(saveOf(ids[2]).externalStatusId) === '331', JSON.stringify(page.site.saves));
+    check('«84 Response to user (limit)» не выбран вместо 70',
+      page.site.applied.every((a) => a.status !== '84 Response to user (limit)'), JSON.stringify(page.site.applied));
+    check('SMP с неотклонённой транзакцией и не исходный статус — не открывались',
+      !page.site.modalOpens.includes(ids[3]) && !page.site.modalOpens.includes(ids[5]), JSON.stringify(page.site.modalOpens));
+    check('SMP-тикету не поставлен статус BT M: пропуск с причиной, прогон не остановлен',
+      !saveOf(ids[4]) && /нет «Response to user» для типа этого тикета/.test(text) && !/ПРОГОН ОСТАНОВЛЕН/.test(text) &&
+      /Успешно: 3/.test(text), text.slice(0, 1200));
+
+    // Подмена статуса в запросе: SMP-тикет уходил бы с id 219 — защита не пускает
+    const g = makeTickets(1, 22900000);
+    Object.assign(g.tickets[g.ids[0]], { externalStatus: '52 Sent', txStatus: 'rejected', txId: '7' });
+    const pageG = createPage({
+      tickets: g.tickets, onScreen: ['19999999', ...g.ids],
+      behaviour: { optionsFor: () => SMP_OPTIONS, saveTamper: (id, f) => { f.externalStatusId = '219'; } },
+    });
+    [...pageG.d.querySelectorAll('button')].find((b) => b.textContent === 'BETA Bulk Response (239)').click();
+    const endG = Date.now() + 30000;
+    let repG;
+    while (!(repG = pageG.d.querySelector(`.${pageG.prefix}-report-overlay`)) && Date.now() < endG) {
+      await new Promise((res) => setTimeout(res, 20));
+    }
+    const textG = repG ? repG.querySelector(`.${pageG.prefix}-report-text`).textContent : '';
+    check('SMP с чужим id в запросе: защита не пустила',
+      /уходил статус с id 219, а нужен id 331/.test(textG) && pageG.site.saves.length === 0, textG.slice(0, 400));
+  },
 };
 
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map((x) => x.trim())) : null;

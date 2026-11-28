@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.33
+// @version      0.34
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -220,6 +220,16 @@
         '199 Request statement for payout (M)',
         '203 Sent (M)',
         '238 Revision needed (M)',
+        // Те же по смыслу статусы у тикетов SMP (с 0.34): названия те же, но
+        // без «(M)» и со своими кодами; «Sent» и «Revision needed» у SMP —
+        // 52 и 81 вместо 203 и 238
+        '43 Limit reached on the recipient side',
+        "46 Recipient's details are not correct",
+        '50 Request statement for payout',
+        '52 Sent',
+        '53 The money has not been sent, cancel it',
+        '38 Adjust the payout amount',
+        '81 Revision needed',
       ],
       // Обязательное условие: транзакция должна быть отклонена. Один External
       // Status этого не гарантирует — например «203 Sent (M)» стоит и у
@@ -227,12 +237,21 @@
       // Если колонки Transaction Status на экране нет, прогон не начнётся:
       // проверить условие нечем, а обрабатывать «на авось» тут слишком дорого.
       requiredTransactionStatus: 'rejected',
-      searchTerm: '239',
-      statusMatch: (text) => {
-        const t = text.trim().toLowerCase();
-        return t.includes('239') && t.includes('response to user');
-      },
-      targetStatusLabel: '239 Response to user (M)',
+      // Ищем по общей части названия: у BT M и у SMP «Response to user» свой
+      searchTerm: 'Response to user',
+      // Цели (с 0.34): тикету BT M — «239 Response to user (M)», тикету SMP —
+      // «70 Response to user». Совпадение точное: «… Response to user
+      // (limit)» и подобные не подходят. Какую из двух брать, решает
+      // «семейство» тикета: статус с «(M)» → цель с «(M)», без — без.
+      targetStatuses: [
+        { name: '239 Response to user (M)', id: 219 },
+        { name: '70 Response to user', id: 331 },
+      ],
+      statusMatch: (text) =>
+        ['239 Response to user (M)', '70 Response to user'].some(
+          (name) => normStatusName(name) === normStatusName(text)
+        ),
+      targetStatusLabel: '239 Response to user (M) / 70 Response to user (SMP)',
       // «239 Response to user (M)» = id 219 в списке статусов сайта
       saveStatusId: 219,
       // У части тикетов 239 в колонке Amount стоит 0. Раньше их просто
@@ -343,6 +362,8 @@
     // в режиме по списку такой тикет попадает в список «посмотреть глазами».
     'wrong-external-status': 'External Status тикета не подходит для этого режима — не трогали',
     'not-in-list': 'тикета нет в поданном списке — не трогали',
+    'target-family-mismatch':
+      'в окне Edit нет «Response to user» для типа этого тикета (BT M — «239 … (M)», SMP — «70 …») — ничего не меняли',
     'status-not-offered':
       'в окне Edit у этого тикета нет выбранного статуса (видимо, другой тип тикета) — ничего не меняли',
     'wrong-ticket-type': 'тип тикета (колонка Ticket type) не подходит для этого режима — не трогали',
@@ -627,13 +648,17 @@
   // ------------------------------------------------------------------
   let saveGuard = null; // { ticketId, statusId, expectedTx, expectedComment, seen, response, blocked }
 
-  function armSaveGuard(ticketId, workflow, expectedTx, expectedComment) {
+  function armSaveGuard(ticketId, workflow, expectedTx, expectedComment, statusIdOverride) {
     saveGuard = {
       ticketId: String(ticketId),
       statusId: String(workflow.saveStatusId),
       // У одного статуса в справочнике бывает несколько id — по одному на
       // тип тикета (режим «Статус по списку», с 0.33). Подходит любой из них.
-      statusIds: (workflow.saveStatusIds || [workflow.saveStatusId]).map((id) => String(id)),
+      // У Bulk Response для BT M и SMP (с 0.34) id выбран по тикету — только он
+      statusIds: (statusIdOverride != null
+        ? [statusIdOverride]
+        : workflow.saveStatusIds || [workflow.saveStatusId]
+      ).map((id) => String(id)),
       expectedTx: expectedTx == null || expectedTx === '' ? null : String(expectedTx),
       // Режим Sent for processing: Inside comment, который должен уйти (с 0.29)
       expectedComment: expectedComment == null ? null : String(expectedComment),
@@ -840,6 +865,11 @@
     } catch (e) {
       /* хранилище недоступно — справочник проживёт до перезагрузки страницы */
     }
+  }
+
+  // Статус из «семейства» BT M — с «(M)» в конце названия
+  function isMStatus(value) {
+    return /\(m\)\s*$/i.test(String(value == null ? '' : value).trim());
   }
 
   function normStatusName(value) {
@@ -3348,7 +3378,32 @@
 
     checkStop();
 
-    const targetOption = optionsList[0];
+    // Две цели (Bulk Response для BT M и SMP, с 0.34): берём ту, что одного
+    // «семейства» с текущим статусом тикета — с «(M)» или без. Нет такой в
+    // окне — ничего не трогаем: ставить SMP-тикету статус BT M (или наоборот)
+    // нельзя, а защита сохранения такое и не пропустила бы.
+    let targetOption = optionsList[0];
+    let targetStatusId = null;
+    if (workflow.targetStatuses) {
+      const familyM = isMStatus(externalStatus);
+      targetOption = optionsList.find((o) => isMStatus(o.textContent) === familyM) || null;
+      const target = targetOption
+        ? workflow.targetStatuses.find((t) => normStatusName(t.name) === normStatusName(targetOption.textContent))
+        : null;
+      if (!target) {
+        console.warn(
+          `[BulkApproveBETA/${workflow.id}] Тикет ${ticketId}: в окне нет «Response to user» для ` +
+          `${familyM ? 'BT M (с «(M)»)' : 'SMP (без «(M)»)'} — ничего не меняю.`
+        );
+        return failTicket(ticketId, workflow, {
+          ticketId,
+          status: 'skipped',
+          reason: 'target-family-mismatch',
+          externalStatus,
+        });
+      }
+      targetStatusId = target.id;
+    }
 
     fireClick(targetOption);
     await interruptibleSleep(CONFIG.stepDelay);
@@ -3392,7 +3447,9 @@
       workflow.fillTransactionIdFromList && currentListPairs
         ? currentListPairs.get(String(ticketId))
         : null;
-    const guard = armSaveGuard(ticketId, workflow, expectedTx, commentWritten ? commentWritten.after : null);
+    const guard = armSaveGuard(
+      ticketId, workflow, expectedTx, commentWritten ? commentWritten.after : null, targetStatusId
+    );
     try {
       setProgress({ action: 'жму Apply' });
       fireClick(applyBtn);
