@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TH Management — Bulk Approve Tickets (BETA)
 // @namespace    th-management-bulk-approve-beta
-// @version      0.35
+// @version      0.36
 // @description  Открывает каждый видимый тикет и переводит его в целевой статус, нажав Apply: "Bulk Approve (225)" — для тикетов с External Status "Approved (M)" выставляет "225 Approved by agent" (перед прогоном можно вставить список Ticket ID, и тогда скрипт сам подставляет их в фильтр страницы пачками по 100, либо нажать «Запустить по экрану» и работать с тем, что уже выведено); "Bulk Response (239)" — для тикетов, у которых транзакция в статусе rejected, а External Status — один из семи (The money has not been sent, cancel it (M); Adjust the payout amount (M); 185; 191; 199; 203; 238), выставляет "239 Response to user (M)" (если в списке Amount = 0, сумма берётся из колонки Transaction Amount и вписывается числом в поле Amount by receipt, после чего скрипт проверяет, что она действительно сохранилась; если взять нечего или сумма не сохранилась — тикет выносится в отдельный список). Колонки ищутся по названию в шапке таблицы (с резервным номером на случай, если названия не найдены). Ловит swal2-окна (кроме "OK!") и выводит список тикет-Transaction ID в финальном alert для ручной проверки на дубликаты. В конце показывает итоговое окно, из которого можно скопировать таблицу «Ticket ID / Transaction ID / Amount» для учёта. В сводке видно, сколько обработанных тикетов были свежими, а сколько зависшими (по колонке Processing Date). Третий режим — «по списку (225)»: оператор приносит список «Ticket ID → Transaction ID», скрипт вписывает номер транзакции в тикеты, у которых он пуст, и закрывает их как 225; с включённым автопилотом он сам подставляет тикеты из списка в фильтр страницы пачками по 100 и нажимает Apply, пока список не кончится. Есть кнопка СТОП.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
@@ -873,7 +873,15 @@
   }
 
   function normStatusName(value) {
-    return String(value == null ? '' : value).replace(/\s+/g, ' ').trim().toLowerCase();
+    return unifyApostrophes(value).replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  // Апострофы бывают разные: у одних статусов сайта «Recipient's», у
+  // других — «Recipient’s» (типографский, например у SMP). По смыслу это
+  // один и тот же статус, поэтому при сравнении все виды апострофа и
+  // одиночной кавычки считаются одним (с 0.36).
+  function unifyApostrophes(value) {
+    return String(value == null ? '' : value).replace(/[\u2018\u2019\u201A\u201B\u02BC\u02B9\u0060\u00B4\u2032]/g, "'");
   }
 
   // Названия статусов справочника без повторов, по алфавиту
@@ -1808,7 +1816,7 @@
   // тикета. Потери точности тут нет: два статуса с одинаковым текстом и
   // разными кодами по этой колонке всё равно не различить.
   function normalizeExternalStatus(value) {
-    return String(value == null ? '' : value)
+    return unifyApostrophes(value)
       .toLowerCase()
       .replace(/\s+/g, ' ')
       .trim()

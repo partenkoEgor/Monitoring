@@ -1160,6 +1160,27 @@ const scenarios = {
     check('отчёт: подставлено 2, сохранение суммы проверено', /из них с подставленной суммой: 2/.test(text) &&
       !/НЕ сохранилась/.test(text) && /Успешно: 3/.test(text), text.slice(0, 900));
   },
+
+  async 34() {
+    console.log('\n[34] Апостроф «’» вместо «\'» в статусе — тот же статус (0.36)');
+    if (!IS_BETA) return console.log('  — только бета');
+    const { tickets, ids } = makeTickets(2);
+    Object.assign(tickets[ids[0]], { externalStatus: 'Recipient’s details are not correct', txStatus: 'rejected', txId: '71' });      // SMP
+    Object.assign(tickets[ids[1]], { externalStatus: '191 Recipient’s details are not correct (M)', txStatus: 'rejected', txId: '72' }); // BT M
+    const page = createPage({
+      tickets, onScreen: ['19999999', ...ids],
+      behaviour: { optionsFor: (id) => (id === ids[0] ? ['70 Response to user'] : ['239 Response to user (M)']) },
+    });
+    [...page.d.querySelectorAll('button')].find((b) => b.textContent === 'BETA Bulk Response (239)').click();
+    const end = Date.now() + 30000;
+    let report;
+    while (!(report = page.d.querySelector(`.${page.prefix}-report-overlay`)) && Date.now() < end) {
+      await new Promise((res) => setTimeout(res, 20));
+    }
+    const saveOf = (id) => page.site.saves.find((x) => x.requestId === id);
+    check('SMP «Recipient’s …» взят, статус 331', saveOf(ids[0]) && String(saveOf(ids[0]).externalStatusId) === '331', JSON.stringify(page.site.saves));
+    check('BT M «191 Recipient’s … (M)» взят, статус 219', saveOf(ids[1]) && String(saveOf(ids[1]).externalStatusId) === '219', JSON.stringify(page.site.saves));
+  },
 };
 
 const ONLY = process.env.ONLY ? new Set(process.env.ONLY.split(',').map((x) => x.trim())) : null;
