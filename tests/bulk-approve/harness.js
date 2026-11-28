@@ -75,11 +75,13 @@ const COLUMNS = [
 const STATUS_OPTIONS = [
   '225 Approved by agent', '239 Response to user (M)', '238 Revision needed (M)',
   '55 Sent for processing', '209 Sent for processing (M)', 'Approved (M)',
+  '70 Response to user', '84 Response to user (limit)',
 ];
 // id статусов в запросе сохранения — как в GetRequestStatusesExternal сайта
 const STATUS_IDS = {
   '225 Approved by agent': 212, '239 Response to user (M)': 219, '238 Revision needed (M)': 218,
   '55 Sent for processing': 317, '209 Sent for processing (M)': 204, 'Approved (M)': 300,
+  '70 Response to user': 331, '84 Response to user (limit)': 366,
 };
 
 const pad = (n) => String(n).padStart(2, '0');
