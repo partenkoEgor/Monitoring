@@ -114,6 +114,8 @@ function processingDate(hoursAgo) {
 //       GetRequestStatusesExternal и получает справочник статусов
 //     optionsFor(id): какие статусы окно Edit предлагает этому тикету
 //       (по умолчанию — все STATUS_OPTIONS)
+//     amountLabelFor(id): подпись поля суммы в окне Edit этого тикета
+//       (по умолчанию «Amount by receipt»)
 //     modalFillDelay: мс — окно Edit заполняет поле Transaction ID уже
 //       сохранённого номера не сразу, а с задержкой (медленный сайт)
 function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, behaviour = {}, configOverrides, also = [] } = {}) {
@@ -295,9 +297,9 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
         Actions: '<a href="#">Edit</a>',
         'External Status': t.externalStatus,
         'Ticket ID': id,
-        Amount: '100',
+        Amount: t.amount == null ? '100' : t.amount,
         'Transaction ID': site.behaviour.hideTxInTable ? '' : t.txId || '',
-        'Transaction Amount': '100',
+        'Transaction Amount': t.txAmount == null ? '100' : t.txAmount,
         'Transaction Status': t.txStatus || '',
         'Processing Date': processingDate(t.hoursAgo == null ? 2 : t.hoursAgo),
         'Ticket type': t.ticketType || 'BT M',
@@ -340,6 +342,8 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
       <div class="modal_content">
         <div class="title">Change ticket no.${id}</div>
         <div class="form-add">
+          <div class="input-group"><span class="title">${(site.behaviour.amountLabelFor && site.behaviour.amountLabelFor(id)) || 'Amount by receipt'}</span>
+            <input type="text" class="amount-receipt" value="${t.receiptAmount || ''}"></div>
           <div class="input-group"><span class="title">Transaction ID</span>
             <input type="text" class="tx-id" value="${t.txId || ''}"></div>
           <div class="input-group"><span class="title">Status</span>
@@ -429,6 +433,7 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
         transactionId: tx,
         initialTransactionId: t.txId || '',
         commentSupport: commentArea.value,
+        amount: wrap.querySelector('.amount-receipt').value,
       };
       if (site.behaviour.saveTamper) site.behaviour.saveTamper(id, fields);
       const fd = new w.FormData();
@@ -449,6 +454,8 @@ function createPage({ which = process.env.TARGET || 'beta', tickets, onScreen, b
         site.applied.push({ ticketId: id, status: chosen, transactionId: tx });
         t.externalStatus = chosen || t.externalStatus;
         t.insideComment = fields.commentSupport;
+        // Сумма по чеку, если её вписали, — она же в колонке Amount
+        if (fields.amount !== '') { t.receiptAmount = fields.amount; t.amount = fields.amount; }
         if (!(site.behaviour.dropsTransactionId && site.behaviour.dropsTransactionId(id))) t.txId = tx;
         afterSave();
       };
